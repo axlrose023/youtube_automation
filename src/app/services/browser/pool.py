@@ -4,7 +4,7 @@ import math
 
 from playwright.async_api import Browser, Playwright, async_playwright
 
-from app.settings import PlaywrightConfig, get_config
+from app.settings import PlaywrightConfig
 
 logger = logging.getLogger(__name__)
 
@@ -12,14 +12,14 @@ logger = logging.getLogger(__name__)
 class BrowserPool:
     def __init__(
         self,
-        headless: bool | None = None,
-        config: PlaywrightConfig | None = None,
+        headless: bool,
+        args: list[str],
+        config: PlaywrightConfig,
     ) -> None:
-        cfg = config or get_config().playwright
-        self._headless = headless if headless is not None else cfg.headless
-        self._max_browsers = cfg.max_browsers
-        self._contexts_per_browser = cfg.contexts_per_browser
-        self._browser_args = cfg.browser_args
+        self._headless = headless
+        self._args = args
+        self._max_browsers = config.max_browsers
+        self._contexts_per_browser = config.contexts_per_browser
         self._playwright: Playwright | None = None
         self._browsers: list[Browser] = []
         self._queues: list[asyncio.LifoQueue] = []
@@ -30,8 +30,7 @@ class BrowserPool:
             self._playwright = await async_playwright().start()
             await self._scale(1)
             logger.debug(
-                "Browser pool started headless=%s browsers=%s max=%s slots_per=%s",
-                self._headless,
+                "Browser pool started browsers=%s max=%s slots_per=%s",
                 self.browser_count,
                 self._max_browsers,
                 self._contexts_per_browser,
@@ -46,19 +45,14 @@ class BrowserPool:
 
     async def _scale(self, target: int) -> None:
         if not self._playwright:
-            logger.warning("Playwright not initialized, auto-initializing...")
             self._playwright = await async_playwright().start()
 
         target = min(target, self._max_browsers)
 
         async with self._lock:
-            logger.debug(
-                "Scaling browsers current=%d target=%d", len(self._browsers), target
-            )
-
             while len(self._browsers) < target:
                 browser = await self._playwright.chromium.launch(
-                    headless=self._headless, args=self._browser_args
+                    headless=self._headless, args=self._args
                 )
                 self._browsers.append(browser)
 
@@ -70,7 +64,8 @@ class BrowserPool:
                 await asyncio.sleep(0.5)
 
             while len(self._browsers) > target:
-                await self._browsers.pop().close()
+                browser = self._browsers.pop()
+                await browser.close()
                 self._queues.pop()
 
     async def scale_for_tasks(self, count: int) -> None:
@@ -82,6 +77,10 @@ class BrowserPool:
 
     def get_browser(self, index: int) -> tuple[Browser, asyncio.LifoQueue]:
         idx = index % len(self._browsers)
+        return self._browsers[idx], self._queues[idx]
+
+    def get_browser_by_instance(self, browser: Browser) -> tuple[Browser, asyncio.LifoQueue]:
+        idx = self._browsers.index(browser)
         return self._browsers[idx], self._queues[idx]
 
     @property
