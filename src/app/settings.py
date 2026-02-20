@@ -34,6 +34,11 @@ class UserAgentConfig(BaseModel):
     )
 
 
+class AdsPowerConfig(BaseModel):
+    base_url: str = "http://local.adspower.net:50325"
+    user_id: str = "k19s5uo7"
+
+
 class PostgresConfig(BaseModel):
     user: str = "postgres"
     password: str = "postgres"
@@ -85,6 +90,7 @@ class Config(BaseSettings):
     )
 
     env: Literal["local", "dev", "prod"] = "local"
+    browser_backend: Literal["chromium", "adspower"] = "adspower"
 
     api: APIConfig = APIConfig()
     jwt: JwtConfig = JwtConfig()
@@ -95,6 +101,7 @@ class Config(BaseSettings):
     playwright: PlaywrightConfig = PlaywrightConfig()
     viewport: ViewportConfig = ViewportConfig()
     useragent: UserAgentConfig = UserAgentConfig()
+    adspower: AdsPowerConfig = AdsPowerConfig()
 
     paths: PathsConfig = PathsConfig()
 

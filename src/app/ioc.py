@@ -12,11 +12,16 @@ from app.database.uow import UnitOfWork
 from app.settings import Config, get_config
 
 try:
-    from app.services.browser import BrowserPool, ContextFactory, UserAgentProvider
+    from app.services.browser import (
+        AdsPowerSessionProvider,
+        BrowserSessionProvider,
+        ChromiumSessionProvider,
+        UserAgentProvider,
+    )
+
+    _BROWSER_AVAILABLE = True
 except ModuleNotFoundError:
-    _BROWSER_PROVIDER_ENABLED = False
-else:
-    _BROWSER_PROVIDER_ENABLED = True
+    _BROWSER_AVAILABLE = False
 
 
 class AppProvider(Provider):
@@ -53,26 +58,23 @@ class ServicesProvider(Provider):
         return UserService(uow, auth_service)
 
 
-if _BROWSER_PROVIDER_ENABLED:
-    class BrowserProvider(Provider):
+if _BROWSER_AVAILABLE:
+    class BrowserDIProvider(Provider):
         @provide(scope=Scope.APP)
-        def get_user_agent_provider(self, config: Config) -> UserAgentProvider:
-            return UserAgentProvider(config.useragent)
-
-        @provide(scope=Scope.APP)
-        def get_context_factory(
-            self,
-            user_agent_provider: UserAgentProvider,
-            config: Config,
-        ) -> ContextFactory:
-            return ContextFactory(user_agent_provider, config.viewport)
-
-        @provide(scope=Scope.APP)
-        async def get_browser_pool(self, config: Config) -> AsyncIterator[BrowserPool]:
-            pool = BrowserPool(config=config.playwright)
-            await pool.start()
-            yield pool
-            await pool.stop()
+        async def get_browser_session_provider(
+            self, config: Config
+        ) -> AsyncIterator[BrowserSessionProvider]:
+            if config.browser_backend == "adspower":
+                provider = AdsPowerSessionProvider(config=config.adspower)
+            else:
+                provider = ChromiumSessionProvider(
+                    playwright_config=config.playwright,
+                    viewport_config=config.viewport,
+                    user_agent_provider=UserAgentProvider(config.useragent),
+                )
+            await provider.start()
+            yield provider
+            await provider.stop()
 
 
 def get_async_container() -> AsyncContainer:
@@ -81,6 +83,6 @@ def get_async_container() -> AsyncContainer:
         ServicesProvider(),
         HttpClientsProvider(),
     ]
-    if _BROWSER_PROVIDER_ENABLED:
-        providers.append(BrowserProvider())
+    if _BROWSER_AVAILABLE:
+        providers.append(BrowserDIProvider())
     return make_async_container(*providers)
