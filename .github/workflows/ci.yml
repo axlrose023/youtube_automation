@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, stage, main]
+  pull_request:
+    branches: [dev, stage, main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+
+    - name: Install UV
+      uses: astral-sh/setup-uv@v2
+
+    - name: Install dependencies
+      run: uv sync --dev
+
+    - name: Run tests with coverage
+      run: |
+        uv run pytest src/tests/ -n auto --cov=src/app --cov-report=html --cov-report=term
+
+    - name: Extract coverage percentage
+      id: coverage
+      run: |
+        COVERAGE=$(uv run coverage report --show-missing | grep TOTAL | awk '{print $NF}' | sed 's/%//')
+        echo "COVERAGE_PERCENT=$COVERAGE" >> $GITHUB_ENV
+
+    - name: Comment coverage on PR
+      if: github.event_name == 'pull_request'
+      uses: peter-evans/create-or-update-comment@v4
+      with:
+        issue-number: ${{ github.event.pull_request.number }}
+        body: |
+          ### Code Coverage Report
+          **Coverage**: ${{ env.COVERAGE_PERCENT }}%
+          The test suite covered ${{ env.COVERAGE_PERCENT }}% of the `app` directory.
+          📊 Check the detailed [coverage report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) in the workflow artifacts.
+
+    - name: Upload coverage HTML report
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-html
+        path: htmlcov/
