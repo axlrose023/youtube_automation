@@ -12,6 +12,7 @@ from app.database.uow import UnitOfWork
 from app.settings import Config, get_config
 
 try:
+    from app.api.modules.browser.service import BrowserService
     from app.services.browser import (
         AdsPowerSessionProvider,
         BrowserSessionProvider,
@@ -59,6 +60,7 @@ class ServicesProvider(Provider):
 
 
 if _BROWSER_AVAILABLE:
+
     class BrowserDIProvider(Provider):
         @provide(scope=Scope.APP)
         async def get_browser_session_provider(
@@ -75,6 +77,12 @@ if _BROWSER_AVAILABLE:
             await provider.start()
             yield provider
             await provider.stop()
+
+        @provide(scope=Scope.REQUEST)
+        def get_browser_service(
+            self, session_provider: BrowserSessionProvider
+        ) -> BrowserService:
+            return BrowserService(session_provider)
 
 
 def get_async_container() -> AsyncContainer:
