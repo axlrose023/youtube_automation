@@ -8,7 +8,7 @@ from yarl import URL
 
 
 class PlaywrightConfig(BaseModel):
-    headless: bool = True
+    headless: bool = False
     max_browsers: int = 2
     contexts_per_browser: int = 5
     browser_args: list[str] = [

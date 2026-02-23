@@ -64,7 +64,6 @@ services:
       - APP__ENV=dev
       - APP__POSTGRES__HOST=db
       - APP__REDIS__HOST=cache
-      - APP__PLAYWRIGHT__HEADLESS=false
       - DISPLAY=:99
     ports:
       - "5901:5900"
