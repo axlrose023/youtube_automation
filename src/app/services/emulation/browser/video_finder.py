@@ -32,6 +32,23 @@ class VideoFinder:
             preferred_topic=preferred_topic,
             allow_shorts=allow_shorts,
         )
+        if (
+            not video_element
+            and require_topic_match
+            and preferred_topic
+        ):
+            logger.info(
+                "Session %s: no candidate for preferred topic '%s', retrying with any input topic",
+                self._state.session_id,
+                preferred_topic,
+            )
+            video_element = await self._find_clickable(
+                selectors,
+                limit,
+                require_topic_match=True,
+                preferred_topic=None,
+                allow_shorts=allow_shorts,
+            )
         if not video_element:
             return False
         return await self._click_element(video_element)
@@ -63,12 +80,17 @@ class VideoFinder:
                 clickable_elements: list[ElementHandle] = []
                 elements_with_video_href = 0
                 topic_matched_elements = 0
+                seen_filtered_elements = 0
                 for candidate_element in candidate_elements[:limit * 6]:
                     try:
                         href = await candidate_element.get_attribute("href")
                         if not self._is_video_href(href):
                             continue
                         if not allow_shorts and "/shorts/" in (href or ""):
+                            continue
+                        candidate_url = self._to_absolute_url(href)
+                        if self._state.is_seen_video(candidate_url):
+                            seen_filtered_elements += 1
                             continue
                         elements_with_video_href += 1
 
@@ -100,6 +122,13 @@ class VideoFinder:
                     topic_matched_elements,
                     len(clickable_elements),
                 )
+                if seen_filtered_elements:
+                    logger.info(
+                        "Session %s: selector '%s' -> skipped_seen=%d",
+                        self._state.session_id,
+                        selector,
+                        seen_filtered_elements,
+                    )
                 if clickable_elements:
                     return random.choice(clickable_elements)
 
@@ -107,8 +136,16 @@ class VideoFinder:
 
     async def _click_element(self, video_element: ElementHandle) -> bool:
         url_before = self._page.url
+        previous_video_id = self._state.video_id_from_url(url_before)
         href = await video_element.get_attribute("href")
         title = await self._extract_element_title(video_element)
+        fallback_url = ""
+        target_video_id = None
+        if href:
+            fallback_url = href if href.startswith("http") else f"https://www.youtube.com{href}"
+            target_video_id = self._state.video_id_from_url(fallback_url)
+        self._state.last_clicked_video_title = title
+        self._state.last_clicked_video_url = fallback_url or self._page.url
         logger.info(
             "Session %s: clicking video (href=%s, title=%s)",
             self._state.session_id,
@@ -125,23 +162,49 @@ class VideoFinder:
 
         await self._h.delay(0.5, 1.0)
 
-        if "/watch" in self._page.url:
+        current_url = self._page.url
+        current_video_id = self._state.video_id_from_url(current_url)
+
+        if (
+            "/watch" in current_url
+            and target_video_id
+            and current_video_id == target_video_id
+        ):
             self._state.on_video_page = True
+            self._state.last_clicked_video_url = current_url
+            self._state.mark_video_seen(current_url)
             return True
 
-        if href and self._page.url == url_before:
-            logger.info("Session %s: click missed, navigating to %s", self._state.session_id, href)
-            full = href if href.startswith("http") else f"https://www.youtube.com{href}"
+        click_missed = bool(href) and (
+            current_url == url_before
+            or (
+                previous_video_id is not None
+                and current_video_id is not None
+                and current_video_id == previous_video_id
+            )
+        )
+        if click_missed:
+            logger.info(
+                "Session %s: click missed, navigating to %s",
+                self._state.session_id,
+                href,
+            )
+            full = fallback_url
             try:
                 await self._page.goto(full, wait_until="domcontentloaded", timeout=10_000)
                 await self._h.delay(0.5, 1.0)
                 self._state.on_video_page = True
+                self._state.last_clicked_video_url = self._page.url
+                self._state.mark_video_seen(self._page.url or full)
                 return True
             except Exception:
                 logger.warning("Session %s: fallback navigation failed", self._state.session_id)
                 return False
 
-        self._state.on_video_page = "/watch" in self._page.url
+        self._state.on_video_page = "/watch" in current_url
+        if self._state.on_video_page:
+            self._state.last_clicked_video_url = current_url
+            self._state.mark_video_seen(current_url)
         return self._state.on_video_page
 
     async def _extract_element_title(self, video_element: ElementHandle) -> str | None:
@@ -202,6 +265,14 @@ class VideoFinder:
         if not href:
             return False
         return "/watch" in href or "/shorts/" in href
+
+    @staticmethod
+    def _to_absolute_url(href: str | None) -> str:
+        if not href:
+            return ""
+        if href.startswith("http"):
+            return href
+        return f"https://www.youtube.com{href}"
 
     def _candidate_matches_topic(self, title: str | None, preferred_topic: str | None) -> bool:
         if preferred_topic:

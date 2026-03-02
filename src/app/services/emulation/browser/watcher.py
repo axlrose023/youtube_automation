@@ -1,5 +1,6 @@
 import logging
 import random
+from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import Page
 
@@ -37,7 +38,7 @@ class VideoWatcher:
             return
 
         self._state.no_video_streak = 0
-        await self._log_opened_video("watch_long")
+        video_title, video_url = await self._log_opened_video("watch_long")
         await self._ads.handle(patient=True)
         await self._playback.ensure_playing(self._state.session_id)
 
@@ -53,7 +54,15 @@ class VideoWatcher:
             return
 
         logger.info("Session %s: watch_long — watching for %.0fs", self._state.session_id, watch_s)
-        await self._watch_for(watch_s, mode_a=True, source_action="watch_long")
+        watched_seconds = await self._watch_for(watch_s, mode_a=True, source_action="watch_long")
+        self._state.add_watched_video(
+            action="watch_long",
+            title=video_title,
+            url=video_url,
+            watched_seconds=watched_seconds,
+            target_seconds=watch_s,
+            completed=True,
+        )
         self._state.videos_watched += 1
         self._state.on_video_page = True
         logger.info("Session %s: watch_long done (total watched: %d)", self._state.session_id, self._state.videos_watched)
@@ -64,7 +73,7 @@ class VideoWatcher:
             return
 
         self._state.no_video_streak = 0
-        await self._log_opened_video("watch_focused")
+        video_title, video_url = await self._log_opened_video("watch_focused")
         await self._ads.handle(patient=False)
         await self._playback.ensure_playing(self._state.session_id)
 
@@ -72,10 +81,18 @@ class VideoWatcher:
         if first_eval <= 0:
             return
         logger.info("Session %s: watch_focused — first eval %.0fs", self._state.session_id, first_eval)
-        await self._watch_for(first_eval, mode_a=False, source_action="watch_focused_eval")
+        first_eval_watched = await self._watch_for(first_eval, mode_a=False, source_action="watch_focused_eval")
 
         if random.random() < 0.25 and self._state.remaining_seconds() > 90:
             logger.info("Session %s: watch_focused — quick exit after eval", self._state.session_id)
+            self._state.add_watched_video(
+                action="watch_focused",
+                title=video_title,
+                url=video_url,
+                watched_seconds=first_eval_watched,
+                target_seconds=first_eval,
+                completed=False,
+            )
             self._state.surf_streak += 1
             self._state.on_video_page = True
             return
@@ -99,7 +116,15 @@ class VideoWatcher:
             return
 
         logger.info("Session %s: watch_focused — watching for %.0fs", self._state.session_id, watch_s)
-        await self._watch_for(watch_s, mode_a=False, source_action="watch_focused")
+        watched_main = await self._watch_for(watch_s, mode_a=False, source_action="watch_focused")
+        self._state.add_watched_video(
+            action="watch_focused",
+            title=video_title,
+            url=video_url,
+            watched_seconds=first_eval_watched + watched_main,
+            target_seconds=first_eval + watch_s,
+            completed=True,
+        )
         self._state.videos_watched += 1
         self._state.on_video_page = True
 
@@ -112,14 +137,22 @@ class VideoWatcher:
             return
 
         self._state.no_video_streak = 0
-        await self._log_opened_video("surf_video")
+        video_title, video_url = await self._log_opened_video("surf_video")
         await self._ads.handle(patient=False)
         await self._playback.ensure_playing(self._state.session_id)
         watch_s = self._cap_to_remaining(random.uniform(10, 40))
         if watch_s <= 0:
             return
         logger.info("Session %s: surf_video — watching for %.0fs", self._state.session_id, watch_s)
-        await self._watch_for(watch_s, mode_a=False, source_action="surf_video")
+        watched_seconds = await self._watch_for(watch_s, mode_a=False, source_action="surf_video")
+        self._state.add_watched_video(
+            action="surf_video",
+            title=video_title,
+            url=video_url,
+            watched_seconds=watched_seconds,
+            target_seconds=watch_s,
+            completed=False,
+        )
 
         self._state.surf_streak += 1
         self._state.on_video_page = True
@@ -133,7 +166,7 @@ class VideoWatcher:
             return
 
         self._state.no_video_streak = 0
-        await self._log_opened_video("click_recommended")
+        video_title, video_url = await self._log_opened_video("click_recommended")
         is_mode_a = self._state.mode == Mode.A
         await self._ads.handle(patient=is_mode_a)
         await self._playback.ensure_playing(self._state.session_id)
@@ -148,7 +181,15 @@ class VideoWatcher:
         if watch_s <= 0:
             return
         logger.info("Session %s: click_recommended — watching for %.0fs", self._state.session_id, watch_s)
-        await self._watch_for(watch_s, mode_a=is_mode_a, source_action="click_recommended")
+        watched_seconds = await self._watch_for(watch_s, mode_a=is_mode_a, source_action="click_recommended")
+        self._state.add_watched_video(
+            action="click_recommended",
+            title=video_title,
+            url=video_url,
+            watched_seconds=watched_seconds,
+            target_seconds=watch_s,
+            completed=True,
+        )
         self._state.videos_watched += 1
         logger.info("Session %s: click_recommended done (total watched: %d)", self._state.session_id, self._state.videos_watched)
 
@@ -182,17 +223,44 @@ class VideoWatcher:
 
     # ── watching loop ───────────────────────────────────────────────
 
-    async def _log_opened_video(self, action: str) -> None:
-        video_title = await self._playback.get_title()
+    async def _log_opened_video(self, action: str) -> tuple[str | None, str]:
+        opened_url = self._page.url or self._state.last_clicked_video_url or ""
+        dom_title = await self._playback.get_title()
+        clicked_title = self._state.last_clicked_video_title
+
+        # Prefer the clicked card title for the same watch-id to avoid stale DOM title races.
+        video_title = dom_title
+        if clicked_title and self._same_video(opened_url, self._state.last_clicked_video_url or ""):
+            video_title = clicked_title
+        if not video_title or video_title.strip().lower() == "youtube":
+            video_title = clicked_title
+
         logger.info(
             "Session %s: %s — opened %s (title=%s)",
             self._state.session_id,
             action,
-            self._page.url,
+            opened_url,
             video_title or "<unknown>",
         )
+        return video_title, opened_url
 
-    async def _watch_for(self, seconds: float, *, mode_a: bool, source_action: str) -> None:
+    def _same_video(self, left_url: str, right_url: str) -> bool:
+        left_id = self._watch_id_from_url(left_url)
+        right_id = self._watch_id_from_url(right_url)
+        return bool(left_id and right_id and left_id == right_id)
+
+    @staticmethod
+    def _watch_id_from_url(raw_url: str) -> str | None:
+        if not raw_url:
+            return None
+        try:
+            parsed = urlparse(raw_url)
+            video_id = parse_qs(parsed.query).get("v", [None])[0]
+            return video_id or None
+        except Exception:
+            return None
+
+    async def _watch_for(self, seconds: float, *, mode_a: bool, source_action: str) -> float:
         elapsed = 0.0
         chunks = 0
         micro_scrolls = 0
@@ -272,6 +340,7 @@ class VideoWatcher:
             ad_checks,
             ad_skip_attempts,
         )
+        return elapsed
 
     # ── duration decision ───────────────────────────────────────────
 

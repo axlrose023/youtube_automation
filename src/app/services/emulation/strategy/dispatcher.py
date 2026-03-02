@@ -77,6 +77,7 @@ class ActionDispatcher:
                 self._state.no_video_streak,
                 self._state.surf_streak,
             )
+            self._update_anchor_streak(action, videos_delta)
         except asyncio.TimeoutError:
             self._state.consecutive_fails += 1
             await self._cancel_task(action_task)
@@ -112,6 +113,42 @@ class ActionDispatcher:
         if action in _WATCH_ACTIONS:
             return max(remaining + 20.0, 20.0)
         return min(max(remaining, 5.0), 45.0)
+
+    def _update_anchor_streak(self, action: str, videos_delta: int) -> None:
+        if action in ("search", "refine_search"):
+            self._state.offtopic_or_reco_streak = 0
+            return
+
+        if videos_delta <= 0:
+            return
+
+        if action == "click_recommended":
+            self._state.offtopic_or_reco_streak += 1
+            logger.info(
+                "Session %s: anchor streak +1 (reason=recommendation, streak=%d)",
+                self._state.session_id,
+                self._state.offtopic_or_reco_streak,
+            )
+            return
+
+        if action not in {"watch_long", "watch_focused", "surf_video"}:
+            return
+
+        if self._state.last_watch_on_topic is False:
+            self._state.offtopic_or_reco_streak += 1
+            logger.info(
+                "Session %s: anchor streak +1 (reason=off-topic-watch, streak=%d)",
+                self._state.session_id,
+                self._state.offtopic_or_reco_streak,
+            )
+            return
+
+        if self._state.offtopic_or_reco_streak:
+            logger.info(
+                "Session %s: anchor streak reset after on-topic watch",
+                self._state.session_id,
+            )
+        self._state.offtopic_or_reco_streak = 0
 
     @staticmethod
     async def _cancel_task(action_task: asyncio.Task[None]) -> None:

@@ -30,6 +30,9 @@ class EmulationSessionStore:
             "topics": topics,
             "topics_searched": [],
             "videos_watched": 0,
+            "watched_videos_count": 0,
+            "watched_videos": [],
+            "total_duration_seconds": 0,
             "bytes_downloaded": 0,
             "error": None,
         }
@@ -62,5 +65,6 @@ class EmulationSessionStore:
             fatigue=round(state.fatigue, 2),
             topics_searched=state.searched_topics,
             videos_watched=state.videos_watched,
+            watched_videos_count=len(state.watched_videos),
             bytes_downloaded=bytes_downloaded,
         )

@@ -53,14 +53,36 @@ class PlaybackController:
             await self._h.delay(0.1, 0.3)
 
     async def get_duration(self) -> float | None:
-        try:
-            duration = await self._page.evaluate(
-                "(() => { const v = document.querySelector('video'); "
-                "return v && v.duration && isFinite(v.duration) ? v.duration : null })()"
-            )
-            return float(duration) if duration else None
-        except Exception:
-            return None
+        # Duration can briefly point to ad media. Prefer canonical YouTube metadata first,
+        # then use <video>.duration only when ad overlay is not active.
+        for _ in range(5):
+            try:
+                payload = await self._page.evaluate(
+                    "(() => {"
+                    "  const adShowing = !!document.querySelector('.ad-showing');"
+                    "  const details = window.ytInitialPlayerResponse?.videoDetails;"
+                    "  const responseDuration = details?.lengthSeconds ? Number(details.lengthSeconds) : null;"
+                    "  const video = document.querySelector('video');"
+                    "  const mediaDuration = video && Number.isFinite(video.duration) ? Number(video.duration) : null;"
+                    "  return { adShowing, responseDuration, mediaDuration };"
+                    "})()"
+                )
+            except Exception:
+                payload = None
+
+            if payload:
+                response_duration = payload.get("responseDuration")
+                if isinstance(response_duration, (int, float)) and response_duration > 0:
+                    return float(response_duration)
+
+                ad_showing = bool(payload.get("adShowing"))
+                media_duration = payload.get("mediaDuration")
+                if (not ad_showing) and isinstance(media_duration, (int, float)) and media_duration > 0:
+                    return float(media_duration)
+
+            await self._h.delay(0.4, 0.9)
+
+        return None
 
     async def get_title(self) -> str | None:
         try:

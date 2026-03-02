@@ -44,6 +44,9 @@ async def emulation_task(
             bytes_downloaded=result.bytes_downloaded,
             topics_searched=result.topics_searched,
             videos_watched=result.videos_watched,
+            watched_videos_count=len(result.watched_videos),
+            watched_videos=result.watched_videos,
+            total_duration_seconds=result.total_duration_seconds,
         )
         logger.info("Session %s completed: %s", session_id, result)
         return {"status": "completed", "session_id": session_id}

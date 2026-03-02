@@ -20,6 +20,10 @@ VIDEO_SELECTORS = [
     "ytd-rich-item-renderer h3 a",
 ]
 RECOMMENDED_SELECTORS = [
+    "#secondary #items yt-lockup-view-model a.yt-lockup-metadata-view-model__title",
+    "ytd-watch-next-secondary-results-renderer #items yt-lockup-view-model a.yt-lockup-metadata-view-model__title",
+    "#secondary #items yt-lockup-view-model a.yt-lockup-view-model__content-image",
+    "ytd-watch-next-secondary-results-renderer #items yt-lockup-view-model a.yt-lockup-view-model__content-image",
     "ytd-watch-next-secondary-results-renderer a#video-title",
     "ytd-watch-next-secondary-results-renderer a#thumbnail",
     "#secondary #contents ytd-compact-video-renderer a#video-title",

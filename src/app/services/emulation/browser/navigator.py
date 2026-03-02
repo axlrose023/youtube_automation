@@ -112,56 +112,33 @@ class Navigator:
             preferred_topic=self._state.current_topic if on_watch_page else None,
             allow_shorts=False,
         )
-        if clicked or not on_watch_page:
-            return clicked
-
-        # On watch pages, allow occasional broader recommendation exploration.
-        if self._state.topics and random.random() < 0.25:
-            logger.info(
-                "Session %s: no topical candidate, trying broader recommendation",
-                self._state.session_id,
-            )
-            exploratory_click = await self._finder.find_and_click(
-                RECOMMENDED_SELECTORS,
-                limit=6,
-                require_topic_match=False,
-                preferred_topic=None,
-                allow_shorts=True,
-            )
-            if exploratory_click:
-                self._state.topic_drifted = True
-            return exploratory_click
-
-        return False
+        return clicked
 
     async def click_recommended(self) -> bool:
-        prefer_topical = bool(self._state.topics) and random.random() >= 0.20
+        topical_click = await self._finder.find_and_click(
+            RECOMMENDED_SELECTORS,
+            limit=10,
+            require_topic_match=bool(self._state.topics),
+            preferred_topic=self._state.current_topic,
+            allow_shorts=False,
+        )
+        if topical_click:
+            return True
 
-        if prefer_topical:
-            topical_click = await self._finder.find_and_click(
-                RECOMMENDED_SELECTORS,
-                limit=10,
-                require_topic_match=True,
-                preferred_topic=self._state.current_topic,
-                allow_shorts=False,
-            )
-            if topical_click:
-                return True
+        if not self._state.topics:
+            return False
 
-        exploratory_click = await self._finder.find_and_click(
+        logger.info(
+            "Session %s: no recommendation for current topic, retry with any input topic",
+            self._state.session_id,
+        )
+        return await self._finder.find_and_click(
             RECOMMENDED_SELECTORS,
             limit=8,
-            require_topic_match=False,
+            require_topic_match=True,
             preferred_topic=None,
-            allow_shorts=True,
+            allow_shorts=False,
         )
-        if exploratory_click and self._state.topics:
-            self._state.topic_drifted = True
-            logger.info(
-                "Session %s: exploratory recommendation click, will re-anchor on next search",
-                self._state.session_id,
-            )
-        return exploratory_click
 
     async def recover_from_no_video(self) -> None:
         url = self._page.url

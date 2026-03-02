@@ -1,5 +1,6 @@
 import logging
 import random
+import time
 
 from playwright.async_api import Page
 
@@ -51,8 +52,13 @@ class YouTubeEmulator:
         result = await self.build_result()
         session_id = self.session_state.session_id
         logger.info(
-            "Session %s: DONE — videos=%d, topics=%s, bytes=%d",
-            session_id, result.videos_watched, result.topics_searched, result.bytes_downloaded,
+            "Session %s: DONE — videos=%d, topics=%s, bytes=%d, duration=%ds, tracked_videos=%d",
+            session_id,
+            result.videos_watched,
+            result.topics_searched,
+            result.bytes_downloaded,
+            result.total_duration_seconds,
+            len(result.watched_videos),
         )
         return result
 
@@ -158,8 +164,13 @@ class YouTubeEmulator:
 
     async def build_result(self) -> EmulationResult:
         final_bytes = await self.traffic_tracker.finalize()
+        total_duration_seconds = int(
+            max(time.monotonic() - self.session_state.started_at_monotonic, 0.0)
+        )
         return EmulationResult(
             topics_searched=self.session_state.searched_topics,
             videos_watched=self.session_state.videos_watched,
             bytes_downloaded=final_bytes,
+            total_duration_seconds=total_duration_seconds,
+            watched_videos=self.session_state.watched_videos,
         )

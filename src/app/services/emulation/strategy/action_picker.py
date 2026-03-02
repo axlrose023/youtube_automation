@@ -13,6 +13,7 @@ class ActionPicker:
         self._just_searched: bool = False
         self._actions_since_search = 0
         self._reanchor_limit = random.randint(3, 6)
+        self._offtopic_reanchor_limit = random.randint(1, 2)
 
     def pick(self) -> str:
         unsearched = self._state.unsearched_topics()
@@ -37,6 +38,15 @@ class ActionPicker:
             logger.info(
                 "Session %s: topic drift detected -> re-anchor search",
                 self._state.session_id,
+            )
+            return self._finalize("search")
+
+        if self._state.offtopic_or_reco_streak >= self._offtopic_reanchor_limit:
+            logger.info(
+                "Session %s: off-topic/recommendation streak %d >= %d -> search",
+                self._state.session_id,
+                self._state.offtopic_or_reco_streak,
+                self._offtopic_reanchor_limit,
             )
             return self._finalize("search")
 
@@ -145,7 +155,9 @@ class ActionPicker:
             self._just_searched = True
             self._actions_since_search = 0
             self._reanchor_limit = random.randint(3, 6)
+            self._offtopic_reanchor_limit = random.randint(1, 2)
             self._state.topic_drifted = False
+            self._state.offtopic_or_reco_streak = 0
         else:
             self._actions_since_search += 1
 
