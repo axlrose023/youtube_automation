@@ -14,6 +14,7 @@ services:
       - APP__ENV=dev
       - APP__POSTGRES__HOST=db
       - APP__REDIS__HOST=cache
+      - TASKIQ_EMULATION_QUEUE_NAME=${TASKIQ_EMULATION_QUEUE_NAME:-taskiq_emulation}
     healthcheck:
       test: [ "CMD-SHELL", "wget --no-verbose --tries=1 -O /dev/null http://localhost:${APP__API__PORT}/ping || exit 1" ]
       interval: 10s
@@ -65,6 +66,8 @@ services:
       - APP__POSTGRES__HOST=db
       - APP__REDIS__HOST=cache
       - DISPLAY=:99
+      - TASKIQ_EMULATION_QUEUE_NAME=${TASKIQ_EMULATION_QUEUE_NAME:-taskiq_emulation}
+      - TASKIQ_QUEUE_NAME=${TASKIQ_EMULATION_QUEUE_NAME:-taskiq_emulation}
     ports:
       - "5901:5900"
       - "6081:6080"
@@ -93,7 +96,7 @@ services:
     volumes:
       - db_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "${APP__POSTGRES__EXTERNAL_PORT:-55432}:5432"
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U ${APP__POSTGRES__USER}" ]
       interval: 5s

@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 
 from dishka import AsyncContainer, Provider, Scope, make_async_container, provide
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.modules.auth.service import AuthService
@@ -9,6 +10,7 @@ from app.api.modules.users.service import UserService
 from app.clients.providers import HttpClientsProvider
 from app.database.engine import SessionFactory
 from app.database.uow import UnitOfWork
+from app.services.emulation.core.session_store import EmulationSessionStore
 from app.settings import Config, get_config
 
 try:
@@ -85,11 +87,24 @@ if _BROWSER_AVAILABLE:
             return BrowserService(session_provider)
 
 
+class EmulationDIProvider(Provider):
+    @provide(scope=Scope.APP)
+    async def get_redis(self, config: Config) -> AsyncIterator[Redis]:
+        r = Redis.from_url(config.redis_url)
+        yield r
+        await r.aclose()
+
+    @provide(scope=Scope.APP)
+    def get_session_store(self, redis: Redis) -> EmulationSessionStore:
+        return EmulationSessionStore(redis)
+
+
 def get_async_container() -> AsyncContainer:
     providers: list[Provider] = [
         AppProvider(),
         ServicesProvider(),
         HttpClientsProvider(),
+        EmulationDIProvider(),
     ]
     if _BROWSER_AVAILABLE:
         providers.append(BrowserDIProvider())

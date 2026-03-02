@@ -8,3 +8,10 @@ try:
     __all__ += ["open_site_task"]
 except ModuleNotFoundError:
     pass
+
+try:
+    from .emulation import emulation_task
+
+    __all__ += ["emulation_task"]
+except ModuleNotFoundError:
+    pass
