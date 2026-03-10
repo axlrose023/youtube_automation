@@ -34,7 +34,7 @@ class AuthService:
         return self.jwt_service.create_token_pair(user)
 
     def hash_password(self, password: str) -> str:
-        """Hash a password."""
+
         return bcrypt.hashpw(
             password.encode("utf-8"), bcrypt.gensalt(rounds=12)
         ).decode("utf-8")

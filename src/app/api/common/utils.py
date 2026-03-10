@@ -6,7 +6,7 @@ from sqlalchemy import BinaryExpression
 from app.database.base import Base
 
 if TYPE_CHECKING:
-    from sqlalchemy import ColumnElement  # noqa
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -16,18 +16,14 @@ def build_filters(
     filters: dict[str, Any],
     delimiter: str = "__",
 ) -> list[BinaryExpression]:
-    """Build SQLAlchemy filter expressions from a dictionary of field names and values.
 
-    Supports:
-    is, is_not, in, not_in, search (ilike), eq, ne, lt, lte, gt, gte operations.
-    """
     expressions: list[BinaryExpression] = []
     for field_name, value in filters.items():
         logger.debug(f"Building filter for {field_name} with value {value}")
         op = field_name.split(delimiter)
         if len(op) == 2:
             field_name, operation = op
-            column = getattr(model, field_name, None)  # type: ColumnElement | None
+            column = getattr(model, field_name, None)
             if column is not None:
                 if operation == "is":
                     expressions.append(column.is_(value))

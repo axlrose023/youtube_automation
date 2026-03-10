@@ -16,14 +16,14 @@ metadata = MetaData(naming_convention=POSTGRES_INDEXES_NAMING_CONVENTION)
 
 
 class Base(DeclarativeBase, AsyncAttrs):
-    """Base class for all models."""
+
 
     __abstract__ = True
     metadata = metadata
 
 
 class UUID7IDMixin:
-    """Mixin for models with a UUID7 ID."""
+
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
@@ -34,7 +34,7 @@ class UUID7IDMixin:
 
 
 class DateTimeMixin:
-    """Mixin for models with created_at and updated_at timestamps."""
+
 
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True),

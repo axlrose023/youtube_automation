@@ -21,7 +21,7 @@ router = APIRouter()
 
 @router.get("/ping")
 async def ping() -> None | dict:
-    """Ping endpoint to check if the service is alive."""
+
     return {"message": "pong"}
 
 
@@ -33,7 +33,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def get_production_app() -> FastAPI:
-    """Get the FastAPI application instance."""
+
     app = FastAPI(
         title=config.api.title,
         version=config.api.version,
@@ -53,7 +53,7 @@ def get_production_app() -> FastAPI:
 
     setup_dishka(get_async_container(), app)
 
-    # Setup Prometheus metrics
+
     instrumentator = Instrumentator()
     instrumentator.instrument(app).expose(app)
 
