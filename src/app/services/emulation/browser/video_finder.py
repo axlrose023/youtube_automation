@@ -78,6 +78,7 @@ class VideoFinder:
                     candidate_elements = await self._page.query_selector_all(selector)
 
                 clickable_elements: list[ElementHandle] = []
+                href_only_elements: list[ElementHandle] = []
                 elements_with_video_href = 0
                 topic_matched_elements = 0
                 seen_filtered_elements = 0
@@ -100,27 +101,25 @@ class VideoFinder:
                                 continue
                             topic_matched_elements += 1
 
-                        try:
-                            await candidate_element.scroll_into_view_if_needed(timeout=1200)
-                        except Exception:
-                            pass
-
                         box = await candidate_element.bounding_box()
                         if box and box["width"] > 0 and box["height"] > 0:
                             clickable_elements.append(candidate_element)
                             if len(clickable_elements) >= limit:
                                 break
+                        else:
+                            href_only_elements.append(candidate_element)
                     except Exception:
                         continue
 
                 logger.info(
-                    "Session %s: selector '%s' -> %d total, %d href, %d topic_match, %d with bbox",
+                    "Session %s: selector '%s' -> %d total, %d href, %d topic_match, %d with bbox, %d href_only",
                     self._state.session_id,
                     selector,
                     len(candidate_elements),
                     elements_with_video_href,
                     topic_matched_elements,
                     len(clickable_elements),
+                    len(href_only_elements),
                 )
                 if seen_filtered_elements:
                     logger.info(
@@ -131,6 +130,13 @@ class VideoFinder:
                     )
                 if clickable_elements:
                     return random.choice(clickable_elements)
+                if href_only_elements:
+                    logger.info(
+                        "Session %s: selector '%s' -> falling back to href-only candidate",
+                        self._state.session_id,
+                        selector,
+                    )
+                    return random.choice(href_only_elements)
 
         return None
 
@@ -153,7 +159,19 @@ class VideoFinder:
             title or "<unknown>",
         )
 
-        await self._h.click(video_element)
+        try:
+            await self._h.click(video_element)
+        except Exception as exc:
+            if not fallback_url:
+                logger.warning("Session %s: click failed without fallback url: %s", self._state.session_id, exc)
+                return False
+            logger.info(
+                "Session %s: click failed (%s), navigating directly to %s",
+                self._state.session_id,
+                type(exc).__name__,
+                href,
+            )
+            return await self._navigate_to_fallback(fallback_url)
 
         try:
             await self._page.wait_for_load_state("domcontentloaded", timeout=5_000)
@@ -184,28 +202,81 @@ class VideoFinder:
             )
         )
         if click_missed:
+            retried = await self._retry_direct_click(video_element, target_video_id)
+            if retried:
+                return True
             logger.info(
                 "Session %s: click missed, navigating to %s",
                 self._state.session_id,
                 href,
             )
-            full = fallback_url
-            try:
-                await self._page.goto(full, wait_until="domcontentloaded", timeout=10_000)
-                await self._h.delay(0.5, 1.0)
-                self._state.on_video_page = True
-                self._state.last_clicked_video_url = self._page.url
-                self._state.mark_video_seen(self._page.url or full)
-                return True
-            except Exception:
-                logger.warning("Session %s: fallback navigation failed", self._state.session_id)
-                return False
+            return await self._navigate_to_fallback(fallback_url)
 
         self._state.on_video_page = "/watch" in current_url
         if self._state.on_video_page:
             self._state.last_clicked_video_url = current_url
             self._state.mark_video_seen(current_url)
         return self._state.on_video_page
+
+    async def _retry_direct_click(
+        self,
+        video_element: ElementHandle,
+        target_video_id: str | None,
+    ) -> bool:
+        try:
+            await video_element.scroll_into_view_if_needed(timeout=1_500)
+        except Exception:
+            pass
+
+        click_error = None
+        try:
+            await video_element.click(timeout=2_500, force=True)
+        except Exception as exc:
+            click_error = exc
+
+        if click_error is not None:
+            try:
+                await video_element.evaluate("(el) => el.click()")
+            except Exception:
+                logger.debug(
+                    "Session %s: direct click retry failed: %s",
+                    self._state.session_id,
+                    type(click_error).__name__,
+                )
+                return False
+
+        try:
+            await self._page.wait_for_load_state("domcontentloaded", timeout=4_000)
+        except PlaywrightTimeout:
+            pass
+
+        await self._h.delay(0.3, 0.7)
+        current_url = self._page.url
+        if "/watch" not in current_url:
+            return False
+        if target_video_id is not None:
+            current_video_id = self._state.video_id_from_url(current_url)
+            if current_video_id != target_video_id:
+                return False
+
+        self._state.on_video_page = True
+        self._state.last_clicked_video_url = current_url
+        self._state.mark_video_seen(current_url)
+        return True
+
+    async def _navigate_to_fallback(self, full_url: str) -> bool:
+        if not full_url:
+            return False
+        try:
+            await self._page.goto(full_url, wait_until="domcontentloaded", timeout=10_000)
+            await self._h.delay(0.5, 1.0)
+            self._state.on_video_page = True
+            self._state.last_clicked_video_url = self._page.url
+            self._state.mark_video_seen(self._page.url or full_url)
+            return True
+        except Exception:
+            logger.warning("Session %s: fallback navigation failed", self._state.session_id)
+            return False
 
     async def _extract_element_title(self, video_element: ElementHandle) -> str | None:
         try:

@@ -6,6 +6,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./src:/app/src
+      - ./artifacts:/app/artifacts
     ports:
       - "${APP__API__PORT}:${APP__API__PORT}"
     env_file:
@@ -59,6 +60,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./src:/app/src
+      - ./artifacts:/app/artifacts
     env_file:
       - .env
     environment:

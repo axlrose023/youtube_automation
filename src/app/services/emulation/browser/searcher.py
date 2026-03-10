@@ -5,11 +5,11 @@ from collections.abc import Awaitable, Callable
 from playwright.async_api import ElementHandle, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
+from ..core.config import SEARCH_MODIFIERS
 from ..core.selectors import (
     SEARCH_BUTTON,
     SEARCH_BUTTON_SELECTORS,
     SEARCH_INPUT_SELECTORS,
-    SEARCH_MODIFIERS,
 )
 from ..core.state import SessionState
 from .humanizer import Humanizer

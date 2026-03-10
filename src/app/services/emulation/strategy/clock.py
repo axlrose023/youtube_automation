@@ -2,6 +2,13 @@ import logging
 import random
 import time
 
+from ..core.config import (
+    BREAK_MIN_REMAINING_S,
+    BREAK_SKIP_PROBABILITY,
+    LONG_CYCLE_RANGE,
+    SHORT_CYCLE_PROBABILITY,
+    SHORT_CYCLE_RANGE,
+)
 from ..core.state import SessionState
 
 logger = logging.getLogger(__name__)
@@ -10,22 +17,29 @@ logger = logging.getLogger(__name__)
 class SessionClock:
     def __init__(self, state: SessionState) -> None:
         self._state = state
-        self._deadline = time.monotonic() + state.duration_minutes * 60
+        duration_s = state.duration_minutes * 60
+        self._deadline_monotonic = state.started_at_monotonic + duration_s
+        self._deadline_wallclock = state.started_at_wallclock + duration_s
 
     def deadline_reached(self) -> bool:
-        return time.monotonic() >= self._deadline
+        return (
+            time.monotonic() >= self._deadline_monotonic
+            or time.time() >= self._deadline_wallclock
+        )
 
     def remaining_seconds(self) -> float:
-        return max(self._deadline - time.monotonic(), 0.0)
+        mono_left = self._deadline_monotonic - time.monotonic()
+        wall_left = self._deadline_wallclock - time.time()
+        return max(min(mono_left, wall_left), 0.0)
 
     def start_cycle(self) -> None:
         self._state.cycle_start = time.monotonic()
-        remaining = max(self._deadline - time.monotonic(), 0)
+        remaining = self.remaining_seconds()
 
-        if random.random() < 0.3:
-            target = random.uniform(5, 15) * 60
+        if random.random() < SHORT_CYCLE_PROBABILITY:
+            target = random.uniform(*SHORT_CYCLE_RANGE) * 60
         else:
-            target = random.uniform(20, 50) * 60
+            target = random.uniform(*LONG_CYCLE_RANGE) * 60
 
         target *= self._state.personality.focus_span
         self._state.cycle_duration = min(target, remaining)
@@ -43,9 +57,9 @@ class SessionClock:
         return (time.monotonic() - self._state.cycle_start) < self._state.cycle_duration
 
     def time_for_break(self) -> bool:
-        if (self._deadline - time.monotonic()) <= 120:
+        if self.remaining_seconds() <= BREAK_MIN_REMAINING_S:
             return False
-        if random.random() < 0.2:
+        if random.random() < BREAK_SKIP_PROBABILITY:
             logger.info("Session %s: skipping break", self._state.session_id)
             return False
         return True

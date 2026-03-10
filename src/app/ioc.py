@@ -6,11 +6,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.modules.auth.service import AuthService
 from app.api.modules.auth.services import JwtService
+from app.api.modules.emulation.service import (
+    EmulationHistoryService,
+    EmulationSessionService,
+)
 from app.api.modules.users.service import UserService
 from app.clients.providers import HttpClientsProvider
 from app.database.engine import SessionFactory
 from app.database.uow import UnitOfWork
+from app.services.emulation.core.capture_factory import (
+    AdCaptureProviderFactory,
+    DefaultAdCaptureProviderFactory,
+)
 from app.services.emulation.core.session_store import EmulationSessionStore
+from app.services.emulation.orchestrator import EmulationOrchestrationService
+from app.services.emulation.persistence import EmulationPersistenceService
 from app.settings import Config, get_config
 
 try:
@@ -60,6 +70,34 @@ class ServicesProvider(Provider):
     ) -> UserService:
         return UserService(uow, auth_service)
 
+    @provide(scope=Scope.REQUEST)
+    async def get_emulation_history_service(
+        self, uow: UnitOfWork
+    ) -> EmulationHistoryService:
+        return EmulationHistoryService(uow)
+
+    @provide(scope=Scope.REQUEST)
+    async def get_emulation_session_service(
+        self,
+        session_store: EmulationSessionStore,
+        history_service: EmulationHistoryService,
+    ) -> EmulationSessionService:
+        return EmulationSessionService(session_store, history_service)
+
+    @provide(scope=Scope.REQUEST)
+    async def get_emulation_persistence_service(
+        self, uow: UnitOfWork
+    ) -> EmulationPersistenceService:
+        return EmulationPersistenceService(uow)
+
+    @provide(scope=Scope.REQUEST)
+    async def get_emulation_orchestration_service(
+        self,
+        session_store: EmulationSessionStore,
+        persistence: EmulationPersistenceService,
+    ) -> EmulationOrchestrationService:
+        return EmulationOrchestrationService(session_store, persistence)
+
 
 if _BROWSER_AVAILABLE:
 
@@ -97,6 +135,10 @@ class EmulationDIProvider(Provider):
     @provide(scope=Scope.APP)
     def get_session_store(self, redis: Redis) -> EmulationSessionStore:
         return EmulationSessionStore(redis)
+
+    @provide(scope=Scope.APP)
+    def get_ad_capture_factory(self) -> AdCaptureProviderFactory:
+        return DefaultAdCaptureProviderFactory()
 
 
 def get_async_container() -> AsyncContainer:

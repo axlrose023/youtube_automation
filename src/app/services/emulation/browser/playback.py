@@ -53,8 +53,8 @@ class PlaybackController:
             await self._h.delay(0.1, 0.3)
 
     async def get_duration(self) -> float | None:
-        # Duration can briefly point to ad media. Prefer canonical YouTube metadata first,
-        # then use <video>.duration only when ad overlay is not active.
+
+
         for _ in range(5):
             try:
                 payload = await self._page.evaluate(

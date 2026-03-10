@@ -57,7 +57,7 @@ class JwtConfig(BaseModel):
     secret_key: str = "change-me-in-production"
     algorithm: str = "HS256"
     access_token_expires_in_minutes: int = 30
-    refresh_expires_in_minutes: int = 1440  # 1 day
+    refresh_expires_in_minutes: int = 1440
 
 
 class APIConfig(BaseModel):
@@ -69,6 +69,15 @@ class APIConfig(BaseModel):
 
     page_max_size: int = 100
     page_default_size: int = 10
+
+
+class StorageConfig(BaseModel):
+    base_path: Path = Path("artifacts")
+    ad_captures_subdir: str = "ad_captures"
+
+    @property
+    def ad_captures_path(self) -> Path:
+        return self.base_path / self.ad_captures_subdir
 
 
 class PathsConfig:
@@ -102,6 +111,7 @@ class Config(BaseSettings):
     viewport: ViewportConfig = ViewportConfig()
     useragent: UserAgentConfig = UserAgentConfig()
     adspower: AdsPowerConfig = AdsPowerConfig()
+    storage: StorageConfig = StorageConfig()
 
     paths: PathsConfig = PathsConfig()
 

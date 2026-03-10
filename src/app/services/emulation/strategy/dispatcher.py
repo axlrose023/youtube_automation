@@ -1,24 +1,19 @@
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from ..browser.navigator import Navigator
 from ..browser.watcher import VideoWatcher
-from ..core.selectors import MAX_CONSECUTIVE_FAILURES
+from ..core.actions import SEARCH_ACTIONS, WATCH_ACTIONS, Action
+from ..core.config import MAX_CONSECUTIVE_FAILURES
 from ..core.state import SessionState
 from .clock import SessionClock
 
 logger = logging.getLogger(__name__)
-
-_WATCH_ACTIONS = {
-    "watch_long",
-    "watch_focused",
-    "surf_video",
-    "click_recommended",
-}
 
 
 class ActionDispatcher:
@@ -32,21 +27,21 @@ class ActionDispatcher:
         self._state = state
         self._nav = navigator
         self._clock = clock
-        self._handlers: dict[str, Callable[[], Awaitable[None]]] = {
-            "click_recommended": watcher.click_recommended,
-            "watch_long": watcher.watch_long,
-            "watch_focused": watcher.watch_focused,
-            "surf_video": watcher.surf_video,
-            "scroll_feed": navigator.scroll_feed,
-            "scroll_results": navigator.scroll_feed,
-            "search": navigator.search,
-            "refine_search": navigator.refine_search,
-            "idle": navigator.idle,
-            "go_home": navigator.go_home,
-            "go_back": navigator.go_back,
+        self._handlers: dict[Action, Callable[[], Coroutine[Any, Any, None]]] = {
+            Action.CLICK_RECOMMENDED: watcher.click_recommended,
+            Action.WATCH_LONG: watcher.watch_long,
+            Action.WATCH_FOCUSED: watcher.watch_focused,
+            Action.SURF_VIDEO: watcher.surf_video,
+            Action.SCROLL_FEED: navigator.scroll_feed,
+            Action.SCROLL_RESULTS: navigator.scroll_feed,
+            Action.SEARCH: navigator.search,
+            Action.REFINE_SEARCH: navigator.refine_search,
+            Action.IDLE: navigator.idle,
+            Action.GO_HOME: navigator.go_home,
+            Action.GO_BACK: navigator.go_back,
         }
 
-    async def execute(self, action: str) -> None:
+    async def execute(self, action: Action) -> None:
         handler = self._handlers.get(action, self._nav.scroll_feed)
         timeout_s = self._action_timeout_seconds(action)
         if timeout_s <= 0:
@@ -78,7 +73,7 @@ class ActionDispatcher:
                 self._state.surf_streak,
             )
             self._update_anchor_streak(action, videos_delta)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._state.consecutive_fails += 1
             await self._cancel_task(action_task)
             logger.warning(
@@ -106,23 +101,23 @@ class ActionDispatcher:
             await self._nav.safe_go_home()
             self._state.consecutive_fails = 0
 
-    def _action_timeout_seconds(self, action: str) -> float:
+    def _action_timeout_seconds(self, action: Action) -> float:
         remaining = self._clock.remaining_seconds()
         if remaining <= 0:
             return 0.0
-        if action in _WATCH_ACTIONS:
+        if action in WATCH_ACTIONS:
             return max(remaining + 20.0, 20.0)
         return min(max(remaining, 5.0), 45.0)
 
-    def _update_anchor_streak(self, action: str, videos_delta: int) -> None:
-        if action in ("search", "refine_search"):
+    def _update_anchor_streak(self, action: Action, videos_delta: int) -> None:
+        if action in SEARCH_ACTIONS:
             self._state.offtopic_or_reco_streak = 0
             return
 
         if videos_delta <= 0:
             return
 
-        if action == "click_recommended":
+        if action == Action.CLICK_RECOMMENDED:
             self._state.offtopic_or_reco_streak += 1
             logger.info(
                 "Session %s: anchor streak +1 (reason=recommendation, streak=%d)",
@@ -131,7 +126,7 @@ class ActionDispatcher:
             )
             return
 
-        if action not in {"watch_long", "watch_focused", "surf_video"}:
+        if action not in (Action.WATCH_LONG, Action.WATCH_FOCUSED, Action.SURF_VIDEO):
             return
 
         if self._state.last_watch_on_topic is False:

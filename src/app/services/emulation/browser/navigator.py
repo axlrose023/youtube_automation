@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from playwright.async_api import Page
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
+from ..core.config import IDLE_FATIGUE_THRESHOLD, IDLE_FATIGUED_RANGE, IDLE_NORMAL_RANGE
 from ..core.selectors import (
     CONSENT_SELECTORS,
     RECOMMENDED_SELECTORS,
@@ -94,9 +95,9 @@ class Navigator:
         await self._h.scroll(direction, amount=random.randint(2, 5))
 
     async def idle(self) -> None:
-        pause = random.uniform(2, 8)
-        if self._state.fatigue > 0.6:
-            pause = random.uniform(5, 15)
+        pause = random.uniform(*IDLE_NORMAL_RANGE)
+        if self._state.fatigue > IDLE_FATIGUE_THRESHOLD:
+            pause = random.uniform(*IDLE_FATIGUED_RANGE)
         logger.info("Session %s: idle for %.0fs", self._state.session_id, pause)
         await self._h.delay(pause, pause)
         if random.random() < 0.5:
