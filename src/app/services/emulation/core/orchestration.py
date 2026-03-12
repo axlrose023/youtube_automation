@@ -17,21 +17,16 @@ type OrchestrationPayload = dict[str, object]
 
 def should_orchestrate_window(
     duration_minutes: int,
-    realistic_window: bool | None,
 ) -> bool:
-    if realistic_window is False:
-        return False
     return duration_minutes >= ORCHESTRATION_MIN_WINDOW_MINUTES
 
 
 def build_orchestration_payload(
     live_payload: dict,
     duration_minutes: int,
-    realistic_window: bool | None,
 ) -> OrchestrationPayload | None:
     if not should_orchestrate_window(
         duration_minutes=duration_minutes,
-        realistic_window=realistic_window,
     ):
         return None
 

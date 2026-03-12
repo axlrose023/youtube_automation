@@ -37,6 +37,7 @@ class UserAgentConfig(BaseModel):
 class AdsPowerConfig(BaseModel):
     base_url: str = "http://local.adspower.net:50325"
     user_id: str = "k19s5uo7"
+    api_key: str | None = None
 
 
 class PostgresConfig(BaseModel):

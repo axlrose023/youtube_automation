@@ -6,6 +6,7 @@ import uuid
 
 from dishka import FromDishka
 from dishka.integrations.taskiq import inject
+from playwright.async_api import BrowserContext, Page
 
 from app.services.browser.provider import BrowserSessionProvider
 from app.services.emulation import YouTubeEmulator
@@ -27,6 +28,33 @@ from app.tiq import broker
 logger = logging.getLogger(__name__)
 
 
+def _normalize_profile_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+async def _acquire_emulation_page(ctx: BrowserContext, session_id: str) -> Page:
+    try:
+        return await ctx.new_page()
+    except Exception as exc:
+        existing_pages = [page for page in ctx.pages if not page.is_closed()]
+        if not existing_pages:
+            raise
+        page = existing_pages[0]
+        logger.warning(
+            "Session %s: new_page failed (%s), reusing existing tab",
+            session_id,
+            type(exc).__name__,
+        )
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
+        return page
+
+
 @broker.task(task_name="emulation_task", timeout=28800)
 @inject
 async def emulation_task(
@@ -39,9 +67,11 @@ async def emulation_task(
     config: FromDishka[Config],
     persistence: FromDishka[EmulationPersistenceService],
     orchestrator: FromDishka[EmulationOrchestrationService],
-    realistic_window: bool | None = None,
+    profile_id: str | None = None,
 ) -> dict:
     run_holder = f"{session_id}:{uuid.uuid4().hex}"
+    profile_lock_holder = f"{run_holder}:profile"
+    resolved_profile_id: str | None = None
     lock_acquired = await session_store.try_acquire_run_lock(
         session_id=session_id,
         holder=run_holder,
@@ -65,6 +95,18 @@ async def emulation_task(
             logger.info("Session %s: already finished, skipping duplicate task", session_id)
             return {"status": "already_finished", "session_id": session_id}
 
+        resolved_profile_id = _normalize_profile_id(profile_id) or _normalize_profile_id(
+            live_payload.get("profile_id")
+        )
+        if resolved_profile_id:
+            profile_lock_acquired = await session_store.try_acquire_profile_lock(
+                profile_id=resolved_profile_id,
+                holder=profile_lock_holder,
+                ttl_seconds=ORCHESTRATION_RUN_LOCK_TTL_SECONDS,
+            )
+            if not profile_lock_acquired:
+                raise RuntimeError(f"AdsPower profile {resolved_profile_id} is already in use")
+
         now_ts = time.time()
         started_at_ts = live_payload.get("started_at")
         if not isinstance(started_at_ts, int | float):
@@ -73,7 +115,6 @@ async def emulation_task(
         orchestration = build_orchestration_payload(
             live_payload=live_payload,
             duration_minutes=duration_minutes,
-            realistic_window=realistic_window,
         )
         should_orchestrate = bool(orchestration)
 
@@ -84,6 +125,7 @@ async def emulation_task(
             finished_at=None,
             error=None,
             orchestration=orchestration if should_orchestrate else None,
+            profile_id=resolved_profile_id,
         )
         live_payload = await session_store.get(session_id) or {}
         try:
@@ -117,8 +159,8 @@ async def emulation_task(
 
         run_duration_minutes = max(1, int((chunk_seconds + 59) // 60))
 
-        ctx = await session_provider.acquire_context()
-        page = await ctx.new_page()
+        ctx = await session_provider.acquire_context(profile_id=resolved_profile_id)
+        page = await _acquire_emulation_page(ctx, session_id)
 
         ad_capture_path = config.storage.ad_captures_path
         ad_capture_path.mkdir(parents=True, exist_ok=True)
@@ -156,7 +198,7 @@ async def emulation_task(
                 session_id,
                 duration_minutes,
                 topics,
-                realistic_window,
+                resolved_profile_id,
                 result,
                 orchestration,
                 current_mode,
@@ -233,4 +275,6 @@ async def emulation_task(
             await page.close()
         if ctx:
             await session_provider.release_context(ctx)
+        if resolved_profile_id:
+            await session_store.release_profile_lock(resolved_profile_id, profile_lock_holder)
         await session_store.release_run_lock(session_id, run_holder)

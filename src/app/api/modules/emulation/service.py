@@ -44,7 +44,13 @@ class EmulationSessionService:
 
     async def start_emulation(self, request: StartEmulationRequest) -> StartEmulationResponse:
         session_id = str(uuid.uuid4())
-        await self._session_store.create(session_id, request.topics, request.duration_minutes)
+        profile_id = self._normalize_profile_id(request.profile_id)
+        await self._session_store.create(
+            session_id,
+            request.topics,
+            request.duration_minutes,
+            profile_id=profile_id,
+        )
         await self._history_service.register_queued_session(
             session_id=session_id,
             duration_minutes=request.duration_minutes,
@@ -62,7 +68,7 @@ class EmulationSessionService:
                 session_id,
                 request.duration_minutes,
                 request.topics,
-                realistic_window=request.realistic_window,
+                profile_id=profile_id,
             )
         except Exception as exc:
             await self._session_store.update(
@@ -88,6 +94,7 @@ class EmulationSessionService:
         return EmulationSessionStatus(
             session_id=session_id,
             status=data["status"],
+            profile_id=self._normalize_profile_id(data.get("profile_id")),
             elapsed_minutes=calculate_session_elapsed_minutes(data),
             orchestration_enabled=bool(orchestration.get("enabled")),
             orchestration_phase=(
@@ -122,6 +129,13 @@ class EmulationSessionService:
             fatigue=data.get("fatigue"),
             error=data.get("error"),
         )
+
+    @staticmethod
+    def _normalize_profile_id(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class EmulationHistoryService:

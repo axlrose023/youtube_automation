@@ -24,11 +24,15 @@ class EmulationSessionStore:
     def _run_lock_key(self, session_id: str) -> str:
         return f"emulation:session:lock:{session_id}"
 
+    def _profile_lock_key(self, profile_id: str) -> str:
+        return f"emulation:profile:lock:{profile_id}"
+
     async def create(
         self,
         session_id: str,
         topics: list[str],
         duration_minutes: int,
+        profile_id: str | None = None,
     ) -> None:
         data = {
             "status": "queued",
@@ -37,6 +41,7 @@ class EmulationSessionStore:
             "finished_at": None,
             "duration_minutes": duration_minutes,
             "topics": topics,
+            "profile_id": profile_id,
             "topics_searched": [],
             "videos_watched": 0,
             "watched_videos_count": 0,
@@ -84,6 +89,31 @@ class EmulationSessionStore:
 
     async def release_run_lock(self, session_id: str, holder: str) -> None:
         key = self._run_lock_key(session_id)
+        current_holder = await self._redis.get(key)
+        if current_holder is None:
+            return
+        if isinstance(current_holder, bytes):
+            current_holder = current_holder.decode("utf-8", errors="ignore")
+        if str(current_holder) != holder:
+            return
+        await self._redis.delete(key)
+
+    async def try_acquire_profile_lock(
+        self,
+        profile_id: str,
+        holder: str,
+        ttl_seconds: int,
+    ) -> bool:
+        locked = await self._redis.set(
+            self._profile_lock_key(profile_id),
+            holder,
+            ex=max(ttl_seconds, 1),
+            nx=True,
+        )
+        return bool(locked)
+
+    async def release_profile_lock(self, profile_id: str, holder: str) -> None:
+        key = self._profile_lock_key(profile_id)
         current_holder = await self._redis.get(key)
         if current_holder is None:
             return

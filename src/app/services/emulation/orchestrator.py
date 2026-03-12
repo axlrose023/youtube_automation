@@ -35,7 +35,7 @@ class EmulationOrchestrationService:
         session_id: str,
         duration_minutes: int,
         topics: list[str],
-        realistic_window: bool | None,
+        profile_id: str | None,
         result: EmulationResult,
         orchestration: dict[str, object],
         current_mode: object,
@@ -147,7 +147,7 @@ class EmulationOrchestrationService:
             session_id,
             duration_minutes,
             topics,
-            realistic_window,
+            profile_id,
             resume_at_ts,
         )
         logger.info(
@@ -202,7 +202,7 @@ class EmulationOrchestrationService:
         session_id: str,
         duration_minutes: int,
         topics: list[str],
-        realistic_window: bool | None,
+        profile_id: str | None,
         resume_at_ts: float,
     ) -> None:
         from app.tiq import EMULATION_QUEUE_NAME, broker
@@ -218,5 +218,5 @@ class EmulationOrchestrationService:
             session_id=session_id,
             duration_minutes=duration_minutes,
             topics=topics,
-            realistic_window=realistic_window,
+            profile_id=profile_id,
         )

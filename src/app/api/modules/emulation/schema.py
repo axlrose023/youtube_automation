@@ -9,9 +9,11 @@ from app.api.common.schema import Pagination, PaginationParams
 class StartEmulationRequest(BaseModel):
     duration_minutes: int = Field(ge=1, le=480, description="Session duration in minutes")
     topics: list[str] = Field(min_length=1, max_length=20, description="Search topics")
-    realistic_window: bool | None = Field(
+    profile_id: str | None = Field(
         default=None,
-        description="Enable long-session orchestration with active chunks and breaks",
+        min_length=1,
+        max_length=128,
+        description="AdsPower profile id for this emulation session",
     )
 
 
@@ -103,6 +105,7 @@ class EmulationAnalyticsAd(BaseModel):
 class EmulationSessionStatus(BaseModel):
     session_id: UUID
     status: str
+    profile_id: str | None = None
     elapsed_minutes: float | None = None
     orchestration_enabled: bool = False
     orchestration_phase: str | None = None
