@@ -593,9 +593,25 @@ class VideoWatcher:
                 await self._h.scroll("down", amount=1)
                 await self._h.delay(0.6, 1.4)
 
-        if random.random() < 0.55:
-            await self._h.scroll("up", amount=random.randint(1, 2))
-            await self._h.delay(0.5, 1.2)
+        await self._smooth_return_to_player()
+        logger.info(
+            "Session %s: %s micro — smooth return to player after comments glance",
+            self._state.session_id,
+            source_action,
+        )
+        await self._h.delay(0.3, 0.9)
+        await self._playback.ensure_playing(self._state.session_id)
+
+    async def _smooth_return_to_player(self) -> None:
+        steps = random.randint(2, 5)
+        for _ in range(steps):
+            if await self._is_player_in_view():
+                return
+            await self._h.scroll("up", amount=1)
+            await self._h.delay(0.35, 0.9)
+
+        if await self._is_player_in_view():
+            return
 
         try:
             await self._page.evaluate(
@@ -605,23 +621,41 @@ class VideoWatcher:
                         || document.querySelector('#player')
                         || document.querySelector('ytd-player')
                         || document.querySelector('video');
-                    if (player && typeof player.scrollIntoView === 'function') {
-                        player.scrollIntoView({ block: 'center', inline: 'nearest' });
-                        return true;
+                    if (!player || typeof player.scrollIntoView !== 'function') {
+                        return false;
                     }
-                    window.scrollTo(0, 0);
-                    return false;
+                    player.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'center',
+                        inline: 'nearest',
+                    });
+                    return true;
                 }""",
             )
         except Exception:
             return
-        logger.info(
-            "Session %s: %s micro — return to player after comments glance",
-            self._state.session_id,
-            source_action,
-        )
-        await self._h.delay(0.3, 0.9)
-        await self._playback.ensure_playing(self._state.session_id)
+        await self._h.delay(0.5, 1.0)
+
+    async def _is_player_in_view(self) -> bool:
+        try:
+            return bool(
+                await self._page.evaluate(
+                    """() => {
+                        const player =
+                            document.querySelector('#movie_player')
+                            || document.querySelector('#player')
+                            || document.querySelector('ytd-player')
+                            || document.querySelector('video');
+                        if (!player) return false;
+                        const rect = player.getBoundingClientRect();
+                        const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+                        if (!vh) return false;
+                        return rect.top < vh * 0.72 && rect.bottom > vh * 0.18;
+                    }""",
+                )
+            )
+        except Exception:
+            return False
 
 
 

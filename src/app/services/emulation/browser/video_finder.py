@@ -159,6 +159,8 @@ class VideoFinder:
             title or "<unknown>",
         )
 
+        await self._prepare_element_for_click(video_element)
+
         try:
             await self._h.click(video_element)
         except Exception as exc:
@@ -217,6 +219,13 @@ class VideoFinder:
             self._state.last_clicked_video_url = current_url
             self._state.mark_video_seen(current_url)
         return self._state.on_video_page
+
+    async def _prepare_element_for_click(self, video_element: ElementHandle) -> None:
+        try:
+            await video_element.scroll_into_view_if_needed(timeout=2_500)
+            await self._h.delay(0.2, 0.6)
+        except Exception:
+            return
 
     async def _retry_direct_click(
         self,

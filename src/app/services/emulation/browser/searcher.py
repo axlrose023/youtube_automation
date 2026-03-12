@@ -10,6 +10,7 @@ from ..core.selectors import (
     SEARCH_BUTTON,
     SEARCH_BUTTON_SELECTORS,
     SEARCH_INPUT_SELECTORS,
+    VIDEO_SELECTORS,
 )
 from ..core.state import SessionState
 from .humanizer import Humanizer
@@ -105,6 +106,7 @@ class Searcher:
 
         await self._page.wait_for_load_state("domcontentloaded", timeout=10_000)
         await self._h.delay(1.5, 3.0)
+        await self._scan_results()
 
         if mark_topic_as_covered and mark_topic_as_covered not in self._state.searched_topics:
             self._state.searched_topics.append(mark_topic_as_covered)
@@ -133,3 +135,75 @@ class Searcher:
                 await self._h.click(search_button)
             else:
                 await self._page.keyboard.press("Enter")
+
+    async def _scan_results(self) -> None:
+        if "/results" not in (self._page.url or ""):
+            return
+        if not await self._has_result_candidates():
+            await self._h.delay(0.7, 1.4)
+            return
+
+        await self._h.delay(0.8, 1.8)
+        candidates = await self._collect_result_candidates(limit=10)
+        if not candidates:
+            return
+
+        hovered = 0
+        for candidate in random.sample(candidates, k=min(len(candidates), random.randint(1, 3))):
+            try:
+                box = await candidate.bounding_box()
+                if not box or box["width"] <= 0 or box["height"] <= 0:
+                    continue
+
+                target_x = box["x"] + box["width"] * random.uniform(0.25, 0.75)
+                target_y = box["y"] + box["height"] * random.uniform(0.30, 0.70)
+                await self._page.mouse.move(target_x, target_y, steps=random.randint(8, 16))
+                hovered += 1
+                await self._h.delay(0.4, 1.0)
+            except Exception:
+                continue
+
+        if random.random() < 0.65:
+            await self._page.mouse.wheel(0, random.randint(120, 380))
+            await self._h.delay(0.3, 0.8)
+            if random.random() < 0.35:
+                await self._page.mouse.wheel(0, -random.randint(60, 220))
+                await self._h.delay(0.2, 0.6)
+
+        logger.info("Session %s: scanned search results before click (hovered=%d)", self._state.session_id, hovered)
+
+    async def _has_result_candidates(self) -> bool:
+        for _ in range(6):
+            for selector in VIDEO_SELECTORS:
+                try:
+                    if await self._page.query_selector(selector):
+                        return True
+                except Exception:
+                    continue
+            await self._h.delay(0.2, 0.5)
+        return False
+
+    async def _collect_result_candidates(self, limit: int) -> list[ElementHandle]:
+        candidates: list[ElementHandle] = []
+        seen_hrefs: set[str] = set()
+        for selector in VIDEO_SELECTORS:
+            try:
+                elements = await self._page.query_selector_all(selector)
+            except Exception:
+                continue
+
+            for element in elements:
+                try:
+                    href = await element.get_attribute("href")
+                except Exception:
+                    continue
+                if not href or "/watch" not in href:
+                    continue
+                normalized_href = href if href.startswith("http") else f"https://www.youtube.com{href}"
+                if normalized_href in seen_hrefs:
+                    continue
+                seen_hrefs.add(normalized_href)
+                candidates.append(element)
+                if len(candidates) >= limit:
+                    return candidates
+        return candidates
