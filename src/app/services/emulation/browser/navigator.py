@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import random
 from typing import TYPE_CHECKING
@@ -12,7 +14,7 @@ from ..core.selectors import (
     VIDEO_SELECTORS,
     YOUTUBE_URL,
 )
-from ..core.state import SessionState
+from ..core.session.state import SessionState
 from .humanizer import Humanizer
 from .video_finder import VideoFinder
 
@@ -29,14 +31,15 @@ class Navigator:
         state: SessionState,
         humanizer: Humanizer,
         finder: VideoFinder,
+        searcher: Searcher | None = None,
     ) -> None:
         self._page = page
         self._state = state
         self._h = humanizer
         self._finder = finder
-        self._searcher: Searcher | None = None
+        self._searcher = searcher
 
-    def attach_searcher(self, searcher: "Searcher") -> None:
+    def set_searcher(self, searcher: Searcher) -> None:
         self._searcher = searcher
 
     async def open_youtube(self) -> None:
@@ -83,10 +86,10 @@ class Navigator:
             await self.safe_go_home()
 
     async def search(self) -> None:
-        await self._get_searcher().search()
+        await self._require_searcher().search()
 
     async def refine_search(self) -> None:
-        await self._get_searcher().refine_search()
+        await self._require_searcher().refine_search()
 
     async def scroll_feed(self) -> None:
         direction = "down"
@@ -110,7 +113,7 @@ class Navigator:
             selectors,
             limit=8,
             require_topic_match=bool(self._state.topics),
-            preferred_topic=self._state.current_topic if on_watch_page else None,
+            preferred_topic=self._state.current_topic,
             allow_shorts=False,
         )
         return clicked
@@ -165,7 +168,7 @@ class Navigator:
             except Exception:
                 continue
 
-    def _get_searcher(self) -> "Searcher":
+    def _require_searcher(self) -> Searcher:
         if self._searcher is None:
-            raise RuntimeError("Navigator searcher is not attached")
+            raise RuntimeError("Navigator searcher is not set")
         return self._searcher

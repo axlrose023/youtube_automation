@@ -6,9 +6,19 @@ from typing import TYPE_CHECKING
 
 from redis.asyncio import Redis
 
-from .ad_analytics import build_ads_analytics
+from ..ad_analytics import build_ads_analytics
 
 _TTL = 86400
+
+
+def _watched_duration_seconds(watched_videos: list[dict[str, object]]) -> int:
+    total = 0.0
+    for item in watched_videos:
+        try:
+            total += float(item.get("watched_seconds") or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return int(round(total))
 
 if TYPE_CHECKING:
     from .state import SessionState
@@ -34,14 +44,18 @@ class EmulationSessionStore:
         duration_minutes: int,
         profile_id: str | None = None,
     ) -> None:
+        now_ts = time.time()
         data = {
             "status": "queued",
-            "created_at": time.time(),
+            "created_at": now_ts,
+            "updated_at": now_ts,
             "started_at": None,
             "finished_at": None,
             "duration_minutes": duration_minutes,
             "topics": topics,
             "profile_id": profile_id,
+            "current_topic": None,
+            "current_watch": None,
             "topics_searched": [],
             "videos_watched": 0,
             "watched_videos_count": 0,
@@ -64,6 +78,7 @@ class EmulationSessionStore:
         if raw_session_payload is None:
             return
         session_data = json.loads(raw_session_payload)
+        fields.setdefault("updated_at", time.time())
         session_data.update(fields)
         await self._redis.set(self._key(session_id), json.dumps(session_data), ex=_TTL)
 
@@ -97,6 +112,9 @@ class EmulationSessionStore:
         if str(current_holder) != holder:
             return
         await self._redis.delete(key)
+
+    async def is_run_lock_active(self, session_id: str) -> bool:
+        return bool(await self._redis.exists(self._run_lock_key(session_id)))
 
     async def try_acquire_profile_lock(
         self,
@@ -134,12 +152,16 @@ class EmulationSessionStore:
             status="running",
             mode=state.mode.value,
             fatigue=round(state.fatigue, 2),
+            current_topic=state.current_topic,
+            current_watch=state.current_watch,
             topics_searched=state.searched_topics,
             videos_watched=state.videos_watched,
             watched_videos_count=len(state.watched_videos),
+            watched_videos=state.watched_videos,
             watched_ads_count=len(state.watched_ads),
             watched_ads=state.watched_ads,
             watched_ads_analytics=build_ads_analytics(state.watched_ads),
+            total_duration_seconds=_watched_duration_seconds(state.watched_videos),
             bytes_downloaded=bytes_downloaded,
             personality={
                 "pace": state.personality.pace,

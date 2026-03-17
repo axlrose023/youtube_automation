@@ -1,10 +1,13 @@
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
 from .browser.humanizer import Humanizer
 from .browser.traffic import TrafficTracker
 from .core.actions import WATCH_ACTIONS
-from .core.session_store import EmulationSessionStore
-from .core.state import SessionState
+from .core.config import LIVE_PROGRESS_SYNC_INTERVAL_S, WATCH_ACTION_MIN_REMAINING_S
+from .core.session.store import EmulationSessionStore
+from .core.session.state import SessionState
 from .strategy.action_picker import ActionPicker
 from .strategy.clock import SessionClock
 from .strategy.dispatcher import ActionDispatcher
@@ -26,6 +29,7 @@ class SessionLoop:
         humanizer: Humanizer,
         traffic: TrafficTracker,
         session_store: EmulationSessionStore,
+        flush_pending_captures: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._state = state
         self._clock = clock
@@ -35,6 +39,7 @@ class SessionLoop:
         self._humanizer = humanizer
         self._traffic = traffic
         self._store = session_store
+        self._flush_pending_captures = flush_pending_captures
 
     async def run(self) -> None:
         session_id = self._state.session_id
@@ -76,7 +81,7 @@ class SessionLoop:
 
             action_number += 1
             action = self._picker.pick()
-            min_required = 20.0 if action in WATCH_ACTIONS else 5.0
+            min_required = WATCH_ACTION_MIN_REMAINING_S if action in WATCH_ACTIONS else 5.0
 
             if remaining < min_required:
                 logger.info(
@@ -102,15 +107,51 @@ class SessionLoop:
                 remaining,
             )
 
-            await self._dispatcher.execute(action)
-            self._fatigue.update()
+            progress_task: asyncio.Task[None] | None = None
+            try:
+                if action in WATCH_ACTIONS:
+                    progress_task = asyncio.create_task(self._sync_progress_during_watch())
+
+                await self._dispatcher.execute(action)
+                self._fatigue.update()
+            finally:
+                if progress_task is not None:
+                    progress_task.cancel()
+                    try:
+                        await progress_task
+                    except asyncio.CancelledError:
+                        pass
 
             if action_number % 5 == 0:
                 self._fatigue.maybe_switch_mode()
 
-            await self._store.sync_progress(
-                self._state.session_id,
-                self._state,
-                self._traffic.bytes_downloaded,
-            )
+            await self._sync_progress_once()
             await self._humanizer.delay(0.5, 2.0)
+
+    async def _sync_progress_during_watch(self) -> None:
+        if LIVE_PROGRESS_SYNC_INTERVAL_S <= 0:
+            return
+
+        while True:
+            await asyncio.sleep(LIVE_PROGRESS_SYNC_INTERVAL_S)
+            await self._sync_progress_once()
+
+    async def _sync_progress_once(self) -> None:
+        await self._store.sync_progress(
+            self._state.session_id,
+            self._state,
+            self._traffic.bytes_downloaded,
+        )
+        await self._flush_pending_capture_updates()
+
+    async def _flush_pending_capture_updates(self) -> None:
+        if self._flush_pending_captures is None:
+            return
+        try:
+            await self._flush_pending_captures()
+        except Exception as exc:
+            logger.warning(
+                "Session %s: pending capture reconciliation failed: %s",
+                self._state.session_id,
+                exc,
+            )

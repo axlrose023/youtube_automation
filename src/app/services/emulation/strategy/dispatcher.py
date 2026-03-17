@@ -10,10 +10,14 @@ from ..browser.navigator import Navigator
 from ..browser.watcher import VideoWatcher
 from ..core.actions import SEARCH_ACTIONS, WATCH_ACTIONS, Action
 from ..core.config import MAX_CONSECUTIVE_FAILURES
-from ..core.state import SessionState
+from ..core.session.state import SessionState
 from .clock import SessionClock
 
 logger = logging.getLogger(__name__)
+
+
+class SessionRuntimeClosedError(RuntimeError):
+    pass
 
 
 class ActionDispatcher:
@@ -76,18 +80,34 @@ class ActionDispatcher:
         except TimeoutError:
             self._state.consecutive_fails += 1
             await self._cancel_task(action_task)
+            if action in WATCH_ACTIONS:
+                self._state.clear_current_watch()
             logger.warning(
                 "Session %s: action timeout (%d) on %s after %.0fs",
                 self._state.session_id, self._state.consecutive_fails, action, timeout_s,
             )
         except PlaywrightTimeout:
             self._state.consecutive_fails += 1
+            if action in WATCH_ACTIONS:
+                self._state.clear_current_watch()
             logger.warning(
                 "Session %s: timeout (%d) on %s",
                 self._state.session_id, self._state.consecutive_fails, action,
             )
         except Exception:
             self._state.consecutive_fails += 1
+            if action in WATCH_ACTIONS:
+                self._state.clear_current_watch()
+            exc = action_task.exception() if action_task.done() else None
+            if exc is not None and self._is_runtime_closed_error(exc):
+                logger.error(
+                    "Session %s: fatal runtime closure on %s",
+                    self._state.session_id,
+                    action,
+                )
+                raise SessionRuntimeClosedError(
+                    f"Session runtime closed during {action}",
+                ) from exc
             logger.exception(
                 "Session %s: error (%d) on %s",
                 self._state.session_id, self._state.consecutive_fails, action,
@@ -157,3 +177,15 @@ class ActionDispatcher:
             return
         except Exception:
             return
+
+    @staticmethod
+    def _is_runtime_closed_error(exc: BaseException) -> bool:
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "target page, context or browser has been closed",
+                "target closed",
+                "browser has been closed",
+            )
+        )

@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from playwright.async_api import BrowserContext, Page, Response
 
-from ..core.config import (
+from ...core.config import (
     AD_CAPTURE_LANDING_TIMEOUT_MS,
     AD_CAPTURE_MAX_ASSET_SIZE_BYTES,
     AD_CAPTURE_MAX_TOTAL_ASSETS,
@@ -30,6 +30,12 @@ from .capture_utils import ASSET_CONTENT_TYPES, IMAGE_PREFIX, asset_filename
 logger = logging.getLogger(__name__)
 _RECORDER_STORE_KEY = "__adCaptureRecorderStore"
 _RECORDED_SLICE_BYTES = 512 * 1024
+_LANDING_ERROR_URL_PREFIXES = (
+    "about:blank",
+    "about:neterror",
+    "chrome-error://",
+    "edge-error://",
+)
 
 
 @dataclass
@@ -280,7 +286,6 @@ class AdCreativeCapture:
                         const video = document.querySelector("video");
                         if (!video) return { status: "no_video" };
                         if (typeof MediaRecorder === "undefined") return { status: "unsupported_media_recorder" };
-                        if (typeof video.captureStream !== "function") return { status: "unsupported_capture_stream" };
 
                         if (video.paused) {
                             try { await video.play(); } catch {}
@@ -301,13 +306,57 @@ class AdCreativeCapture:
                             await new Promise((resolve) => setTimeout(resolve, warmupMs));
                         }
 
-                        const stream = video.captureStream();
+                        const width = Math.max(
+                            1,
+                            Number(video.videoWidth || video.clientWidth || 640),
+                        );
+                        const height = Math.max(
+                            1,
+                            Number(video.videoHeight || video.clientHeight || 360),
+                        );
+                        const canvas = document.createElement("canvas");
+                        canvas.width = width;
+                        canvas.height = height;
+                        const context = canvas.getContext("2d", { alpha: false });
+                        if (!context || typeof canvas.captureStream !== "function") {
+                            return { status: "unsupported_capture_stream" };
+                        }
+
+                        let stopped = false;
+                        let frameToken = null;
+                        let frameCount = 0;
+                        let drawErrors = 0;
+                        const useVideoFrameCallback =
+                            typeof video.requestVideoFrameCallback === "function"
+                            && typeof video.cancelVideoFrameCallback === "function";
+
+                        const renderFrame = () => {
+                            if (stopped) return;
+                            try {
+                                context.drawImage(video, 0, 0, width, height);
+                                frameCount += 1;
+                            } catch {
+                                drawErrors += 1;
+                            }
+                            if (useVideoFrameCallback) {
+                                frameToken = video.requestVideoFrameCallback(() => renderFrame());
+                            } else {
+                                frameToken = requestAnimationFrame(renderFrame);
+                            }
+                        };
+
+                        renderFrame();
+                        const stream = canvas.captureStream(24);
                         if (!stream || !stream.getTracks().length) {
                             return {
                                 status: "no_tracks",
                                 readyState: Number(video.readyState || 0),
                                 paused: !!video.paused,
                                 currentTime: Number(video.currentTime || 0),
+                                frameCount,
+                                drawErrors,
+                                videoWidth: width,
+                                videoHeight: height,
                             };
                         }
 
@@ -330,6 +379,16 @@ class AdCreativeCapture:
                             : new MediaRecorder(stream);
 
                         const stopTracks = () => {
+                            stopped = true;
+                            if (frameToken !== null) {
+                                try {
+                                    if (useVideoFrameCallback) {
+                                        video.cancelVideoFrameCallback(frameToken);
+                                    } else {
+                                        cancelAnimationFrame(frameToken);
+                                    }
+                                } catch {}
+                            }
                             for (const track of stream.getTracks()) {
                                 try { track.stop(); } catch {}
                             }
@@ -343,6 +402,10 @@ class AdCreativeCapture:
                                     error: failure,
                                     chunkCount,
                                     totalBytes,
+                                    frameCount,
+                                    drawErrors,
+                                    videoWidth: width,
+                                    videoHeight: height,
                                 });
                             }, { once: true });
 
@@ -377,6 +440,10 @@ class AdCreativeCapture:
                             readyState: Number(video.readyState || 0),
                             paused: !!video.paused,
                             currentTime: Number(video.currentTime || 0),
+                            frameCount,
+                            drawErrors,
+                            videoWidth: width,
+                            videoHeight: height,
                         };
                     }""",
                     {
@@ -421,6 +488,7 @@ class AdCreativeCapture:
                     if (!state) return { status: "missing_state" };
 
                     if (state.recorder?.state && state.recorder.state !== "inactive") {
+                        try { state.recorder.requestData(); } catch {}
                         state.recorder.stop();
                     }
 
@@ -477,13 +545,15 @@ class AdCreativeCapture:
         page.on("response", on_response)
         try:
             loaded = False
+            last_status: int | None = None
             for wait_until in ("networkidle", "domcontentloaded", "load", "commit"):
                 try:
-                    await page.goto(
+                    response = await page.goto(
                         url,
                         timeout=AD_CAPTURE_LANDING_TIMEOUT_MS,
                         wait_until=wait_until,
                     )
+                    last_status = response.status if response is not None else last_status
                     loaded = True
                     break
                 except Exception as exc:
@@ -506,7 +576,7 @@ class AdCreativeCapture:
                     html = await page.content()
                     if (
                         current_url
-                        and not current_url.startswith("about:blank")
+                        and not self._is_landing_error_page(current_url, html)
                         and html.strip()
                     ):
                         (out_dir / "index.html").write_text(html, encoding="utf-8")
@@ -523,20 +593,59 @@ class AdCreativeCapture:
                     pass
                 return "failed", None
 
+            current_url = page.url
             html = await page.content()
+            if self._is_landing_error_page(current_url, html):
+                logger.warning("Landing capture resolved to browser error page for %s: %s", url, current_url)
+                return "failed", None
+            if last_status is not None and last_status >= 400:
+                logger.warning(
+                    "Landing capture HTTP %s for %s -> %s",
+                    last_status,
+                    url,
+                    current_url,
+                )
+                if not html.strip():
+                    return "failed", None
             (out_dir / "index.html").write_text(html, encoding="utf-8")
 
             for filename, body in collected:
                 (assets_dir / filename).write_bytes(body)
 
             rel_dir = str(out_dir.relative_to(self._base_path))
-            logger.info("Landing captured: %s (%d assets)", url, len(collected))
+            if len(collected) <= 2:
+                logger.warning(
+                    "Landing captured thin snapshot: %s (%d assets)",
+                    current_url or url,
+                    len(collected),
+                )
+            else:
+                logger.info("Landing captured: %s (%d assets)", url, len(collected))
             return "completed", rel_dir
         except Exception as exc:
             logger.warning("Landing capture failed for %s: %s", url, exc)
             return "failed", None
         finally:
             await page.close()
+
+    @staticmethod
+    def _is_landing_error_page(url: str | None, html: str | None) -> bool:
+        normalized_url = (url or "").strip().lower()
+        if not normalized_url:
+            return True
+        if normalized_url.startswith(_LANDING_ERROR_URL_PREFIXES):
+            return True
+
+        lowered_html = (html or "").lower()
+        return any(
+            marker in lowered_html
+            for marker in (
+                "chrome-error://chromewebdata",
+                "dns_probe",
+                "this site can’t be reached",
+                "this site can't be reached",
+            )
+        )
 
 
 

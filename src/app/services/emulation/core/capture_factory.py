@@ -10,6 +10,6 @@ class AdCaptureProviderFactory(Protocol):
 
 class DefaultAdCaptureProviderFactory:
     def create(self, context: object, base_path: Path) -> object:
-        from app.services.emulation.browser.ad_capture import AdCreativeCapture
+        from app.services.emulation.browser.ads.capture import AdCreativeCapture
 
         return AdCreativeCapture(context, base_path)

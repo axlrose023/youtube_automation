@@ -9,14 +9,19 @@ from ..core.config import (
     MAX_SURF_STREAK,
     SEARCH_PRESSURE_CLAMP,
     SEARCH_PRESSURE_DEFAULT,
+    SEARCH_MIN_ACTIONS_BETWEEN_OPTIONAL_SEARCHES,
     SEARCH_PRESSURE_STYLE_WEIGHT,
     SEARCH_PRESSURE_THRESHOLDS,
     TASK_FATIGUE_HIGH,
     TASK_FATIGUE_MEDIUM,
     VIDEO_PACE_GRACE_COMPLETED,
+    VIDEO_PACE_PRE_COVERAGE_MIN_COMPLETED,
+    VIDEO_PACE_PRE_COVERAGE_MIN_ELAPSED_MIN,
+    VIDEO_PACE_PRE_COVERAGE_PENDING_BONUS_CAP,
+    VIDEO_PACE_PRE_COVERAGE_PENDING_BONUS_PER_TOPIC,
     VIDEO_PACE_TARGET_MIN_PER_COMPLETED,
 )
-from ..core.state import Mode, SessionState
+from ..core.session.state import Mode, SessionState
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +94,7 @@ class ActionPicker:
             )
             return self._finalize(Action.SEARCH)
 
-        if unsearched and self._should_prioritize_search(unsearched):
+        if unsearched and self._can_run_optional_search() and self._should_prioritize_search(unsearched):
             logger.info(
                 "Session %s: dynamic coverage push (%d topics left) -> search",
                 self._state.session_id,
@@ -97,12 +102,15 @@ class ActionPicker:
             )
             return self._finalize(Action.SEARCH)
 
-        if self._state.all_topics_covered() and self._is_completed_video_pace_high():
-            action = self._pick_video_pace_guard_action()
+        pace_guard_reason = self._pace_guard_reason(unsearched)
+        if pace_guard_reason:
+            action = self._pick_video_pace_guard_action(pre_coverage=pace_guard_reason == "pre_coverage")
             logger.info(
-                "Session %s: pace guard (completed=%d) -> %s",
+                "Session %s: pace guard (%s, completed=%d, pending_topics=%d) -> %s",
                 self._state.session_id,
+                pace_guard_reason,
                 self._state.videos_watched,
+                len(unsearched),
                 action,
             )
             return self._finalize(action)
@@ -116,7 +124,7 @@ class ActionPicker:
             Action.WATCH_LONG: 54,
             Action.CLICK_RECOMMENDED: 8,
             Action.SCROLL_FEED: 10,
-            Action.SEARCH: 5 if unsearched else 0,
+            Action.SEARCH: 5 if unsearched and self._can_run_optional_search() else 0,
             Action.IDLE: 14,
             Action.GO_HOME: 6,
         }
@@ -145,7 +153,7 @@ class ActionPicker:
 
         weights: dict[Action, int] = {
             Action.WATCH_FOCUSED: 50,
-            Action.SEARCH: 12 if unsearched else 1,
+            Action.SEARCH: 12 if unsearched and self._can_run_optional_search() else 1,
             Action.SURF_VIDEO: 6,
             Action.CLICK_RECOMMENDED: 4,
             Action.SCROLL_RESULTS: 6,
@@ -209,23 +217,71 @@ class ActionPicker:
         pressure = min(max(pressure + style_adjustment, lo), hi)
         return random.random() < pressure
 
+    def _can_run_optional_search(self) -> bool:
+        if not self._state.searched_topics:
+            return True
+        return self._actions_since_search >= SEARCH_MIN_ACTIONS_BETWEEN_OPTIONAL_SEARCHES
+
+    def _pace_guard_reason(self, unsearched: list[str]) -> str | None:
+        if not unsearched and self._is_completed_video_pace_high():
+            return "post_coverage"
+        if self._is_pre_coverage_video_pace_high(unsearched):
+            return "pre_coverage"
+        return None
+
     def _is_completed_video_pace_high(self) -> bool:
-        elapsed_minutes = max(
+        return self._state.videos_watched > self._allowed_completed_videos()
+
+    def _is_pre_coverage_video_pace_high(self, unsearched: list[str]) -> bool:
+        if not unsearched:
+            return False
+        if self._state.videos_watched < VIDEO_PACE_PRE_COVERAGE_MIN_COMPLETED:
+            return False
+
+        elapsed_minutes = self._elapsed_minutes()
+        if elapsed_minutes < VIDEO_PACE_PRE_COVERAGE_MIN_ELAPSED_MIN:
+            return False
+
+        pending_bonus = min(
+            len(unsearched) * VIDEO_PACE_PRE_COVERAGE_PENDING_BONUS_PER_TOPIC,
+            VIDEO_PACE_PRE_COVERAGE_PENDING_BONUS_CAP,
+        )
+        allowed_completed = self._allowed_completed_videos() + pending_bonus
+        return self._state.videos_watched > allowed_completed
+
+    def _allowed_completed_videos(self) -> float:
+        elapsed_minutes = self._elapsed_minutes()
+        return (elapsed_minutes / VIDEO_PACE_TARGET_MIN_PER_COMPLETED) + VIDEO_PACE_GRACE_COMPLETED
+
+    def _elapsed_minutes(self) -> float:
+        return max(
             (self._state.duration_minutes * 60 - self._state.remaining_seconds()) / 60.0,
             0.1,
         )
-        allowed_completed = (
-            elapsed_minutes / VIDEO_PACE_TARGET_MIN_PER_COMPLETED
-        ) + VIDEO_PACE_GRACE_COMPLETED
-        return self._state.videos_watched > allowed_completed
 
-    def _pick_video_pace_guard_action(self) -> Action:
+    def _pick_video_pace_guard_action(self, *, pre_coverage: bool) -> Action:
         if self._state.mode == Mode.B:
+            if pre_coverage:
+                return self._weighted_choice(
+                    {
+                        Action.IDLE: 45,
+                        Action.SCROLL_RESULTS: 35,
+                        Action.GO_BACK: 20,
+                    },
+                )
             return self._weighted_choice(
                 {
                     Action.IDLE: 55,
                     Action.SCROLL_RESULTS: 25,
                     Action.GO_BACK: 20,
+                },
+            )
+        if pre_coverage:
+            return self._weighted_choice(
+                {
+                    Action.IDLE: 45,
+                    Action.SCROLL_FEED: 35,
+                    Action.GO_HOME: 20,
                 },
             )
         return self._weighted_choice(

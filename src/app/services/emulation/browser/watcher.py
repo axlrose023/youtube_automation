@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import random
 from dataclasses import dataclass
@@ -5,6 +7,7 @@ from dataclasses import dataclass
 from playwright.async_api import Page
 
 from ..core.config import (
+    AD_COMPLETION_OVERFLOW_MAX_S,
     CLICK_RECOMMENDED_FALLBACK_A,
     CLICK_RECOMMENDED_FALLBACK_B,
     COMMENT_REFOLLOW_BASE_PROBABILITY,
@@ -14,27 +17,15 @@ from ..core.config import (
     CONTINUE_CURRENT_VIDEO_FALLBACK,
     CONTINUE_CURRENT_VIDEO_MIN_REMAINING_S,
     CONTINUE_CURRENT_VIDEO_PROBABILITY,
-    COVERAGE_CAP_BUDGET_FRACTION,
     COVERAGE_CAP_CLICK_RECOMMENDED,
     COVERAGE_CAP_DEFAULT,
-    COVERAGE_CAP_MIN_S,
     COVERAGE_CAP_WATCH_FOCUSED,
     COVERAGE_CAP_WATCH_LONG,
-    COVERAGE_SEARCH_OVERHEAD_S,
     FIRST_EVAL_RANGE,
-    FULL_WATCH_CHANCE_LONG_A,
-    FULL_WATCH_CHANCE_LONG_B,
-    FULL_WATCH_CHANCE_MID_A,
-    FULL_WATCH_CHANCE_MID_B,
-    FULL_WATCH_CHANCE_SHORT_A,
-    FULL_WATCH_CHANCE_SHORT_B,
     MICRO_PAUSE_PROBABILITY,
     MICRO_SCROLL_PROBABILITY,
     MICRO_WIGGLE_PROBABILITY,
     QUICK_EXIT_PROBABILITY,
-    REALISM_MIN_WATCH_AFTER_COVERAGE_S,
-    REALISM_MIN_WATCH_S,
-    REALISM_MIN_WATCH_TRIGGER_REMAINING_S,
     SEEK_CHOICES,
     SEEK_FORWARD_PROBABILITY,
     SPEED_CHANGE_PROBABILITY,
@@ -45,19 +36,18 @@ from ..core.config import (
     WATCH_FOCUSED_FALLBACK,
     WATCH_LONG_FALLBACK,
 )
-from ..core.state import Mode, SessionState
-from .ad_handler import AdHandler
+from ..core.session.state import Mode, SessionState
+from .ads.handler import AdHandler
 from .humanizer import Humanizer
 from .navigator import Navigator
 from .playback import PlaybackController
+from .watch_duration import WatchDurationCalculator
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class WatchProfile:
-
-
     action: str
     mode_a: bool = True
     patient_ads: bool = True
@@ -69,8 +59,6 @@ class WatchProfile:
     mark_completed: bool = True
     increment_surf: bool = False
     go_back_probability: float = 0.0
-
-
 
 
 PROFILE_WATCH_LONG = WatchProfile(
@@ -123,8 +111,9 @@ class VideoWatcher:
         self._h = humanizer
         self._ads = ads
         self._playback = playback
+        self._duration = WatchDurationCalculator(state, playback)
 
-
+    # ── Public actions ────────────────────────────────────────
 
     async def watch_long(self) -> None:
         if await self._maybe_continue_current_video(PROFILE_WATCH_LONG):
@@ -156,7 +145,7 @@ class VideoWatcher:
         )
         await self._do_watch_after_click(profile)
 
-
+    # ── Core watch orchestration ──────────────────────────────
 
     async def _execute_watch(self, profile: WatchProfile) -> None:
         if not await self._nav.click_any_video():
@@ -165,60 +154,30 @@ class VideoWatcher:
         await self._do_watch_after_click(profile)
 
     async def _do_watch_after_click(self, profile: WatchProfile) -> None:
-
         self._state.no_video_streak = 0
         video_title, video_url = await self._log_opened_video(profile.action)
+        self._state.start_current_watch(
+            action=profile.action,
+            title=video_title,
+            url=video_url,
+        )
         await self._ads.handle(patient=profile.patient_ads)
         await self._playback.ensure_playing(self._state.session_id)
 
-        watch_s = await self._decide_duration(
-            mode_a=profile.mode_a,
-            fallback_min=profile.fallback_min,
-            fallback_max=profile.fallback_max,
-        )
-        if profile.fatigue_threshold > 0 and profile.fatigue_reduction > 0:
-            if self._state.fatigue > profile.fatigue_threshold:
-                before = watch_s
-                watch_s *= random.uniform(profile.fatigue_reduction, profile.fatigue_reduction + 0.1)
-                watch_s = min(watch_s, before)
-                logger.info(
-                    "Session %s: fatigue %.2f, reduced %.0fs -> %.0fs",
-                    self._state.session_id, self._state.fatigue, before, watch_s,
-                )
-        watch_s = self._cap_before_topic_coverage(watch_s, profile)
-        watch_s = self._apply_realism_floor(
-            watch_s,
-            profile,
-            after_coverage=self._state.all_topics_covered(),
-        )
-        watch_s = self._cap_to_remaining(watch_s)
+        watch_s = await self._calculate_watch_time(profile)
+        self._state.update_current_watch(target_seconds=watch_s)
         if watch_s <= 0:
             logger.info("Session %s: %s — no time left", self._state.session_id, profile.action)
+            self._state.clear_current_watch()
             return
 
         logger.info("Session %s: %s — watching for %.0fs", self._state.session_id, profile.action, watch_s)
         watched_seconds = await self._watch_for(watch_s, mode_a=profile.mode_a, source_action=profile.action)
-        self._state.add_watched_video(
-            action=profile.action,
-            title=video_title,
-            url=video_url,
-            watched_seconds=watched_seconds,
-            target_seconds=watch_s,
-            completed=profile.mark_completed,
-        )
-
-        if profile.increment_surf:
-            self._state.surf_streak += 1
-        if profile.mark_completed:
-            self._state.videos_watched += 1
-
-        self._state.on_video_page = True
+        self._record_and_finalize(profile, video_title, video_url, watched_seconds, watch_s)
 
         if profile.go_back_probability > 0 and random.random() < profile.go_back_probability:
             logger.info("Session %s: %s — going back", self._state.session_id, profile.action)
             await self._nav.go_back()
-
-        logger.info("Session %s: %s done (total watched: %d)", self._state.session_id, profile.action, self._state.videos_watched)
 
     async def _maybe_continue_current_video(self, profile: WatchProfile) -> bool:
         if not self._state.on_video_page:
@@ -234,50 +193,30 @@ class VideoWatcher:
 
         logger.info(
             "Session %s: %s — continue current video instead of opening a new one",
-            self._state.session_id,
-            profile.action,
+            self._state.session_id, profile.action,
         )
 
         self._state.no_video_streak = 0
         video_title = await self._playback.get_title()
+        self._state.start_current_watch(
+            action=profile.action,
+            title=video_title,
+            url=opened_url,
+        )
         await self._ads.handle(patient=profile.patient_ads)
         await self._playback.ensure_playing(self._state.session_id)
 
-        watch_s = await self._decide_duration(
-            mode_a=profile.mode_a,
-            fallback_min=CONTINUE_CURRENT_VIDEO_FALLBACK[0],
-            fallback_max=CONTINUE_CURRENT_VIDEO_FALLBACK[1],
-        )
-        if profile.fatigue_threshold > 0 and profile.fatigue_reduction > 0:
-            if self._state.fatigue > profile.fatigue_threshold:
-                before = watch_s
-                watch_s *= random.uniform(
-                    profile.fatigue_reduction,
-                    profile.fatigue_reduction + 0.1,
-                )
-                watch_s = min(watch_s, before)
-                logger.info(
-                    "Session %s: fatigue %.2f, reduced %.0fs -> %.0fs",
-                    self._state.session_id,
-                    self._state.fatigue,
-                    before,
-                    watch_s,
-                )
-
-        watch_s = self._cap_before_topic_coverage(watch_s, profile)
-        watch_s = self._apply_realism_floor(
-            watch_s,
+        watch_s = await self._calculate_watch_time(
             profile,
-            after_coverage=self._state.all_topics_covered(),
+            fallback_override=(CONTINUE_CURRENT_VIDEO_FALLBACK[0], CONTINUE_CURRENT_VIDEO_FALLBACK[1]),
         )
-        watch_s = self._cap_to_remaining(watch_s)
+        self._state.update_current_watch(target_seconds=watch_s)
         if watch_s <= 0:
+            self._state.clear_current_watch()
             return True
 
         watched_seconds = await self._watch_for(
-            watch_s,
-            mode_a=profile.mode_a,
-            source_action=f"{profile.action}_continue",
+            watch_s, mode_a=profile.mode_a, source_action=f"{profile.action}_continue",
         )
         self._state.add_watched_video(
             action=profile.action,
@@ -288,11 +227,11 @@ class VideoWatcher:
             completed=profile.mark_completed,
             merge_if_same_url=True,
         )
+        self._state.clear_current_watch()
         self._state.on_video_page = True
         return True
 
     async def _execute_watch_focused(self) -> None:
-
         profile = PROFILE_WATCH_FOCUSED
 
         if not await self._nav.click_any_video():
@@ -301,12 +240,18 @@ class VideoWatcher:
 
         self._state.no_video_streak = 0
         video_title, video_url = await self._log_opened_video(profile.action)
+        self._state.start_current_watch(
+            action=profile.action,
+            title=video_title,
+            url=video_url,
+        )
         await self._ads.handle(patient=False)
         await self._playback.ensure_playing(self._state.session_id)
 
-
-        first_eval = self._cap_to_remaining(random.uniform(*FIRST_EVAL_RANGE))
+        first_eval = self._duration.cap_to_remaining(random.uniform(*FIRST_EVAL_RANGE))
+        self._state.update_current_watch(target_seconds=first_eval)
         if first_eval <= 0:
+            self._state.clear_current_watch()
             return
         logger.info("Session %s: %s — first eval %.0fs", self._state.session_id, profile.action, first_eval)
         first_eval_watched = await self._watch_for(first_eval, mode_a=False, source_action="watch_focused_eval")
@@ -314,17 +259,13 @@ class VideoWatcher:
         if random.random() < QUICK_EXIT_PROBABILITY and self._state.remaining_seconds() > 90:
             logger.info("Session %s: %s — quick exit after eval", self._state.session_id, profile.action)
             self._state.add_watched_video(
-                action=profile.action,
-                title=video_title,
-                url=video_url,
-                watched_seconds=first_eval_watched,
-                target_seconds=first_eval,
-                completed=False,
+                action=profile.action, title=video_title, url=video_url,
+                watched_seconds=first_eval_watched, target_seconds=first_eval, completed=False,
             )
+            self._state.clear_current_watch()
             self._state.surf_streak += 1
             self._state.on_video_page = True
             return
-
 
         if random.random() < SPEED_CHANGE_PROBABILITY:
             speed = random.choice(SPEED_CHOICES)
@@ -336,41 +277,80 @@ class VideoWatcher:
             logger.info("Session %s: seeking forward %ds", self._state.session_id, seek)
             await self._playback.seek_forward(seek)
 
-
-        watch_s = await self._decide_duration(
-            mode_a=False,
-            fallback_min=profile.fallback_min,
-            fallback_max=profile.fallback_max,
+        watch_s = await self._duration.decide(
+            mode_a=profile.mode_a, fallback_min=profile.fallback_min, fallback_max=profile.fallback_max,
         )
-        if profile.fatigue_threshold > 0 and self._state.fatigue > profile.fatigue_threshold:
+        if self._state.fatigue > profile.fatigue_threshold:
             watch_s *= random.uniform(0.5, profile.fatigue_reduction if profile.fatigue_reduction > 0 else 0.8)
-        watch_s = self._cap_before_topic_coverage(watch_s, profile)
-        watch_s = self._apply_realism_floor(
-            watch_s,
-            profile,
+        watch_s = self._duration.cap_before_topic_coverage(watch_s, profile.cap_range, profile.action)
+        watch_s = self._duration.apply_realism_floor(
+            watch_s, profile.action,
+            mark_completed=profile.mark_completed,
             after_coverage=self._state.all_topics_covered(),
         )
-        watch_s = self._cap_to_remaining(watch_s)
+        watch_s = self._duration.cap_to_remaining(watch_s)
+        self._state.update_current_watch(target_seconds=first_eval + watch_s)
         if watch_s <= 0:
+            self._state.clear_current_watch()
             return
 
         logger.info("Session %s: %s — watching for %.0fs", self._state.session_id, profile.action, watch_s)
         watched_main = await self._watch_for(watch_s, mode_a=False, source_action=profile.action)
         self._state.add_watched_video(
-            action=profile.action,
-            title=video_title,
-            url=video_url,
+            action=profile.action, title=video_title, url=video_url,
             watched_seconds=first_eval_watched + watched_main,
-            target_seconds=first_eval + watch_s,
-            completed=True,
+            target_seconds=first_eval + watch_s, completed=True,
         )
+        self._state.clear_current_watch()
         self._state.videos_watched += 1
         self._state.on_video_page = True
-
         await self._playback.set_speed(1.0)
         logger.info("Session %s: %s done (total watched: %d)", self._state.session_id, profile.action, self._state.videos_watched)
 
+    # ── Shared helpers ────────────────────────────────────────
 
+    async def _calculate_watch_time(
+        self,
+        profile: WatchProfile,
+        fallback_override: tuple[float, float] | None = None,
+    ) -> float:
+        fb_min = fallback_override[0] if fallback_override else profile.fallback_min
+        fb_max = fallback_override[1] if fallback_override else profile.fallback_max
+
+        watch_s = await self._duration.decide(mode_a=profile.mode_a, fallback_min=fb_min, fallback_max=fb_max)
+        watch_s = self._duration.apply_fatigue_reduction(watch_s, profile.fatigue_threshold, profile.fatigue_reduction)
+        watch_s = self._duration.cap_before_topic_coverage(watch_s, profile.cap_range, profile.action)
+        watch_s = self._duration.apply_realism_floor(
+            watch_s, profile.action,
+            mark_completed=profile.mark_completed,
+            after_coverage=self._state.all_topics_covered(),
+        )
+        return self._duration.cap_to_remaining(watch_s)
+
+    def _record_and_finalize(
+        self,
+        profile: WatchProfile,
+        video_title: str | None,
+        video_url: str,
+        watched_seconds: float,
+        target_seconds: float,
+    ) -> None:
+        self._state.add_watched_video(
+            action=profile.action, title=video_title, url=video_url,
+            watched_seconds=watched_seconds, target_seconds=target_seconds,
+            completed=profile.mark_completed,
+        )
+        self._state.clear_current_watch()
+        if profile.increment_surf:
+            self._state.surf_streak += 1
+        if profile.mark_completed:
+            self._state.videos_watched += 1
+        self._state.on_video_page = True
+
+        logger.info(
+            "Session %s: %s done (total watched: %d)",
+            self._state.session_id, profile.action, self._state.videos_watched,
+        )
 
     async def _on_no_video(self, action: str) -> None:
         self._state.no_video_streak += 1
@@ -378,7 +358,6 @@ class VideoWatcher:
             "Session %s: %s — no video found (streak=%d)",
             self._state.session_id, action, self._state.no_video_streak,
         )
-
         await self._nav.recover_from_no_video()
 
         if self._state.on_video_page and self._state.no_video_streak >= 1:
@@ -398,8 +377,6 @@ class VideoWatcher:
             await self._nav.safe_go_home()
             self._state.on_video_page = False
 
-
-
     async def _log_opened_video(self, action: str) -> tuple[str | None, str]:
         opened_url = self._page.url or self._state.last_clicked_video_url or ""
         dom_title = await self._playback.get_title()
@@ -413,10 +390,7 @@ class VideoWatcher:
 
         logger.info(
             "Session %s: %s — opened %s (title=%s)",
-            self._state.session_id,
-            action,
-            opened_url,
-            video_title or "<unknown>",
+            self._state.session_id, action, opened_url, video_title or "<unknown>",
         )
         return video_title, opened_url
 
@@ -425,9 +399,12 @@ class VideoWatcher:
         right_id = self._state.video_id_from_url(right_url)
         return bool(left_id and right_id and left_id == right_id)
 
+    # ── Micro-interaction watch loop ──────────────────────────
+
     async def _watch_for(self, seconds: float, *, mode_a: bool, source_action: str) -> float:
         elapsed = 0.0
         chunks = 0
+        ad_overflow_started_at: float | None = None
         comment_depth = 0
         comment_dwell_seconds = 0.0
         comment_refocus_target = random.uniform(4.0, 10.0)
@@ -439,6 +416,21 @@ class VideoWatcher:
         while elapsed < seconds:
             remaining = self._state.remaining_seconds()
             if remaining <= 1.0:
+                if await self._allow_terminal_ad_overflow(
+                    mode_a=mode_a,
+                    source_action=source_action,
+                    elapsed=elapsed,
+                    ad_checks=ad_checks,
+                    ad_skip_attempts=ad_skip_attempts,
+                    ad_overflow_started_at=ad_overflow_started_at,
+                ):
+                    ad_overflow_started_at = ad_overflow_started_at or time.monotonic()
+                    if await self._ads.check():
+                        ad_checks += 1
+                    captured_ads = await self._ads.handle(patient=mode_a)
+                    ad_skip_attempts += sum(
+                        1 for ad in captured_ads if isinstance(ad, dict) and ad.get("skip_clicked")
+                    )
                 logger.info("Session %s: session time up during watch", self._state.session_id)
                 break
 
@@ -452,15 +444,40 @@ class VideoWatcher:
             chunks += 1
             await self._h.delay(chunk, chunk)
             elapsed += chunk
+            self._state.increment_current_watch(chunk)
             if comment_depth > 0:
                 comment_dwell_seconds += chunk
+
+            remaining_after_delay = self._state.remaining_seconds()
+            if remaining_after_delay <= 1.0:
+                if await self._allow_terminal_ad_overflow(
+                    mode_a=mode_a,
+                    source_action=source_action,
+                    elapsed=elapsed,
+                    ad_checks=ad_checks,
+                    ad_skip_attempts=ad_skip_attempts,
+                    ad_overflow_started_at=ad_overflow_started_at,
+                ):
+                    ad_overflow_started_at = ad_overflow_started_at or time.monotonic()
+                    if await self._ads.check():
+                        ad_checks += 1
+                    captured_ads = await self._ads.handle(patient=mode_a)
+                    ad_skip_attempts += sum(
+                        1 for ad in captured_ads if isinstance(ad, dict) and ad.get("skip_clicked")
+                    )
+                logger.info(
+                    "Session %s: session time up after watch delay (source=%s, watched=%.1fs)",
+                    self._state.session_id,
+                    source_action,
+                    elapsed,
+                )
+                break
 
             if await self._ads.check():
                 ad_checks += 1
                 logger.info(
                     "Session %s: %s micro — ad break detected",
-                    self._state.session_id,
-                    source_action,
+                    self._state.session_id, source_action,
                 )
                 if mode_a and random.random() < 0.4:
                     await self._h.delay(3, 8)
@@ -468,6 +485,15 @@ class VideoWatcher:
                 ad_skip_attempts += sum(
                     1 for ad in captured_ads if isinstance(ad, dict) and ad.get("skip_clicked")
                 )
+                remaining_after_ads = self._state.remaining_seconds()
+                if remaining_after_ads <= 1.0:
+                    logger.info(
+                        "Session %s: session time up after ad handling (source=%s, watched=%.1fs)",
+                        self._state.session_id,
+                        source_action,
+                        elapsed,
+                    )
+                    break
 
             roll = random.random()
             if roll < MICRO_SCROLL_PROBABILITY:
@@ -478,12 +504,8 @@ class VideoWatcher:
                 comment_depth += amount
                 logger.info(
                     "Session %s: %s micro — scroll_down amount=%d (depth=%d dwell=%.1fs target=%.1fs)",
-                    self._state.session_id,
-                    source_action,
-                    amount,
-                    comment_depth,
-                    comment_dwell_seconds,
-                    comment_refocus_target,
+                    self._state.session_id, source_action,
+                    amount, comment_depth, comment_dwell_seconds, comment_refocus_target,
                 )
                 await self._h.scroll("down", amount=amount)
                 if self._should_refocus_after_comment_scroll(
@@ -523,18 +545,47 @@ class VideoWatcher:
 
         logger.info(
             "Session %s: %s summary — watched=%.0fs target=%.0fs chunks=%d micro(scroll=%d,wiggle=%d,pause=%d) ads(detected=%d,skip_attempts=%d)",
+            self._state.session_id, source_action,
+            elapsed, seconds, chunks,
+            micro_scrolls, micro_wiggles, micro_pauses,
+            ad_checks, ad_skip_attempts,
+        )
+        return elapsed
+
+    async def _allow_terminal_ad_overflow(
+        self,
+        *,
+        mode_a: bool,
+        source_action: str,
+        elapsed: float,
+        ad_checks: int,
+        ad_skip_attempts: int,
+        ad_overflow_started_at: float | None,
+    ) -> bool:
+        if not await self._ads.check():
+            return False
+        if ad_overflow_started_at is not None:
+            overflow_elapsed = max(time.monotonic() - ad_overflow_started_at, 0.0)
+            if overflow_elapsed >= AD_COMPLETION_OVERFLOW_MAX_S:
+                logger.info(
+                    "Session %s: %s terminal ad overflow cap hit after %.1fs",
+                    self._state.session_id,
+                    source_action,
+                    overflow_elapsed,
+                )
+                return False
+        logger.info(
+            "Session %s: %s allowing terminal ad overflow (watched=%.1fs, ads_detected=%d, ad_skip_attempts=%d, patient=%s)",
             self._state.session_id,
             source_action,
             elapsed,
-            seconds,
-            chunks,
-            micro_scrolls,
-            micro_wiggles,
-            micro_pauses,
             ad_checks,
             ad_skip_attempts,
+            mode_a,
         )
-        return elapsed
+        return True
+
+    # ── Comment / scroll helpers ──────────────────────────────
 
     def _should_refocus_after_comment_scroll(
         self,
@@ -551,10 +602,7 @@ class VideoWatcher:
             return False
 
         depth_bonus = max(comment_depth - 2, 0) * COMMENT_REFOLLOW_STEP_PROBABILITY
-        dwell_ratio = min(
-            comment_dwell_seconds / max(comment_refocus_target, 1.0),
-            1.5,
-        )
+        dwell_ratio = min(comment_dwell_seconds / max(comment_refocus_target, 1.0), 1.5)
         dwell_bonus = dwell_ratio * 0.2
         probability = min(
             COMMENT_REFOLLOW_BASE_PROBABILITY * 0.55 + depth_bonus + dwell_bonus,
@@ -577,11 +625,8 @@ class VideoWatcher:
         )
         logger.info(
             "Session %s: %s micro — reading comments %.1fs (depth=%d dwell=%.1fs)",
-            self._state.session_id,
-            source_action,
-            read_time,
-            comment_depth,
-            comment_dwell_seconds,
+            self._state.session_id, source_action,
+            read_time, comment_depth, comment_dwell_seconds,
         )
         await self._h.delay(read_time, read_time)
 
@@ -596,8 +641,7 @@ class VideoWatcher:
         await self._smooth_return_to_player()
         logger.info(
             "Session %s: %s micro — smooth return to player after comments glance",
-            self._state.session_id,
-            source_action,
+            self._state.session_id, source_action,
         )
         await self._h.delay(0.3, 0.9)
         await self._playback.ensure_playing(self._state.session_id)
@@ -656,112 +700,3 @@ class VideoWatcher:
             )
         except Exception:
             return False
-
-
-
-    async def _decide_duration(
-        self, *, mode_a: bool, fallback_min: float, fallback_max: float,
-    ) -> float:
-        video_dur = await self._playback.get_duration()
-        logger.info("Session %s: video duration = %s", self._state.session_id, f"{video_dur:.0f}s" if video_dur else "unknown")
-
-        patience = self._state.personality.patience
-
-        if video_dur and video_dur > 5:
-            if self._should_watch_full(video_dur, mode_a=mode_a):
-                watch = video_dur * random.uniform(0.85, 1.0) * patience
-                logger.info("Session %s: decided full watch %.0fs / %.0fs (patience=%.2f)", self._state.session_id, watch, video_dur, patience)
-                return watch
-
-            if video_dur < 180:
-                fraction = random.uniform(0.4, 0.8)
-            elif video_dur < 600:
-                fraction = random.uniform(0.2, 0.6)
-            else:
-                fraction = random.uniform(0.1, 0.4)
-
-            watch = max(video_dur * fraction, fallback_min) * patience
-            logger.info("Session %s: decided partial watch %.0fs / %.0fs (%.0f%%, patience=%.2f)", self._state.session_id, watch, video_dur, fraction * 100, patience)
-            return watch
-
-        watch = random.uniform(fallback_min, fallback_max) * patience
-        logger.info("Session %s: decided fallback watch %.0fs (patience=%.2f)", self._state.session_id, watch, patience)
-        return watch
-
-    def _should_watch_full(self, video_dur: float, *, mode_a: bool) -> bool:
-        if video_dur > 1200 and self._state.fatigue > 0.5:
-            return False
-
-        if mode_a:
-            chance = (
-                FULL_WATCH_CHANCE_SHORT_A if video_dur < 120
-                else FULL_WATCH_CHANCE_MID_A if video_dur < 600
-                else FULL_WATCH_CHANCE_LONG_A
-            )
-        else:
-            chance = (
-                FULL_WATCH_CHANCE_SHORT_B if video_dur < 120
-                else FULL_WATCH_CHANCE_MID_B if video_dur < 600
-                else FULL_WATCH_CHANCE_LONG_B
-            )
-
-        chance *= max(1.0 - self._state.fatigue * 0.5, 0.3)
-        return random.random() < chance
-
-    def _cap_to_remaining(self, seconds: float) -> float:
-        return min(seconds, self._state.remaining_seconds())
-
-    def _apply_realism_floor(
-        self,
-        seconds: float,
-        profile: WatchProfile,
-        *,
-        after_coverage: bool,
-    ) -> float:
-        if not profile.mark_completed:
-            return seconds
-        if self._state.remaining_seconds() < REALISM_MIN_WATCH_TRIGGER_REMAINING_S:
-            return seconds
-
-        floor = REALISM_MIN_WATCH_AFTER_COVERAGE_S if after_coverage else REALISM_MIN_WATCH_S
-        if seconds >= floor:
-            return seconds
-
-        logger.info(
-            "Session %s: %s realism floor %.0fs -> %.0fs (after_coverage=%s)",
-            self._state.session_id,
-            profile.action,
-            seconds,
-            floor,
-            after_coverage,
-        )
-        return floor
-
-    def _cap_before_topic_coverage(self, seconds: float, profile: WatchProfile) -> float:
-        unsearched = self._state.unsearched_topics()
-        if not unsearched:
-            return seconds
-
-        default_cap = random.uniform(*profile.cap_range)
-
-        pending_topics_after_current = len(unsearched)
-        remaining_seconds = self._state.remaining_seconds()
-        watch_segments_left = pending_topics_after_current + 1
-        budget_for_watch = max(
-            remaining_seconds - pending_topics_after_current * COVERAGE_SEARCH_OVERHEAD_S,
-            0.0,
-        )
-        dynamic_cap = max(COVERAGE_CAP_MIN_S, (budget_for_watch / max(watch_segments_left, 1)) * COVERAGE_CAP_BUDGET_FRACTION)
-        coverage_cap = min(default_cap, dynamic_cap)
-        limited = min(seconds, coverage_cap)
-        if limited < seconds:
-            logger.info(
-                "Session %s: %s capped %.0fs -> %.0fs until all topics covered (remaining_topics=%d, remaining=%.0fs)",
-                self._state.session_id,
-                profile.action,
-                seconds,
-                limited,
-                pending_topics_after_current,
-                remaining_seconds,
-            )
-        return limited

@@ -6,9 +6,9 @@ import time
 
 from playwright.async_api import Page
 
-from .browser.ad_capture import AdCaptureProvider
-from .core.session_store import EmulationSessionStore
-from .core.state import EmulationResult, SessionState
+from .browser.ads.capture import AdCaptureProvider
+from .core.session.store import EmulationSessionStore
+from .core.session.state import EmulationResult, SessionState
 from .runtime import build_runtime
 from .session_loop import SessionLoop
 
@@ -51,6 +51,7 @@ class YouTubeEmulator:
             humanizer=runtime.humanizer,
             traffic=runtime.traffic,
             session_store=session_store,
+            flush_pending_captures=self.ads.flush_pending_captures,
         )
 
     async def run(self) -> EmulationResult:

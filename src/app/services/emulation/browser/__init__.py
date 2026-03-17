@@ -1,4 +1,4 @@
-from .ad_handler import AdHandler
+from .ads.handler import AdHandler
 from .humanizer import Humanizer
 from .navigator import Navigator
 from .playback import PlaybackController

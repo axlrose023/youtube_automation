@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .state import SessionState
+from .session.state import SessionState
 
 
 def build_bootstrap_payload(live_payload: dict) -> dict[str, object]:

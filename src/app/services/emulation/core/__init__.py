@@ -25,5 +25,5 @@ from .selectors import (
     VIDEO_SELECTORS,
     YOUTUBE_URL,
 )
-from .session_store import EmulationSessionStore
-from .state import EmulationResult, Mode, SessionPersonality, SessionState
+from .session.store import EmulationSessionStore
+from .session.state import EmulationResult, Mode, SessionPersonality, SessionState

@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 import logging
 import random
-from collections.abc import Awaitable, Callable
+import re
+from urllib.parse import quote_plus
+from typing import TYPE_CHECKING
 
 from playwright.async_api import ElementHandle, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeout
@@ -12,10 +16,57 @@ from ..core.selectors import (
     SEARCH_INPUT_SELECTORS,
     VIDEO_SELECTORS,
 )
-from ..core.state import SessionState
+from ..core.session.state import SessionState
 from .humanizer import Humanizer
 
+if TYPE_CHECKING:
+    from .navigator import Navigator
+
 logger = logging.getLogger(__name__)
+_FINANCE_TOPIC_HINTS = (
+    "crypto",
+    "bitcoin",
+    "ethereum",
+    "finance",
+    "financial",
+    "invest",
+    "stock",
+    "market",
+    "trading",
+    "econom",
+    "крипт",
+    "битко",
+    "финанс",
+    "инвест",
+)
+_FINANCE_SEARCH_MODIFIERS = (
+    "explained",
+    "guide",
+    "tutorial",
+    "for beginners",
+    "analysis",
+)
+_FINANCE_QUERY_HINTS = (
+    "explained",
+    "guide",
+    "tutorial",
+    "analysis",
+    "for beginners",
+    "basics",
+    "overview",
+)
+_FINANCE_TOPIC_QUERY_TEMPLATES = (
+    ("financial markets", "financial markets explained capital markets"),
+    ("stock market", "stock market explained investing basics"),
+    ("stocks", "stocks explained for beginners"),
+    ("crypto investments", "crypto investing for beginners portfolio"),
+    ("investments", "investing basics portfolio investing for beginners"),
+    ("investment", "investment basics portfolio investing"),
+    ("crypto", "crypto for beginners explained"),
+    ("bitcoin", "bitcoin explained"),
+    ("ethereum", "ethereum explained"),
+    ("finance", "financial literacy and finance basics explained"),
+)
 
 
 class Searcher:
@@ -24,14 +75,12 @@ class Searcher:
         page: Page,
         state: SessionState,
         humanizer: Humanizer,
-        dismiss_consent: Callable[[], Awaitable[None]],
-        go_home: Callable[[], Awaitable[None]],
+        navigator: Navigator,
     ) -> None:
         self._page = page
         self._state = state
         self._h = humanizer
-        self._dismiss_consent = dismiss_consent
-        self._go_home = go_home
+        self._nav = navigator
 
     async def search(self) -> None:
         unsearched = self._state.unsearched_topics()
@@ -49,9 +98,18 @@ class Searcher:
         else:
             topic = "youtube"
 
-        logger.info("Session %s: searching '%s'", self._state.session_id, topic)
+        query = self._build_search_query(topic)
+        if query == topic:
+            logger.info("Session %s: searching '%s'", self._state.session_id, topic)
+        else:
+            logger.info(
+                "Session %s: searching '%s' via enriched query '%s'",
+                self._state.session_id,
+                topic,
+                query,
+            )
         self._state.current_topic = topic
-        await self._execute_search(topic, mark_topic_as_covered=topic)
+        await self._execute_search(query, mark_topic_as_covered=topic)
 
     async def refine_search(self) -> None:
         if not self._state.topics:
@@ -79,11 +137,11 @@ class Searcher:
         fallback_to_regular_search: bool = False,
         mark_topic_as_covered: str | None = None,
     ) -> None:
-        await self._dismiss_consent()
+        await self._nav.dismiss_consent()
         search_input = await self._find_search_input()
         if not search_input:
-            await self._go_home()
-            await self._dismiss_consent()
+            await self._nav.safe_go_home()
+            await self._nav.dismiss_consent()
             search_input = await self._find_search_input(timeout=10_000)
             if not search_input:
                 if fallback_to_regular_search:
@@ -103,7 +161,7 @@ class Searcher:
         await self._h.delay(0.3, 0.8)
 
         await self._submit_search()
-
+        await self._ensure_search_results_page(topic)
         await self._page.wait_for_load_state("domcontentloaded", timeout=10_000)
         await self._h.delay(1.5, 3.0)
         await self._scan_results()
@@ -135,6 +193,24 @@ class Searcher:
                 await self._h.click(search_button)
             else:
                 await self._page.keyboard.press("Enter")
+
+    async def _ensure_search_results_page(self, query: str) -> None:
+        try:
+            await self._page.wait_for_url(re.compile(r".*/results.*"), timeout=4_000)
+        except PlaywrightTimeout:
+            pass
+
+        if "/results" in (self._page.url or ""):
+            return
+
+        direct_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+        logger.warning(
+            "Session %s: search submit stayed on %s, falling back to direct results url",
+            self._state.session_id,
+            self._page.url or "<unknown>",
+        )
+        await self._page.goto(direct_url, wait_until="domcontentloaded", timeout=10_000)
+        await self._h.delay(0.8, 1.6)
 
     async def _scan_results(self) -> None:
         if "/results" not in (self._page.url or ""):
@@ -171,6 +247,23 @@ class Searcher:
                 await self._h.delay(0.2, 0.6)
 
         logger.info("Session %s: scanned search results before click (hovered=%d)", self._state.session_id, hovered)
+
+    def _build_search_query(self, topic: str) -> str:
+        normalized = " ".join(topic.lower().split())
+        if not self._is_finance_context(normalized):
+            return topic
+        for needle, query in _FINANCE_TOPIC_QUERY_TEMPLATES:
+            if needle in normalized:
+                return query
+        if any(hint in normalized for hint in _FINANCE_QUERY_HINTS):
+            return topic
+        if len(normalized.split()) >= 4:
+            return topic
+        return f"{topic} {random.choice(_FINANCE_SEARCH_MODIFIERS)}"
+
+    def _is_finance_context(self, topic: str) -> bool:
+        topics_blob = " ".join(filter(None, [*self._state.topics, self._state.current_topic or "", topic])).lower()
+        return any(hint in topics_blob for hint in _FINANCE_TOPIC_HINTS)
 
     async def _has_result_candidates(self) -> bool:
         for _ in range(6):

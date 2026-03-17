@@ -18,7 +18,7 @@ from app.services.emulation.core.capture_factory import (
     AdCaptureProviderFactory,
     DefaultAdCaptureProviderFactory,
 )
-from app.services.emulation.core.session_store import EmulationSessionStore
+from app.services.emulation.core.session.store import EmulationSessionStore
 from app.services.emulation.orchestrator import EmulationOrchestrationService
 from app.services.emulation.persistence import EmulationPersistenceService
 from app.settings import Config, get_config

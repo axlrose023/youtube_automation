@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 from playwright.async_api import Page
 
-from .browser.ad_capture import AdCaptureProvider
-from .browser.ad_handler import AdHandler
+from .browser.ads.capture import AdCaptureProvider
+from .browser.ads.handler import AdHandler
 from .browser.humanizer import Humanizer
 from .browser.navigator import Navigator
 from .browser.playback import PlaybackController
@@ -13,7 +13,7 @@ from .browser.searcher import Searcher
 from .browser.traffic import TrafficTracker
 from .browser.video_finder import VideoFinder
 from .browser.watcher import VideoWatcher
-from .core.state import SessionState
+from .core.session.state import SessionState
 from .strategy.action_picker import ActionPicker
 from .strategy.clock import SessionClock
 from .strategy.dispatcher import ActionDispatcher
@@ -43,14 +43,8 @@ def build_runtime(
     finder = VideoFinder(page, state, humanizer)
 
     navigator = Navigator(page, state, humanizer, finder)
-    searcher = Searcher(
-        page,
-        state,
-        humanizer,
-        dismiss_consent=navigator.dismiss_consent,
-        go_home=navigator.safe_go_home,
-    )
-    navigator.attach_searcher(searcher)
+    searcher = Searcher(page, state, humanizer, navigator=navigator)
+    navigator.set_searcher(searcher)
 
     watcher = VideoWatcher(page, state, navigator, humanizer, ads, playback)
     clock = SessionClock(state)

@@ -8,7 +8,7 @@ from taskiq.kicker import AsyncKicker
 
 from app.database.uow import UnitOfWork
 from app.services.emulation.core.ad_analytics import build_ads_analytics
-from app.services.emulation.core.session_store import EmulationSessionStore
+from app.services.emulation.core.session.store import EmulationSessionStore
 
 from .gateway import EmulationHistoryQuery
 from .models import EmulationSessionHistory
@@ -87,6 +87,8 @@ class EmulationSessionService:
         if data is None:
             raise HTTPException(status_code=404, detail="Session not found")
 
+        data = await self._reconcile_stale_running_session(session_id, data)
+
         orchestration = data.get("orchestration")
         if not isinstance(orchestration, dict):
             orchestration = {}
@@ -121,6 +123,7 @@ class EmulationSessionService:
             watched_videos_count=data.get("watched_videos_count", 0),
             total_duration_seconds=data.get("total_duration_seconds", 0),
             watched_videos=data.get("watched_videos", []),
+            current_watch=data.get("current_watch"),
             watched_ads_count=data.get("watched_ads_count", 0),
             watched_ads=data.get("watched_ads", []),
             watched_ads_analytics=data.get("watched_ads_analytics")
@@ -130,12 +133,111 @@ class EmulationSessionService:
             error=data.get("error"),
         )
 
+    async def _reconcile_stale_running_session(
+        self,
+        session_id: str,
+        data: dict,
+    ) -> dict:
+        if data.get("status") != "running":
+            return data
+
+        orchestration = data.get("orchestration")
+        if isinstance(orchestration, dict) and orchestration.get("enabled"):
+            phase = str(orchestration.get("phase") or "")
+            next_resume_at = orchestration.get("next_resume_at")
+            if (
+                phase == "break"
+                and isinstance(next_resume_at, int | float)
+                and next_resume_at > datetime.datetime.now(datetime.UTC).timestamp()
+            ):
+                return data
+
+        started_at = data.get("started_at")
+        duration_minutes = data.get("duration_minutes")
+        if not isinstance(started_at, int | float) or not isinstance(duration_minutes, int | float):
+            return data
+
+        now_ts = datetime.datetime.now(datetime.UTC).timestamp()
+        runtime_grace_seconds = 5 * 60
+        if (started_at + (float(duration_minutes) * 60.0) + runtime_grace_seconds) > now_ts:
+            return data
+
+        last_activity_at = self._last_activity_timestamp(data)
+        if (now_ts - last_activity_at) <= (10 * 60):
+            return data
+
+        if await self._session_store.is_run_lock_active(session_id) and (now_ts - last_activity_at) <= (
+            20 * 60
+        ):
+            return data
+
+        error = (
+            "Session stale: no recent progress after expected runtime window; "
+            "marked as failed during status reconciliation"
+        )
+        finished_at = now_ts
+        await self._session_store.update(
+            session_id,
+            status="failed",
+            finished_at=finished_at,
+            current_watch=None,
+            error=error,
+        )
+        live_payload = await self._session_store.get(session_id) or {**data}
+        live_payload["status"] = "failed"
+        live_payload["finished_at"] = finished_at
+        live_payload["current_watch"] = None
+        live_payload["error"] = error
+        await self._history_service.mark_stale_failed(session_id, live_payload, error)
+        return live_payload
+
     @staticmethod
     def _normalize_profile_id(value: object) -> str | None:
         if not isinstance(value, str):
             return None
         normalized = value.strip()
         return normalized or None
+
+    @staticmethod
+    def _last_activity_timestamp(data: dict) -> float:
+        candidates: list[float] = []
+
+        updated_at = data.get("updated_at")
+        if isinstance(updated_at, int | float):
+            candidates.append(float(updated_at))
+
+        current_watch = data.get("current_watch")
+        if isinstance(current_watch, dict):
+            started_at = current_watch.get("started_at")
+            watched_seconds = current_watch.get("watched_seconds")
+            if isinstance(started_at, int | float):
+                current_watch_ts = float(started_at)
+                if isinstance(watched_seconds, int | float):
+                    current_watch_ts += max(float(watched_seconds), 0.0)
+                candidates.append(current_watch_ts)
+
+        for video in data.get("watched_videos") or []:
+            if not isinstance(video, dict):
+                continue
+            recorded_at = video.get("recorded_at")
+            if isinstance(recorded_at, int | float):
+                candidates.append(float(recorded_at))
+
+        for ad in data.get("watched_ads") or []:
+            if not isinstance(ad, dict):
+                continue
+            recorded_at = ad.get("recorded_at")
+            if isinstance(recorded_at, int | float):
+                candidates.append(float(recorded_at))
+            ended_at = ad.get("ended_at")
+            if isinstance(ended_at, int | float):
+                candidates.append(float(ended_at))
+
+        started_at = data.get("started_at")
+        if isinstance(started_at, int | float):
+            candidates.append(float(started_at))
+
+        return max(candidates) if candidates else datetime.datetime.now(datetime.UTC).timestamp()
 
 
 class EmulationHistoryService:
@@ -160,6 +262,33 @@ class EmulationHistoryService:
             session_id,
             status="failed",
             finished_at=datetime.datetime.now(datetime.UTC),
+            error=error,
+        )
+        await self.uow.commit()
+
+    async def mark_stale_failed(
+        self,
+        session_id: str,
+        live_payload: dict,
+        error: str,
+    ) -> None:
+        await self.uow.emulation_history.update_session(
+            session_id,
+            status="failed",
+            started_at=self._as_datetime(live_payload.get("started_at")),
+            finished_at=datetime.datetime.now(datetime.UTC),
+            mode=live_payload.get("mode"),
+            fatigue=live_payload.get("fatigue"),
+            bytes_downloaded=int(live_payload.get("bytes_downloaded") or 0),
+            total_duration_seconds=int(live_payload.get("total_duration_seconds") or 0),
+            videos_watched=int(live_payload.get("videos_watched") or 0),
+            watched_videos_count=int(live_payload.get("watched_videos_count") or 0),
+            watched_ads_count=int(live_payload.get("watched_ads_count") or 0),
+            topics_searched=live_payload.get("topics_searched") or [],
+            watched_videos=live_payload.get("watched_videos") or [],
+            watched_ads=live_payload.get("watched_ads") or [],
+            watched_ads_analytics=live_payload.get("watched_ads_analytics")
+            or build_ads_analytics(live_payload.get("watched_ads") or []),
             error=error,
         )
         await self.uow.commit()
@@ -298,3 +427,9 @@ class EmulationHistoryService:
             captures=capture_summary,
             ad_captures=ad_captures,
         )
+
+    @staticmethod
+    def _as_datetime(value: object) -> datetime.datetime | None:
+        if isinstance(value, int | float):
+            return datetime.datetime.fromtimestamp(float(value), tz=datetime.UTC)
+        return None

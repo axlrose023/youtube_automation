@@ -4,10 +4,73 @@ import random
 from playwright.async_api import ElementHandle, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
-from ..core.state import SessionState
+from ..core.session.state import SessionState
 from .humanizer import Humanizer
 
 logger = logging.getLogger(__name__)
+_FINANCE_TOPIC_HINTS = (
+    "crypto",
+    "bitcoin",
+    "ethereum",
+    "finance",
+    "financial",
+    "invest",
+    "stock",
+    "market",
+    "trading",
+    "econom",
+    "крипт",
+    "битко",
+    "финанс",
+    "инвест",
+    "рын",
+)
+_FINANCE_POSITIVE_TITLE_HINTS = (
+    "what is",
+    "explained",
+    "explanation",
+    "guide",
+    "tutorial",
+    "beginner",
+    "beginners",
+    "basics",
+    "analysis",
+    "overview",
+    "how to",
+    "market",
+)
+_FINANCE_NEGATIVE_TITLE_HINTS = (
+    "out of control",
+    "eat you alive",
+    "do this asap",
+    "get rich",
+    "overnight",
+    "secret",
+    "shocking",
+    "insane",
+    "won't believe",
+    "will shock you",
+    "make millions",
+    "millions",
+    "face melting rally",
+    "extreme breakout",
+    "breakout",
+    "crash has begun",
+    "countdown to",
+    "taking control",
+    "undervalued",
+    "price prediction",
+    "prediction",
+    "bull run",
+    "to the moon",
+    "100x",
+    "whales",
+)
+_FINANCE_GENERAL_TOKENS = ("finance", "financial", "financial literacy", "personal finance")
+_FINANCIAL_MARKET_TOKENS = ("financial market", "financial markets", "capital market", "capital markets")
+_INVESTMENT_TOKENS = ("investing", "investment", "investments", "portfolio", "diversif")
+_STOCK_TOKENS = ("stock market", "stocks", "equities", "equity market")
+_CRYPTO_TOKENS = ("crypto", "cryptocurrency", "digital asset", "bitcoin", "ethereum")
 
 
 class VideoFinder:
@@ -37,6 +100,13 @@ class VideoFinder:
             and require_topic_match
             and preferred_topic
         ):
+            if self._should_stay_strict_on_preferred_topic(preferred_topic):
+                logger.info(
+                    "Session %s: no candidate for preferred topic '%s', staying strict to avoid drift",
+                    self._state.session_id,
+                    preferred_topic,
+                )
+                return False
             logger.info(
                 "Session %s: no candidate for preferred topic '%s', retrying with any input topic",
                 self._state.session_id,
@@ -77,8 +147,8 @@ class VideoFinder:
                         logger.debug("Session %s: selector timeout: %s", self._state.session_id, selector)
                     candidate_elements = await self._page.query_selector_all(selector)
 
-                clickable_elements: list[ElementHandle] = []
-                href_only_elements: list[ElementHandle] = []
+                clickable_elements: list[tuple[float, ElementHandle, str | None]] = []
+                href_only_elements: list[tuple[float, ElementHandle, str | None]] = []
                 elements_with_video_href = 0
                 topic_matched_elements = 0
                 seen_filtered_elements = 0
@@ -95,19 +165,20 @@ class VideoFinder:
                             continue
                         elements_with_video_href += 1
 
+                        title = await self._extract_element_title(candidate_element)
                         if require_topic_match:
-                            title = await self._extract_element_title(candidate_element)
                             if not self._candidate_matches_topic(title, preferred_topic):
                                 continue
                             topic_matched_elements += 1
+                        score = self._score_candidate(title, preferred_topic)
 
                         box = await candidate_element.bounding_box()
                         if box and box["width"] > 0 and box["height"] > 0:
-                            clickable_elements.append(candidate_element)
+                            clickable_elements.append((score, candidate_element, title))
                             if len(clickable_elements) >= limit:
                                 break
                         else:
-                            href_only_elements.append(candidate_element)
+                            href_only_elements.append((score, candidate_element, title))
                     except Exception:
                         continue
 
@@ -128,15 +199,31 @@ class VideoFinder:
                         selector,
                         seen_filtered_elements,
                     )
+                prefer_best_match = bool(
+                    preferred_topic
+                    and require_topic_match
+                    and self._is_finance_context()
+                    and not self._state.all_topics_covered()
+                )
                 if clickable_elements:
-                    return random.choice(clickable_elements)
+                    return self._pick_ranked_candidate(
+                        selector,
+                        clickable_elements,
+                        href_only=False,
+                        prefer_best_match=prefer_best_match,
+                    )
                 if href_only_elements:
                     logger.info(
                         "Session %s: selector '%s' -> falling back to href-only candidate",
                         self._state.session_id,
                         selector,
                     )
-                    return random.choice(href_only_elements)
+                    return self._pick_ranked_candidate(
+                        selector,
+                        href_only_elements,
+                        href_only=True,
+                        prefer_best_match=prefer_best_match,
+                    )
 
         return None
 
@@ -361,3 +448,146 @@ class VideoFinder:
             if not self._state.all_topics_covered():
                 return False
         return self._state.is_title_on_topic(title)
+
+    def _pick_ranked_candidate(
+        self,
+        selector: str,
+        candidates: list[tuple[float, ElementHandle, str | None]],
+        *,
+        href_only: bool,
+        prefer_best_match: bool = False,
+    ) -> ElementHandle:
+        ranked = sorted(candidates, key=lambda item: item[0], reverse=True)
+        preview = ", ".join(
+            f"{score:.1f}:{(title or '<unknown>')[:72]}"
+            for score, _, title in ranked[:3]
+        )
+        logger.info(
+            "Session %s: selector '%s' ranked %s candidates -> %s",
+            self._state.session_id,
+            selector,
+            "href-only" if href_only else "clickable",
+            preview or "<none>",
+        )
+
+        if prefer_best_match:
+            _, element, _ = ranked[0]
+            return element
+
+        top_candidates = ranked[: min(3, len(ranked))]
+        min_score = min(score for score, _, _ in top_candidates)
+        weights = [max(0.25, score - min_score + 0.75) for score, _, _ in top_candidates]
+        _, element, _ = random.choices(top_candidates, weights=weights, k=1)[0]
+        return element
+
+    def _score_candidate(self, title: str | None, preferred_topic: str | None) -> float:
+        normalized = (title or "").strip().lower()
+        if not normalized:
+            return -2.0
+
+        score = 0.5
+        matched_topics = self._state.matched_topics_for_title(title)
+        score += len(matched_topics) * 1.5
+
+        if preferred_topic and self._state.is_title_on_specific_topic(title, preferred_topic):
+            score += 3.5
+        score += self._score_preferred_topic_specificity(normalized, preferred_topic)
+
+        word_count = len(normalized.split())
+        if word_count >= 4:
+            score += 0.4
+        if word_count >= 7:
+            score += 0.3
+
+        if self._is_finance_context():
+            score += self._score_finance_title_quality(normalized)
+
+        if normalized.startswith("i ") or normalized.startswith("i'm ") or normalized.startswith("my "):
+            score -= 1.0
+
+        return score
+
+    def _score_preferred_topic_specificity(
+        self,
+        normalized_title: str,
+        preferred_topic: str | None,
+    ) -> float:
+        normalized_topic = " ".join((preferred_topic or "").lower().split())
+        if not normalized_topic:
+            return 0.0
+
+        score = 0.0
+        if "financial markets" in normalized_topic:
+            if self._contains_any(normalized_title, _FINANCIAL_MARKET_TOKENS):
+                score += 2.6
+            elif self._contains_any(normalized_title, _STOCK_TOKENS):
+                score -= 1.2
+            elif self._contains_any(normalized_title, _CRYPTO_TOKENS):
+                score -= 1.0
+        elif normalized_topic in {"investments", "investment", "investing"}:
+            if self._contains_any(normalized_title, _INVESTMENT_TOKENS):
+                score += 2.2
+            elif self._contains_any(normalized_title, _STOCK_TOKENS):
+                score -= 0.8
+            elif self._contains_any(normalized_title, _CRYPTO_TOKENS):
+                score -= 0.5
+        elif "bitcoin" in normalized_topic:
+            if "bitcoin" in normalized_title:
+                score += 1.6
+            elif "crypto" in normalized_title:
+                score -= 0.5
+        elif "ethereum" in normalized_topic:
+            if "ethereum" in normalized_title:
+                score += 1.6
+            elif "crypto" in normalized_title:
+                score -= 0.4
+        elif "crypto" in normalized_topic:
+            if "crypto" in normalized_title or "cryptocurrency" in normalized_title:
+                score += 1.5
+        elif "stock market" in normalized_topic or normalized_topic == "stocks":
+            if self._contains_any(normalized_title, _STOCK_TOKENS):
+                score += 1.8
+            elif self._contains_any(normalized_title, _FINANCE_GENERAL_TOKENS):
+                score -= 0.6
+        elif "finance" in normalized_topic:
+            if self._contains_any(normalized_title, _FINANCE_GENERAL_TOKENS):
+                score += 2.4
+            elif self._contains_any(normalized_title, _FINANCIAL_MARKET_TOKENS):
+                score += 1.3
+            elif self._contains_any(normalized_title, _STOCK_TOKENS):
+                score -= 1.2
+            elif self._contains_any(normalized_title, _CRYPTO_TOKENS):
+                score -= 1.0
+
+        return score
+
+    def _score_finance_title_quality(self, normalized_title: str) -> float:
+        score = 0.0
+        for hint in _FINANCE_POSITIVE_TITLE_HINTS:
+            if hint in normalized_title:
+                score += 0.8
+        for hint in _FINANCE_NEGATIVE_TITLE_HINTS:
+            if hint in normalized_title:
+                score -= 1.6
+        if "news" in normalized_title:
+            score -= 0.5
+        if "opinion" in normalized_title or "reacts" in normalized_title:
+            score -= 0.8
+        if "!" in normalized_title:
+            score -= 0.5
+        return score
+
+    @staticmethod
+    def _contains_any(normalized_title: str, phrases: tuple[str, ...]) -> bool:
+        return any(phrase in normalized_title for phrase in phrases)
+
+    def _is_finance_context(self) -> bool:
+        topics_blob = " ".join(filter(None, [*self._state.topics, self._state.current_topic or ""])).lower()
+        return any(hint in topics_blob for hint in _FINANCE_TOPIC_HINTS)
+
+    def _should_stay_strict_on_preferred_topic(self, preferred_topic: str | None) -> bool:
+        return bool(
+            preferred_topic
+            and self._is_finance_context()
+            and not self._state.all_topics_covered()
+        )

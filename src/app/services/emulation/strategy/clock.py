@@ -9,7 +9,7 @@ from ..core.config import (
     SHORT_CYCLE_PROBABILITY,
     SHORT_CYCLE_RANGE,
 )
-from ..core.state import SessionState
+from ..core.session.state import SessionState
 
 logger = logging.getLogger(__name__)
 

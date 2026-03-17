@@ -14,7 +14,7 @@ from ..core.config import (
     FATIGUE_MODE_SWITCH_TO_B_THRESHOLD,
     FATIGUE_NOISE_STD,
 )
-from ..core.state import Mode, SessionState
+from ..core.session.state import Mode, SessionState
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,9 @@ class FatigueManager:
             chunk = random.uniform(5, 15)
             await self._h.delay(chunk, chunk)
             elapsed += chunk
+            if self._state.remaining_seconds() <= 1.0:
+                logger.info("Session %s: break interrupted — session time up", self._state.session_id)
+                return
             if random.random() < 0.2:
                 await self._h.wiggle_mouse()
 

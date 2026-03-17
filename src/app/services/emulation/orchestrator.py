@@ -14,8 +14,8 @@ from app.services.emulation.core.orchestration import (
     remaining_window_seconds,
     should_finalize_window,
 )
-from app.services.emulation.core.session_store import EmulationSessionStore
-from app.services.emulation.core.state import EmulationResult
+from app.services.emulation.core.session.store import EmulationSessionStore
+from app.services.emulation.core.session.state import EmulationResult
 from app.services.emulation.persistence import EmulationPersistenceService
 
 logger = logging.getLogger(__name__)

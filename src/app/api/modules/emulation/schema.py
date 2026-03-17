@@ -102,6 +102,18 @@ class EmulationAnalyticsAd(BaseModel):
     full_caption_text: str = ""
 
 
+class EmulationCurrentWatch(BaseModel):
+    action: str
+    title: str
+    url: str
+    started_at: float
+    watched_seconds: float = 0.0
+    target_seconds: float | None = None
+    search_keyword: str | None = None
+    matched_topics: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+
+
 class EmulationSessionStatus(BaseModel):
     session_id: UUID
     status: str
@@ -118,6 +130,7 @@ class EmulationSessionStatus(BaseModel):
     watched_videos_count: int = 0
     total_duration_seconds: int = 0
     watched_videos: list[EmulationWatchedVideo] = Field(default_factory=list)
+    current_watch: EmulationCurrentWatch | None = None
     watched_ads_count: int = 0
     watched_ads: list[EmulationWatchedAd] = Field(default_factory=list)
     watched_ads_analytics: list[EmulationAnalyticsAd] = Field(default_factory=list)
