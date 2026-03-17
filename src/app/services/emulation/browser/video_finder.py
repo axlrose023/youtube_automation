@@ -65,6 +65,11 @@ _FINANCE_NEGATIVE_TITLE_HINTS = (
     "to the moon",
     "100x",
     "whales",
+    "smashes past",
+    "skyrockets",
+    "breaking",
+    "surges",
+    "explodes",
 )
 _FINANCE_GENERAL_TOKENS = ("finance", "financial", "financial literacy", "personal finance")
 _FINANCIAL_MARKET_TOKENS = ("financial market", "financial markets", "capital market", "capital markets")
@@ -575,6 +580,8 @@ class VideoFinder:
             score -= 0.8
         if "!" in normalized_title:
             score -= 0.5
+        if normalized_title.count("!") >= 2:
+            score -= 0.8
         return score
 
     @staticmethod
