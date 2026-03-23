@@ -13,6 +13,12 @@ from app.services.emulation import YouTubeEmulator
 from app.services.emulation.core.ad_analytics import build_ads_analytics
 from app.services.emulation.core.bootstrap import build_bootstrap_payload
 from app.services.emulation.core.capture_factory import AdCaptureProviderFactory
+try:
+    from app.services.emulation.ad_analysis import AdAnalysisService
+
+    _ANALYSIS_AVAILABLE = True
+except ModuleNotFoundError:
+    _ANALYSIS_AVAILABLE = False
 from app.services.emulation.core.config import ORCHESTRATION_RUN_LOCK_TTL_SECONDS
 from app.services.emulation.core.orchestration import (
     build_orchestration_payload,
@@ -186,6 +192,7 @@ async def emulation_task(
     config: FromDishka[Config],
     persistence: FromDishka[EmulationPersistenceService],
     orchestrator: FromDishka[EmulationOrchestrationService],
+    ad_analysis: FromDishka[AdAnalysisService] | None = None,
     profile_id: str | None = None,
 ) -> dict:
     run_holder = f"{session_id}:{uuid.uuid4().hex}"
@@ -284,6 +291,26 @@ async def emulation_task(
             ),
             session_id, persistence, "ad captures",
         )
+
+        # ── Release browser before analysis ───────────────────
+        if runtime_debug_state is not None:
+            runtime_debug_state["shutting_down"] = True
+        if page:
+            await page.close()
+            page = None
+        if ctx:
+            await session_provider.release_context(ctx)
+            ctx = None
+        if resolved_profile_id:
+            await session_store.release_profile_lock(resolved_profile_id, profile_lock_holder)
+            resolved_profile_id = None
+
+        # ── Analyze ad creatives ───────────────────────────────
+        if ad_analysis is not None:
+            try:
+                await ad_analysis.analyze_session_captures(session_id)
+            except Exception:
+                logger.exception("Session %s: ad analysis failed", session_id)
 
         # ── Post-run: orchestrate or complete ─────────────────
         post_run = await session_store.get(session_id) or {}

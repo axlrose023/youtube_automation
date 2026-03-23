@@ -36,6 +36,15 @@ try:
 except ModuleNotFoundError:
     _BROWSER_AVAILABLE = False
 
+try:
+    from app.clients.gemini import GeminiClient
+    from app.services.emulation.ad_analysis import AdAnalysisService
+    from app.services.emulation.media_storage import LocalMediaStorage, MediaStorage
+
+    _GEMINI_AVAILABLE = True
+except ModuleNotFoundError:
+    _GEMINI_AVAILABLE = False
+
 
 class AppProvider(Provider):
     @provide(scope=Scope.APP)
@@ -141,6 +150,26 @@ class EmulationDIProvider(Provider):
         return DefaultAdCaptureProviderFactory()
 
 
+
+if _GEMINI_AVAILABLE:
+
+    class GeminiDIProvider(Provider):
+        @provide(scope=Scope.APP)
+        def get_gemini_client(self, config: Config) -> GeminiClient:
+            return GeminiClient(api_key=config.gemini.api_key, model=config.gemini.model)
+
+        @provide(scope=Scope.APP)
+        def get_media_storage(self, config: Config) -> MediaStorage:
+            return LocalMediaStorage(config.storage.ad_captures_path)
+
+        @provide(scope=Scope.REQUEST)
+        async def get_ad_analysis_service(
+            self, gemini: GeminiClient, uow: UnitOfWork, config: Config,
+            storage: MediaStorage,
+        ) -> AdAnalysisService:
+            return AdAnalysisService(gemini, uow, config.storage.ad_captures_path, storage)
+
+
 def get_async_container() -> AsyncContainer:
     providers: list[Provider] = [
         AppProvider(),
@@ -150,4 +179,6 @@ def get_async_container() -> AsyncContainer:
     ]
     if _BROWSER_AVAILABLE:
         providers.append(BrowserDIProvider())
+    if _GEMINI_AVAILABLE:
+        providers.append(GeminiDIProvider())
     return make_async_container(*providers)
