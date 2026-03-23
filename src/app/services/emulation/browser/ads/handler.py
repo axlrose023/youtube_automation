@@ -16,6 +16,8 @@ from ...core.selectors import (
 )
 from ...core.session.state import SessionState
 from ..humanizer import Humanizer
+from app.api.modules.ad_captures.models import VideoStatus
+
 from .capture import AdCaptureProvider
 from .snapshot import (
     AdRecord,
@@ -420,7 +422,7 @@ class AdHandler:
             return
         screenshot_count = len(result.screenshot_paths)
         has_video_signal = bool(result.video_src_url) or result.video_status in {
-            "completed", "failed", "fallback_screenshots",
+            VideoStatus.COMPLETED, VideoStatus.FAILED, VideoStatus.FALLBACK_SCREENSHOTS,
         }
         logger.info(
             (
@@ -440,18 +442,18 @@ class AdHandler:
             return
 
         src = (result.video_src_url or "").strip()
-        if result.video_status == "completed" and result.video_file and src:
+        if result.video_status == VideoStatus.COMPLETED and result.video_file and src:
             self._completed_video_captures_by_src[src] = result.video_file
             return
 
-        if result.video_status != "fallback_screenshots" or result.video_file or not src:
+        if result.video_status != VideoStatus.FALLBACK_SCREENSHOTS or result.video_file or not src:
             return
 
         reused_video_file = self._completed_video_captures_by_src.get(src)
         if not reused_video_file:
             return
 
-        result.video_status = "completed"
+        result.video_status = VideoStatus.COMPLETED
         result.video_file = reused_video_file
         logger.info(
             "Session %s: ad capture %s reused completed video from previous segment",

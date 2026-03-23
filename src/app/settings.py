@@ -72,6 +72,11 @@ class APIConfig(BaseModel):
     page_default_size: int = 10
 
 
+class GeminiConfig(BaseModel):
+    api_key: str = ""
+    model: str = "gemini-2.5-flash"
+
+
 class StorageConfig(BaseModel):
     base_path: Path = Path("artifacts")
     ad_captures_subdir: str = "ad_captures"
@@ -113,6 +118,7 @@ class Config(BaseSettings):
     useragent: UserAgentConfig = UserAgentConfig()
     adspower: AdsPowerConfig = AdsPowerConfig()
     storage: StorageConfig = StorageConfig()
+    gemini: GeminiConfig = GeminiConfig()
 
     paths: PathsConfig = PathsConfig()
 

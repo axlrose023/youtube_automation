@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.api.modules.ad_captures.models import AdCapture, AdCaptureScreenshot
+from app.api.modules.ad_captures.models import (
+    AdCapture,
+    AdCaptureScreenshot,
+    LandingStatus,
+    VideoStatus,
+)
 from app.database.uow import UnitOfWork
 from app.services.emulation.core.ad_analytics import build_ads_analytics
 
@@ -51,10 +56,10 @@ class EmulationPersistenceService:
                 ad_duration_seconds=ad.get("ad_duration_seconds"),
                 landing_url=cap.get("landing_url"),
                 landing_dir=cap.get("landing_dir"),
-                landing_status=cap.get("landing_status", "skipped"),
+                landing_status=cap.get("landing_status", LandingStatus.SKIPPED),
                 video_src_url=cap.get("video_src_url"),
                 video_file=cap.get("video_file"),
-                video_status=cap.get("video_status", "no_src"),
+                video_status=cap.get("video_status", VideoStatus.NO_SRC),
             )
             await self._uow.ad_captures.create(record)
             existing_positions.add(ad_position)

@@ -25,6 +25,8 @@ from ...core.config import (
     AD_CAPTURE_SCREENSHOT_PREROLL_TIMEOUT_S,
     AD_CAPTURE_VIDEO_DOWNLOAD_TIMEOUT_S,
 )
+from app.api.modules.ad_captures.models import LandingStatus, VideoStatus
+
 from .capture_utils import ASSET_CONTENT_TYPES, IMAGE_PREFIX, asset_filename
 
 logger = logging.getLogger(__name__)
@@ -42,10 +44,10 @@ _LANDING_ERROR_URL_PREFIXES = (
 class CaptureResult:
     capture_id: str
     video_src_url: str | None = None
-    video_status: str = "pending"
+    video_status: str = VideoStatus.PENDING
     video_file: str | None = None
     landing_url: str | None = None
-    landing_status: str = "pending"
+    landing_status: str = LandingStatus.PENDING
     landing_dir: str | None = None
     screenshot_paths: list[tuple[int, str]] = field(default_factory=list)
 
@@ -236,7 +238,7 @@ class AdCreativeCapture:
         result.landing_status, result.landing_dir = await self._resolve_landing(handle)
         result.video_status, result.video_file = await self._resolve_video(handle)
 
-        if result.video_status != "completed" and handle.screenshot_task:
+        if result.video_status != VideoStatus.COMPLETED and handle.screenshot_task:
             result.screenshot_paths = await self._await_task(
                 handle.screenshot_task,
                 default=[],
@@ -244,7 +246,7 @@ class AdCreativeCapture:
                 log_arg=handle.capture_id,
             )
             if result.screenshot_paths:
-                result.video_status = "fallback_screenshots"
+                result.video_status = VideoStatus.FALLBACK_SCREENSHOTS
 
         logger.info(
             (
@@ -588,16 +590,16 @@ class AdCreativeCapture:
                             current_url,
                             len(collected),
                         )
-                        return "completed", rel_dir
+                        return LandingStatus.COMPLETED, rel_dir
                 except Exception:
                     pass
-                return "failed", None
+                return LandingStatus.FAILED, None
 
             current_url = page.url
             html = await page.content()
             if self._is_landing_error_page(current_url, html):
                 logger.warning("Landing capture resolved to browser error page for %s: %s", url, current_url)
-                return "failed", None
+                return LandingStatus.FAILED, None
             if last_status is not None and last_status >= 400:
                 logger.warning(
                     "Landing capture HTTP %s for %s -> %s",
@@ -606,7 +608,7 @@ class AdCreativeCapture:
                     current_url,
                 )
                 if not html.strip():
-                    return "failed", None
+                    return LandingStatus.FAILED, None
             (out_dir / "index.html").write_text(html, encoding="utf-8")
 
             for filename, body in collected:
@@ -621,10 +623,10 @@ class AdCreativeCapture:
                 )
             else:
                 logger.info("Landing captured: %s (%d assets)", url, len(collected))
-            return "completed", rel_dir
+            return LandingStatus.COMPLETED, rel_dir
         except Exception as exc:
             logger.warning("Landing capture failed for %s: %s", url, exc)
-            return "failed", None
+            return LandingStatus.FAILED, None
         finally:
             await page.close()
 
@@ -653,7 +655,7 @@ class AdCreativeCapture:
         self, url: str | None, out_path: Path,
     ) -> tuple[str, str | None]:
         if not url or url.startswith("blob:"):
-            return "failed", None
+            return VideoStatus.FAILED, None
         try:
             response = await self._ctx.request.get(
                 url, timeout=AD_CAPTURE_VIDEO_DOWNLOAD_TIMEOUT_S * 1000,
@@ -664,12 +666,12 @@ class AdCreativeCapture:
                 out_path.write_bytes(body)
                 rel_path = str(out_path.relative_to(self._base_path))
                 logger.info("Video downloaded: %s (%d bytes)", url, len(body))
-                return "completed", rel_path
+                return VideoStatus.COMPLETED, rel_path
             logger.warning("Video download HTTP %d for %s", response.status, url)
-            return "failed", None
+            return VideoStatus.FAILED, None
         except Exception as exc:
             logger.warning("Video download failed: %s", exc)
-            return "failed", None
+            return VideoStatus.FAILED, None
 
 
 
@@ -794,10 +796,10 @@ class AdCreativeCapture:
         self, handle: CaptureHandle,
     ) -> tuple[str, str | None]:
         if not handle.landing_task:
-            return "skipped", None
+            return LandingStatus.SKIPPED, None
         return await self._await_task(
             handle.landing_task,
-            default=("failed", None),
+            default=(LandingStatus.FAILED, None),
             error_log="Landing capture failed for %s",
             log_arg=handle.capture_id,
         )
@@ -807,16 +809,16 @@ class AdCreativeCapture:
     ) -> tuple[str, str | None]:
         recorded = _relative_completed_file(handle.recorded_video_path, self._base_path)
         if recorded:
-            return "completed", recorded
+            return VideoStatus.COMPLETED, recorded
 
         if handle.video_task:
             video_status, video_file = await self._await_task(
                 handle.video_task,
-                default=("failed", None),
+                default=(VideoStatus.FAILED, None),
                 error_log="Video capture failed for %s",
                 log_arg=handle.capture_id,
             )
-            if video_status == "completed" and video_file:
+            if video_status == VideoStatus.COMPLETED and video_file:
                 return video_status, video_file
 
         if handle.video_src_url and not handle.video_src_url.startswith("blob:"):
@@ -824,10 +826,10 @@ class AdCreativeCapture:
                 handle.video_src_url,
                 handle.downloaded_video_path,
             )
-            if video_status == "completed" and video_file:
+            if video_status == VideoStatus.COMPLETED and video_file:
                 return video_status, video_file
 
-        return ("failed", None) if handle.video_src_url else ("no_src", None)
+        return (VideoStatus.FAILED, None) if handle.video_src_url else (VideoStatus.NO_SRC, None)
 
     async def _drain_recorded_video(
         self,

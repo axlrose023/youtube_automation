@@ -1,11 +1,36 @@
 from __future__ import annotations
 
 import uuid
+from enum import StrEnum
 
 from sqlalchemy import UUID, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base, DateTimeMixin, UUID7IDMixin
+
+
+class VideoStatus(StrEnum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    NO_SRC = "no_src"
+    FALLBACK_SCREENSHOTS = "fallback_screenshots"
+
+
+class LandingStatus(StrEnum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class AnalysisStatus(StrEnum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    NOT_RELEVANT = "not_relevant"
+    SKIPPED = "skipped"
+    FAILED = "failed"
 
 
 class AdCapture(Base, UUID7IDMixin, DateTimeMixin):
@@ -32,6 +57,8 @@ class AdCapture(Base, UUID7IDMixin, DateTimeMixin):
     video_file: Mapped[str | None] = mapped_column(Text, nullable=True)
     video_status: Mapped[str] = mapped_column(String(20), default="pending")
 
+    analysis_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    analysis_status: Mapped[str] = mapped_column(String(20), default="pending")
 
     screenshots: Mapped[list[AdCaptureScreenshot]] = relationship(
         back_populates="capture", cascade="all, delete-orphan",

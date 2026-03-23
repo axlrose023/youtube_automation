@@ -49,3 +49,12 @@ class AdCaptureGateway:
             capture.video_status = status
             if video_file:
                 capture.video_file = video_file
+
+    async def update_analysis(
+        self, capture_id: uuid.UUID, status: str, summary: str | None = None,
+    ) -> None:
+        capture = await self.session.get(AdCapture, capture_id)
+        if capture:
+            capture.analysis_status = status
+            if summary is not None:
+                capture.analysis_summary = summary

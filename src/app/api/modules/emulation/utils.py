@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 import time
 
-from app.api.modules.ad_captures.models import AdCapture
+from app.api.modules.ad_captures.models import AdCapture, VideoStatus
 
 from .models import EmulationSessionHistory
 from .schema import (
@@ -47,9 +47,9 @@ def build_capture_summary(
         )
     return EmulationCaptureSummary(
         ads_total=len(ad_captures),
-        video_captures=sum(1 for capture in ad_captures if capture.video_status == "completed"),
+        video_captures=sum(1 for capture in ad_captures if capture.video_status == VideoStatus.COMPLETED),
         screenshot_fallbacks=sum(
-            1 for capture in ad_captures if capture.video_status == "fallback_screenshots"
+            1 for capture in ad_captures if capture.video_status == VideoStatus.FALLBACK_SCREENSHOTS
         ),
     )
 

@@ -7,7 +7,7 @@ from sqlalchemy import Text, and_, cast, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.modules.ad_captures.models import AdCapture
+from app.api.modules.ad_captures.models import AdCapture, VideoStatus
 
 from .models import EmulationSessionHistory
 
@@ -103,10 +103,10 @@ class EmulationHistoryGateway:
                 AdCapture.session_id.label("session_id"),
                 func.count(AdCapture.id).label("ads_total"),
                 func.count()
-                .filter(AdCapture.video_status == "completed")
+                .filter(AdCapture.video_status == VideoStatus.COMPLETED)
                 .label("video_captures"),
                 func.count()
-                .filter(AdCapture.video_status == "fallback_screenshots")
+                .filter(AdCapture.video_status == VideoStatus.FALLBACK_SCREENSHOTS)
                 .label("screenshot_fallbacks"),
             )
             .group_by(AdCapture.session_id)
@@ -219,7 +219,7 @@ class EmulationHistoryGateway:
                 select(1).where(
                     and_(
                         AdCapture.session_id == EmulationSessionHistory.session_id,
-                        AdCapture.video_status == "completed",
+                        AdCapture.video_status == VideoStatus.COMPLETED,
                     )
                 )
             )
@@ -230,7 +230,7 @@ class EmulationHistoryGateway:
                 select(1).where(
                     and_(
                         AdCapture.session_id == EmulationSessionHistory.session_id,
-                        AdCapture.video_status == "fallback_screenshots",
+                        AdCapture.video_status == VideoStatus.FALLBACK_SCREENSHOTS,
                     )
                 )
             )

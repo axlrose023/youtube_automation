@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from app.api.modules.ad_captures.models import LandingStatus, VideoStatus
+
 if TYPE_CHECKING:
     from .capture import CaptureHandle, CaptureResult
 
@@ -275,10 +277,10 @@ class AdRecord:
         elif self.capture_id:
             capture_payload = {
                 "video_src_url": None,
-                "video_status": "pending",
+                "video_status": VideoStatus.PENDING,
                 "video_file": None,
                 "landing_url": self._capture_handle.landing_url if self._capture_handle else None,
-                "landing_status": "pending",
+                "landing_status": LandingStatus.PENDING,
                 "landing_dir": None,
                 "screenshot_paths": [],
             }
