@@ -37,6 +37,8 @@ class EmulationSessionHistory(Base, DateTimeMixin):
 
     mode: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     fatigue: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_topic: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    personality: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
     bytes_downloaded: Mapped[int] = mapped_column(BigInteger, default=0)
     total_duration_seconds: Mapped[int] = mapped_column(Integer, default=0)

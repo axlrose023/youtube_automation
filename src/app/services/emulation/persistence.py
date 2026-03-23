@@ -124,6 +124,8 @@ class EmulationPersistenceService:
             finished_at=finished_at,
             mode=live_payload.get("mode"),
             fatigue=live_payload.get("fatigue"),
+            current_topic=live_payload.get("current_topic"),
+            personality=live_payload.get("personality"),
             bytes_downloaded=final_bytes,
             topics_searched=final_topics,
             videos_watched=final_videos_watched,

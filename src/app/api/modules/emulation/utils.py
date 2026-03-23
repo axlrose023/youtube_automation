@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import time
 
 from app.api.modules.ad_captures.models import AdCapture, VideoStatus
@@ -20,7 +21,7 @@ def calculate_session_elapsed_minutes(data: dict[str, object]) -> float | None:
 
     status = data.get("status")
     finished_at = data.get("finished_at")
-    if status in {"completed", "failed"} and isinstance(finished_at, int | float):
+    if status in {"completed", "failed", "stopped"} and isinstance(finished_at, int | float):
         return round((finished_at - started_at) / 60, 1)
     return round((time.time() - started_at) / 60, 1)
 
@@ -62,6 +63,15 @@ def normalized_ads_count(payload: EmulationSessionHistory) -> int:
     return max(payload.watched_ads_count, len(payload.watched_ads or []))
 
 
+def _parse_analysis_summary(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 def map_ad_capture(capture: AdCapture) -> EmulationAdCaptureHistory:
     screenshot_paths = [
         EmulationAdCaptureScreenshotPath(offset_ms=s.offset_ms, file_path=s.file_path)
@@ -80,5 +90,7 @@ def map_ad_capture(capture: AdCapture) -> EmulationAdCaptureHistory:
         video_src_url=capture.video_src_url,
         video_file=capture.video_file,
         video_status=capture.video_status,
+        analysis_status=capture.analysis_status,
+        analysis_summary=_parse_analysis_summary(capture.analysis_summary),
         screenshot_paths=screenshot_paths,
     )

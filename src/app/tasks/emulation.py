@@ -216,7 +216,7 @@ async def emulation_task(
         if live_payload is None:
             logger.warning("Session %s: missing store payload, skipping", session_id)
             return {"status": "missing_session", "session_id": session_id}
-        if live_payload.get("status") in {"completed", "failed"}:
+        if live_payload.get("status") in {"completed", "failed", "stopped"}:
             logger.info("Session %s: already finished, skipping duplicate task", session_id)
             return {"status": "already_finished", "session_id": session_id}
 
@@ -241,6 +241,9 @@ async def emulation_task(
             live_payload, duration_minutes,
         )
         should_orchestrate = orchestration is not None
+
+        if bootstrap is None and live_payload.get("resumed_from"):
+            bootstrap = build_bootstrap_payload(live_payload)
 
         await session_store.update(
             session_id, status="running", started_at=started_at_ts,

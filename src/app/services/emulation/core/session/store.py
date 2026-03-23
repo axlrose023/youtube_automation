@@ -88,6 +88,9 @@ class EmulationSessionStore:
             return None
         return json.loads(raw_session_payload)
 
+    async def delete(self, session_id: str) -> None:
+        await self._redis.delete(self._key(session_id))
+
     async def try_acquire_run_lock(
         self,
         session_id: str,

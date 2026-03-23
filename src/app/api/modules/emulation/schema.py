@@ -157,6 +157,8 @@ class EmulationAdCaptureHistory(BaseModel):
     video_src_url: str | None = None
     video_file: str | None = None
     video_status: str
+    analysis_status: str | None = None
+    analysis_summary: dict | None = None
     screenshot_paths: list[EmulationAdCaptureScreenshotPath] = Field(default_factory=list)
 
 
@@ -197,6 +199,17 @@ class EmulationHistoryDetailResponse(EmulationHistoryItem):
 
 class EmulationHistoryResponse(Pagination[EmulationHistoryItem]):
     model_config = ConfigDict(from_attributes=True)
+
+
+class StopEmulationResponse(BaseModel):
+    session_id: UUID
+    status: str
+
+
+class EmulationCapturesResponse(BaseModel):
+    session_id: UUID
+    total: int
+    captures: list[EmulationAdCaptureHistory] = Field(default_factory=list)
 
 
 class EmulationHistoryParams(PaginationParams):

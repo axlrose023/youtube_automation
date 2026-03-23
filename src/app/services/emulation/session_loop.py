@@ -40,12 +40,17 @@ class SessionLoop:
         self._traffic = traffic
         self._store = session_store
         self._flush_pending_captures = flush_pending_captures
+        self._stop_requested = False
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stop_requested
 
     async def run(self) -> None:
         session_id = self._state.session_id
         cycle_number = 0
 
-        while not self._clock.deadline_reached():
+        while not self._clock.deadline_reached() and not self._stop_requested:
             remaining = self._state.remaining_seconds()
             if remaining <= 1.0:
                 logger.info(
@@ -73,7 +78,7 @@ class SessionLoop:
         session_id = self._state.session_id
         action_number = 0
 
-        while not self._clock.deadline_reached() and self._clock.cycle_active():
+        while not self._clock.deadline_reached() and self._clock.cycle_active() and not self._stop_requested:
             remaining = self._state.remaining_seconds()
             if remaining <= 1.0:
                 logger.info("Session %s: stopping cycle — remaining %.1fs", session_id, remaining)
@@ -137,8 +142,14 @@ class SessionLoop:
             await self._sync_progress_once()
 
     async def _sync_progress_once(self) -> None:
+        session_id = self._state.session_id
+        data = await self._store.get(session_id)
+        if data and data.get("status") == "stopped":
+            logger.info("Session %s: stop requested by user", session_id)
+            self._stop_requested = True
+            return
         await self._store.sync_progress(
-            self._state.session_id,
+            session_id,
             self._state,
             self._traffic.bytes_downloaded,
         )

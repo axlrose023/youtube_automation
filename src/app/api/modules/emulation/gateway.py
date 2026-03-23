@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime
 from dataclasses import dataclass
 
-from sqlalchemy import Text, and_, cast, exists, func, or_, select
+from sqlalchemy import Text, and_, cast, delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -177,6 +177,17 @@ class EmulationHistoryGateway:
         for capture in result.scalars().all():
             captures_by_session.setdefault(capture.session_id, []).append(capture)
         return captures_by_session
+
+    async def delete_session(self, session_id: str) -> bool:
+        payload = await self.get_by_session_id(session_id)
+        if not payload:
+            return False
+        await self.session.execute(
+            delete(AdCapture).where(AdCapture.session_id == session_id)
+        )
+        await self.session.delete(payload)
+        await self.session.flush()
+        return True
 
     def _build_filters(self, query: EmulationHistoryQuery) -> list:
         filters: list = []

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 import uuid
 
 from fastapi import HTTPException
@@ -15,6 +16,7 @@ from .models import EmulationSessionHistory
 from .schema import (
     EmulationAdCaptureHistory,
     EmulationCaptureSummary,
+    EmulationCapturesResponse,
     EmulationHistoryDetailResponse,
     EmulationHistoryItem,
     EmulationHistoryParams,
@@ -22,6 +24,7 @@ from .schema import (
     EmulationSessionStatus,
     StartEmulationRequest,
     StartEmulationResponse,
+    StopEmulationResponse,
 )
 from .utils import (
     build_capture_summary,
@@ -81,6 +84,109 @@ class EmulationSessionService:
             raise HTTPException(status_code=500, detail="Failed to queue emulation task") from exc
 
         return StartEmulationResponse(session_id=session_id, status="queued")
+
+    async def stop_session(self, session_id: str) -> StopEmulationResponse:
+        data = await self._session_store.get(session_id)
+        if data is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        status = data.get("status")
+        if status not in ("running", "queued"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot stop session with status '{status}'",
+            )
+
+        now_ts = datetime.datetime.now(datetime.UTC).timestamp()
+        await self._session_store.update(
+            session_id,
+            status="stopped",
+            finished_at=now_ts,
+            current_watch=None,
+            error="Stopped by user",
+        )
+
+        live_payload = await self._session_store.get(session_id) or data
+        await self._history_service.mark_stopped(session_id, live_payload)
+        return StopEmulationResponse(session_id=session_id, status="stopped")
+
+    async def retry_session(self, session_id: str) -> StartEmulationResponse:
+        data, history = await self._resolve_terminal_session(session_id)
+        if data:
+            topics = data.get("topics", [])
+            duration_minutes = data.get("duration_minutes", 60)
+            profile_id = self._normalize_profile_id(data.get("profile_id"))
+        else:
+            assert history is not None
+            topics = history.requested_topics or []
+            duration_minutes = history.requested_duration_minutes
+            profile_id = None
+
+        return await self.start_emulation(
+            StartEmulationRequest(
+                duration_minutes=duration_minutes,
+                topics=topics,
+                profile_id=profile_id,
+            )
+        )
+
+    async def resume_session(self, session_id: str) -> StartEmulationResponse:
+        data, history = await self._resolve_terminal_session(session_id)
+
+        if data:
+            topics = data.get("topics", [])
+            duration_minutes = data.get("duration_minutes", 60)
+            profile_id = self._normalize_profile_id(data.get("profile_id"))
+            elapsed_minutes = self._elapsed_minutes_from_live_payload(data)
+            resume_seed = self._build_resume_seed_from_live_payload(data)
+        else:
+            assert history is not None
+            topics = history.requested_topics or []
+            duration_minutes = history.requested_duration_minutes
+            profile_id = None
+            elapsed_minutes = self._elapsed_minutes_from_history(history)
+            resume_seed = self._build_resume_seed_from_history(history)
+
+        remaining_minutes = max(1, math.ceil(max(float(duration_minutes) - elapsed_minutes, 0.0)))
+
+        new_response = await self.start_emulation(
+            StartEmulationRequest(
+                duration_minutes=remaining_minutes,
+                topics=topics,
+                profile_id=profile_id,
+            )
+        )
+
+        await self._session_store.update(
+            str(new_response.session_id),
+            **resume_seed,
+            resumed_from=session_id,
+        )
+
+        return new_response
+
+    async def _resolve_terminal_session(
+        self, session_id: str,
+    ) -> tuple[dict | None, EmulationSessionHistory | None]:
+        data = await self._session_store.get(session_id)
+        if data is not None:
+            status = data.get("status")
+            if status not in ("failed", "stopped"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Cannot retry/resume session with status '{status}'",
+                )
+            return data, None
+
+        history = await self._history_service.uow.emulation_history.get_by_session_id(session_id)
+        if history is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if history.status not in ("failed", "stopped"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot retry/resume session with status '{history.status}'",
+            )
+        return None, history
 
     async def get_status(self, session_id: str) -> EmulationSessionStatus:
         data = await self._session_store.get(session_id)
@@ -239,6 +345,82 @@ class EmulationSessionService:
 
         return max(candidates) if candidates else datetime.datetime.now(datetime.UTC).timestamp()
 
+    @staticmethod
+    def _elapsed_minutes_from_live_payload(data: dict) -> float:
+        started_at = data.get("started_at")
+        if isinstance(started_at, int | float):
+            finished_at = data.get("finished_at")
+            end_ts = float(finished_at) if isinstance(finished_at, int | float) else datetime.datetime.now(datetime.UTC).timestamp()
+            return max((end_ts - float(started_at)) / 60.0, 0.0)
+        return max(float(data.get("total_duration_seconds") or 0) / 60.0, 0.0)
+
+    @staticmethod
+    def _elapsed_minutes_from_history(history: EmulationSessionHistory) -> float:
+        if history.started_at:
+            end_at = history.finished_at or datetime.datetime.now(datetime.UTC)
+            return max((end_at - history.started_at).total_seconds() / 60.0, 0.0)
+        return max(float(history.total_duration_seconds or 0) / 60.0, 0.0)
+
+    @staticmethod
+    def _build_resume_seed_from_live_payload(data: dict) -> dict[str, object]:
+        watched_videos = data.get("watched_videos") or []
+        watched_ads = data.get("watched_ads") or []
+        return {
+            "current_topic": data.get("current_topic"),
+            "topics_searched": data.get("topics_searched") or [],
+            "watched_videos": watched_videos,
+            "watched_ads": watched_ads,
+            "videos_watched": int(data.get("videos_watched") or 0),
+            "watched_videos_count": max(int(data.get("watched_videos_count") or 0), len(watched_videos)),
+            "watched_ads_count": max(int(data.get("watched_ads_count") or 0), len(watched_ads)),
+            "watched_ads_analytics": data.get("watched_ads_analytics")
+            or build_ads_analytics(watched_ads),
+            "total_duration_seconds": int(data.get("total_duration_seconds") or 0),
+            "bytes_downloaded": int(data.get("bytes_downloaded") or 0),
+            "fatigue": data.get("fatigue"),
+            "mode": data.get("mode"),
+            "personality": data.get("personality"),
+        }
+
+    def _build_resume_seed_from_history(
+        self,
+        history: EmulationSessionHistory,
+    ) -> dict[str, object]:
+        watched_videos = history.watched_videos or []
+        watched_ads = history.watched_ads or []
+        current_topic = history.current_topic or self._infer_current_topic(
+            history.topics_searched or [],
+            watched_videos,
+        )
+        return {
+            "current_topic": current_topic,
+            "topics_searched": history.topics_searched or [],
+            "watched_videos": watched_videos,
+            "watched_ads": watched_ads,
+            "videos_watched": int(history.videos_watched or 0),
+            "watched_videos_count": normalized_videos_count(history),
+            "watched_ads_count": normalized_ads_count(history),
+            "watched_ads_analytics": history.watched_ads_analytics or build_ads_analytics(watched_ads),
+            "total_duration_seconds": int(history.total_duration_seconds or 0),
+            "bytes_downloaded": int(history.bytes_downloaded or 0),
+            "fatigue": history.fatigue,
+            "mode": history.mode,
+            "personality": history.personality,
+        }
+
+    @staticmethod
+    def _infer_current_topic(topics_searched: list[str], watched_videos: list[dict]) -> str | None:
+        for item in reversed(watched_videos):
+            if not isinstance(item, dict):
+                continue
+            search_keyword = item.get("search_keyword")
+            if isinstance(search_keyword, str) and search_keyword.strip():
+                return search_keyword.strip()
+        for topic in reversed(topics_searched):
+            if isinstance(topic, str) and topic.strip():
+                return topic.strip()
+        return None
+
 
 class EmulationHistoryService:
     def __init__(self, uow: UnitOfWork) -> None:
@@ -279,6 +461,8 @@ class EmulationHistoryService:
             finished_at=datetime.datetime.now(datetime.UTC),
             mode=live_payload.get("mode"),
             fatigue=live_payload.get("fatigue"),
+            current_topic=live_payload.get("current_topic"),
+            personality=live_payload.get("personality"),
             bytes_downloaded=int(live_payload.get("bytes_downloaded") or 0),
             total_duration_seconds=int(live_payload.get("total_duration_seconds") or 0),
             videos_watched=int(live_payload.get("videos_watched") or 0),
@@ -292,6 +476,61 @@ class EmulationHistoryService:
             error=error,
         )
         await self.uow.commit()
+
+    async def mark_stopped(
+        self,
+        session_id: str,
+        live_payload: dict,
+    ) -> None:
+        await self.uow.emulation_history.update_session(
+            session_id,
+            status="stopped",
+            started_at=self._as_datetime(live_payload.get("started_at")),
+            finished_at=datetime.datetime.now(datetime.UTC),
+            mode=live_payload.get("mode"),
+            fatigue=live_payload.get("fatigue"),
+            current_topic=live_payload.get("current_topic"),
+            personality=live_payload.get("personality"),
+            bytes_downloaded=int(live_payload.get("bytes_downloaded") or 0),
+            total_duration_seconds=int(live_payload.get("total_duration_seconds") or 0),
+            videos_watched=int(live_payload.get("videos_watched") or 0),
+            watched_videos_count=int(live_payload.get("watched_videos_count") or 0),
+            watched_ads_count=int(live_payload.get("watched_ads_count") or 0),
+            topics_searched=live_payload.get("topics_searched") or [],
+            watched_videos=live_payload.get("watched_videos") or [],
+            watched_ads=live_payload.get("watched_ads") or [],
+            watched_ads_analytics=live_payload.get("watched_ads_analytics")
+            or build_ads_analytics(live_payload.get("watched_ads") or []),
+            error="Stopped by user",
+        )
+        await self.uow.commit()
+
+    async def delete_session(self, session_id: str) -> None:
+        history = await self.uow.emulation_history.get_by_session_id(session_id)
+        if history is None:
+            raise HTTPException(status_code=404, detail="Session history not found")
+        if history.status in ("running", "queued"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot delete session with status '{history.status}'",
+            )
+        await self.uow.emulation_history.delete_session(session_id)
+        await self.uow.commit()
+
+    async def get_session_captures(
+        self,
+        session_id: str,
+        analysis_status: str | None = None,
+    ) -> EmulationCapturesResponse:
+        captures_raw = await self.uow.emulation_history.get_ad_captures_by_session(session_id)
+        captures = [map_ad_capture(c) for c in captures_raw]
+        if analysis_status:
+            captures = [c for c in captures if c.analysis_status == analysis_status]
+        return EmulationCapturesResponse(
+            session_id=session_id,
+            total=len(captures),
+            captures=captures,
+        )
 
     async def get_history(
         self,
