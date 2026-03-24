@@ -176,3 +176,8 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Local project artifacts
+backend/artifacts/
+backend/test_gemini.py
+backend/Fraud Checker API Response (1).json
