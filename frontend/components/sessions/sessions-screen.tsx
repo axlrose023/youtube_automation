@@ -226,10 +226,17 @@ export function SessionsScreen() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">History</div>
-        <h2 className="mt-2 text-2xl font-semibold text-[var(--ink)]">Emulation sessions</h2>
-      </div>
+      <section className="panel relative overflow-hidden p-6">
+        <div className="absolute right-0 top-0 h-28 w-28 rounded-full bg-[radial-gradient(circle,rgba(214,82,82,0.14),transparent_68%)]" />
+        <div className="relative">
+          <div className="section-eyebrow">History</div>
+          <h2 className="mt-2 text-2xl font-semibold text-[var(--ink)]">Emulation sessions</h2>
+          <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--muted)]">
+            Filter past runs, watch active sessions update in place, and jump directly into
+            runtime detail when you need deeper inspection.
+          </p>
+        </div>
+      </section>
 
       <SessionFilters
         value={filters}
