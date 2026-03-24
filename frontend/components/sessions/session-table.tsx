@@ -9,10 +9,6 @@ import type { EmulationHistoryItem } from "@/types/api";
 export function SessionTable({ items }: { items: EmulationHistoryItem[] }) {
   return (
     <Card className="overflow-hidden p-0">
-      <div className="border-b border-[var(--line)] px-6 py-5">
-        <div className="section-eyebrow">Audit trail</div>
-        <div className="mt-1 text-lg font-semibold text-[var(--ink)]">Session list</div>
-      </div>
       <div className="overflow-x-auto">
         <table className="min-w-full text-sm">
           <thead className="bg-[var(--panel-soft)] text-left text-[var(--muted)]">
@@ -28,7 +24,7 @@ export function SessionTable({ items }: { items: EmulationHistoryItem[] }) {
           </thead>
           <tbody>
             {items.map((item) => (
-              <tr key={item.session_id} className="border-t border-[var(--line)] transition hover:bg-white/72">
+              <tr key={item.session_id} className="border-t border-[var(--line)]">
                 <td className="px-6 py-4">
                   <Link to={`/sessions/${item.session_id}`} className="font-semibold text-[var(--ink)] hover:text-[var(--brand)]">
                     {item.session_id.slice(0, 12)}

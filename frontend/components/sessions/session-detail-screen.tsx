@@ -313,86 +313,90 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="space-y-6">
-      <section className="hero-panel p-8 text-white">
-        <div className="relative z-10 grid gap-8 xl:grid-cols-[1.2fr_0.8fr]">
-          <div>
-            <Link to="/sessions" className="text-sm font-semibold text-white/72 transition hover:text-white">
-              Back to sessions
-            </Link>
-            <div className="mt-4 flex flex-wrap items-center gap-3">
-              <Badge tone={getStatusTone(session.status) as never}>{session.status}</Badge>
-              <span className="text-sm text-white/65">{formatDate(session.queued_at)}</span>
-              {liveStatus?.profile_id ? (
-                <span className="info-chip px-3 py-2 text-[0.72rem]">
-                  profile {liveStatus.profile_id}
-                </span>
-              ) : null}
-            </div>
-            <h2 className="mt-4 text-3xl font-semibold tracking-tight">
-              Session {session.session_id.slice(0, 12)}
-            </h2>
-            <p className="mt-3 max-w-2xl text-sm leading-7 text-white/72">
-              Review runtime behavior, watched videos, captured ads, and post-session analysis
-              from a single inspection surface.
-            </p>
-            <div className="mt-6 flex flex-wrap gap-3">
-              {(session.topics_searched.length > 0 ? session.topics_searched : session.requested_topics).map((topic) => (
-                <span key={topic} className="info-chip">
-                  {topic}
-                </span>
-              ))}
-            </div>
-          </div>
-          <div className="space-y-4">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="rounded-3xl border border-white/10 bg-white/7 p-5 backdrop-blur-sm">
-                <div className="text-xs uppercase tracking-[0.18em] text-white/55">Requested</div>
-                <div className="mt-3 text-4xl font-semibold">{session.requested_duration_minutes}m</div>
-                <div className="mt-2 text-sm text-white/68">Actual {formatMinutes(session.elapsed_minutes)}</div>
-              </div>
-              <div className="rounded-3xl border border-white/10 bg-white/7 p-5 backdrop-blur-sm">
-                <div className="text-xs uppercase tracking-[0.18em] text-white/55">Videos</div>
-                <div className="mt-3 text-4xl font-semibold">{formatNumber(session.watched_videos_count)}</div>
-                <div className="mt-2 text-sm text-white/68">
-                  {formatNumber(session.videos_watched)} completed watch actions
-                </div>
-              </div>
-              <div className="rounded-3xl border border-white/10 bg-white/7 p-5 backdrop-blur-sm">
-                <div className="text-xs uppercase tracking-[0.18em] text-white/55">Ads</div>
-                <div className="mt-3 text-4xl font-semibold">{formatNumber(session.watched_ads_count)}</div>
-                <div className="mt-2 text-sm text-white/68">{session.captures.video_captures} video captures</div>
-              </div>
-              <div className="rounded-3xl border border-white/10 bg-white/7 p-5 backdrop-blur-sm">
-                <div className="text-xs uppercase tracking-[0.18em] text-white/55">Traffic</div>
-                <div className="mt-3 text-4xl font-semibold">{formatBytes(session.bytes_downloaded)}</div>
-                <div className="mt-2 text-sm text-white/68">downloaded traffic</div>
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-3">
-              {session.status === "running" ? (
-                <Button variant="danger" onClick={() => void handleAction("stop")}>
-                  Stop
-                </Button>
-              ) : null}
-              {session.status === "failed" ? (
-                <Button variant="secondary" onClick={() => void handleAction("retry")}>
-                  Retry
-                </Button>
-              ) : null}
-              {session.status === "stopped" ? (
-                <Button onClick={() => void handleAction("resume")}>Resume remaining</Button>
-              ) : null}
-            </div>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <Link to="/sessions" className="text-sm text-[var(--brand)]">
+            Back to sessions
+          </Link>
+          <h2 className="mt-2 text-2xl font-semibold text-[var(--ink)]">
+            Session {session.session_id.slice(0, 12)}
+          </h2>
+          <div className="mt-2 flex flex-wrap items-center gap-3">
+            <Badge tone={getStatusTone(session.status) as never}>{session.status}</Badge>
+            <span className="text-sm text-[var(--muted)]">
+              {formatDate(session.queued_at)}
+            </span>
           </div>
         </div>
-      </section>
+        <div className="flex flex-wrap gap-3">
+          {session.status === "running" ? (
+            <Button variant="danger" onClick={() => void handleAction("stop")}>
+              Stop
+            </Button>
+          ) : null}
+          {session.status === "failed" ? (
+            <Button variant="secondary" onClick={() => void handleAction("retry")}>
+              Retry
+            </Button>
+          ) : null}
+          {session.status === "stopped" ? (
+            <Button onClick={() => void handleAction("resume")}>Resume remaining</Button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="metric-grid">
+        <Card>
+          <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">
+            Requested
+          </div>
+          <div className="mt-3 text-3xl font-semibold text-[var(--ink)]">
+            {session.requested_duration_minutes}m
+          </div>
+          <div className="mt-2 text-sm text-[var(--muted)]">
+            Actual {formatMinutes(session.elapsed_minutes)}
+          </div>
+        </Card>
+        <Card>
+          <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">
+            Videos
+          </div>
+          <div className="mt-3 text-3xl font-semibold text-[var(--ink)]">
+            {formatNumber(session.watched_videos_count)}
+          </div>
+          <div className="mt-2 text-sm text-[var(--muted)]">
+            {formatNumber(session.videos_watched)} completed watch actions
+          </div>
+        </Card>
+        <Card>
+          <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">
+            Ads
+          </div>
+          <div className="mt-3 text-3xl font-semibold text-[var(--ink)]">
+            {formatNumber(session.watched_ads_count)}
+          </div>
+          <div className="mt-2 text-sm text-[var(--muted)]">
+            {session.captures.video_captures} video captures
+          </div>
+        </Card>
+        <Card>
+          <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">
+            Traffic
+          </div>
+          <div className="mt-3 text-3xl font-semibold text-[var(--ink)]">
+            {formatBytes(session.bytes_downloaded)}
+          </div>
+          <div className="mt-2 text-sm text-[var(--muted)]">downloaded traffic</div>
+        </Card>
+      </div>
 
       {liveStatus ? (
         <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
           <Card className="p-6">
-            <div className="section-eyebrow">Live runtime</div>
-            <div className="mt-2 text-lg font-semibold text-[var(--ink)]">Session heartbeat</div>
-            <div className="mt-5 space-y-4 text-sm">
+            <div className="mb-4 text-lg font-semibold text-[var(--ink)]">
+              Live runtime
+            </div>
+            <div className="space-y-3 text-sm">
               <div className="flex justify-between gap-4">
                 <span className="text-[var(--muted)]">Profile</span>
                 <span>{liveStatus.profile_id || "—"}</span>
@@ -403,35 +407,21 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
               </div>
               <div className="flex justify-between gap-4">
                 <span className="text-[var(--muted)]">Topics searched</span>
-                <span className="max-w-[60%] text-right">{liveStatus.topics_searched.join(", ") || "—"}</span>
+                <span>{liveStatus.topics_searched.join(", ") || "—"}</span>
               </div>
             </div>
           </Card>
           <Card className="p-6">
-            <div className="section-eyebrow">Current watch</div>
-            <div className="mt-2 text-lg font-semibold text-[var(--ink)]">Active playback</div>
+            <div className="mb-4 text-lg font-semibold text-[var(--ink)]">
+              Current watch
+            </div>
             {liveStatus.current_watch ? (
-              <div className="mt-5 space-y-3">
+              <div className="space-y-3">
                 <div className="text-lg font-semibold text-[var(--ink)]">
                   {liveStatus.current_watch.title}
                 </div>
                 <div className="text-sm text-[var(--muted)]">
                   {liveStatus.current_watch.search_keyword || "no keyword"}
-                </div>
-                <div className="h-2 overflow-hidden rounded-full bg-[var(--panel-soft)]">
-                  <div
-                    className="h-full rounded-full bg-[linear-gradient(90deg,var(--brand),#f5a524)]"
-                    style={{
-                      width: liveStatus.current_watch.target_seconds
-                        ? `${Math.min(
-                            (liveStatus.current_watch.watched_seconds /
-                              liveStatus.current_watch.target_seconds) *
-                              100,
-                            100,
-                          )}%`
-                        : "22%",
-                    }}
-                  />
                 </div>
                 <div className="text-sm text-[var(--muted)]">
                   {liveStatus.current_watch.watched_seconds.toFixed(1)}s watched

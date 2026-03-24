@@ -88,89 +88,76 @@ export function SessionLauncher() {
   }
 
   return (
-    <Card className="relative overflow-hidden p-0">
-      <div className="absolute right-0 top-0 h-32 w-32 rounded-full bg-[radial-gradient(circle,rgba(214,82,82,0.16),transparent_70%)]" />
-      <div className="relative p-6">
-        <div className="mb-6">
-          <div className="section-eyebrow">Quick start</div>
-          <h2 className="mt-2 text-xl font-semibold text-[var(--ink)]">Launch a new emulation</h2>
-          <p className="mt-2 max-w-xl text-sm leading-6 text-[var(--muted)]">
-            Start a fresh AdsPower run, assign one or more topics, and monitor runtime,
-            ad capture, and relevance analysis from the same surface.
-          </p>
+    <Card className="p-6">
+      <div className="mb-6">
+        <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">Quick start</div>
+        <h2 className="mt-2 text-xl font-semibold text-[var(--ink)]">Launch a new emulation</h2>
+      </div>
+
+      <form className="space-y-4" onSubmit={handleSubmit}>
+        <div className="grid gap-4 md:grid-cols-2">
+          <Input
+            label="Duration, minutes"
+            type="number"
+            min={1}
+            max={480}
+            value={duration}
+            onChange={(event) => setDuration(event.target.value)}
+            required
+          />
+          <Input
+            label="AdsPower profile id"
+            placeholder="Required"
+            value={profileId}
+            onChange={(event) => setProfileId(event.target.value)}
+            required
+          />
         </div>
 
-        <form className="space-y-5" onSubmit={handleSubmit}>
-          <div className="grid gap-4 md:grid-cols-2">
-            <Input
-              label="Duration, minutes"
-              type="number"
-              min={1}
-              max={480}
-              value={duration}
-              onChange={(event) => setDuration(event.target.value)}
-              required
-            />
-            <Input
-              label="AdsPower profile id"
-              placeholder="Required"
-              value={profileId}
-              onChange={(event) => setProfileId(event.target.value)}
-              required
-            />
-          </div>
-
-          <div className="subpanel p-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold text-[var(--ink)]">Topics</div>
-                <div className="mt-1 text-xs leading-5 text-[var(--muted)]">
-                  One topic per line. The next empty line appears automatically when the last one is filled.
-                </div>
-              </div>
-              <div className="rounded-full bg-white px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--muted)]">
-                Search plan
+        <div className="space-y-3">
+          <div>
+            <div>
+              <div className="text-sm font-medium text-[var(--ink)]">Topics</div>
+              <div className="mt-1 text-xs text-[var(--muted)]">
+                Add one topic per line. A new line appears automatically as you type.
               </div>
             </div>
-            <div className="mt-4 space-y-3">
-              {topics.map((topic, index) => (
-                <div key={index} className="flex items-end gap-3">
-                  <div className="inline-flex h-[50px] w-[50px] shrink-0 items-center justify-center rounded-2xl bg-white text-sm font-semibold text-[var(--muted)] shadow-[inset_0_1px_0_rgba(255,255,255,0.9)]">
-                    {index + 1}
-                  </div>
-                  <Input
-                    className="flex-1"
-                    placeholder={`Topic ${index + 1}`}
-                    value={topic}
-                    onChange={(event) => updateTopic(index, event.target.value)}
-                    required={index === 0}
-                  />
-                  {topics.length > 1 && !(index === topics.length - 1 && !topic.trim()) ? (
-                    <button
-                      type="button"
-                      onClick={() => removeTopic(index)}
-                      className="mt-auto inline-flex h-[50px] w-[50px] items-center justify-center rounded-2xl border border-rose-200 bg-rose-50 text-rose-600 transition hover:bg-rose-100"
-                      aria-label={`Remove topic ${index + 1}`}
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  ) : null}
-                </div>
-              ))}
-            </div>
           </div>
+          <div className="space-y-3">
+            {topics.map((topic, index) => (
+              <div key={index} className="flex items-end gap-3">
+                <Input
+                  className="flex-1"
+                  placeholder={`Topic ${index + 1}`}
+                  value={topic}
+                  onChange={(event) => updateTopic(index, event.target.value)}
+                  required={index === 0}
+                />
+                {topics.length > 1 && !(index === topics.length - 1 && !topic.trim()) ? (
+                  <button
+                    type="button"
+                    onClick={() => removeTopic(index)}
+                    className="mt-auto inline-flex h-[50px] w-[50px] items-center justify-center rounded-2xl border border-rose-200 bg-rose-50 text-rose-600"
+                    aria-label={`Remove topic ${index + 1}`}
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </div>
 
-          {error ? (
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-              {error}
-            </div>
-          ) : null}
+        {error ? (
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            {error}
+          </div>
+        ) : null}
 
-          <Button type="submit" loading={loading} className="w-full">
-            Start emulation
-          </Button>
-        </form>
-      </div>
+        <Button type="submit" loading={loading} className="w-full">
+          Start emulation
+        </Button>
+      </form>
     </Card>
   );
 }

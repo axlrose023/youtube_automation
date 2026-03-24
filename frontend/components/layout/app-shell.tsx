@@ -13,14 +13,14 @@ export function AppShell({ children }: { children: ReactNode }) {
   }, [location.pathname]);
 
   return (
-    <div className="ambient-shell flex min-h-screen">
+    <div className="flex min-h-screen">
       <Sidebar />
-      <div className="content-shell min-h-screen flex-1 overflow-hidden">
+      <div className="min-h-screen flex-1 overflow-hidden">
         <Header />
         <main
           id="app-main-scroll"
           ref={mainRef}
-          className="h-[calc(100vh-112px)] overflow-y-auto px-6 py-6 scrollbar-thin lg:px-8 lg:py-8"
+          className="h-[calc(100vh-105px)] overflow-y-auto px-8 py-8 scrollbar-thin"
         >
           {children}
         </main>
