@@ -1,3 +1,5 @@
+import { RotateCcw } from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -19,7 +21,7 @@ export function SessionFilters({
   onReset: () => void;
 }) {
   return (
-    <div className="panel grid gap-4 p-5 lg:grid-cols-[1fr_180px_180px_112px_auto]">
+    <div className="panel grid gap-3 p-4 lg:grid-cols-[1fr_160px_160px_100px_auto]">
       <Input
         label="Search"
         placeholder="session id, topic, status..."
@@ -49,7 +51,7 @@ export function SessionFilters({
         <option value="video_captures">With video captures</option>
       </Select>
       <Select
-        label="Page size"
+        label="Per page"
         className="min-w-0"
         value={String(value.pageSize)}
         onChange={(event) => onChange({ ...value, pageSize: Number(event.target.value) })}
@@ -58,7 +60,8 @@ export function SessionFilters({
         <option value="25">25</option>
         <option value="50">50</option>
       </Select>
-      <Button type="button" variant="ghost" onClick={onReset} className="mt-auto w-full">
+      <Button type="button" variant="ghost" onClick={onReset} className="mt-auto w-full gap-1.5">
+        <RotateCcw size={13} />
         Reset
       </Button>
     </div>

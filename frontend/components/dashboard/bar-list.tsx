@@ -13,19 +13,19 @@ export function BarList({
   const max = items[0]?.value || 1;
 
   return (
-    <Card className="p-6">
-      <div className="mb-6 text-lg font-semibold text-[var(--ink)]">{title}</div>
-      <div className="space-y-4">
+    <Card className="p-5">
+      <div className="mb-5 text-sm font-semibold text-[var(--ink)]">{title}</div>
+      <div className="space-y-3">
         {items.map((item) => (
           <div key={item.label}>
-            <div className="mb-2 flex items-center justify-between gap-4 text-sm">
-              <span className="truncate text-[var(--ink)]">{item.label}</span>
-              <span className="font-semibold text-[var(--muted)]">{formatNumber(item.value)}</span>
+            <div className="mb-1.5 flex items-center justify-between gap-4 text-xs">
+              <span className="truncate text-[var(--ink-secondary)]">{item.label}</span>
+              <span className="font-medium text-[var(--ink)]">{formatNumber(item.value)}</span>
             </div>
-            <div className="h-2 rounded-full bg-slate-100">
+            <div className="h-1.5 rounded-full bg-[var(--bg-soft)]">
               <div
-                className={`h-2 rounded-full ${colorClass}`}
-                style={{ width: `${Math.max((item.value / max) * 100, 8)}%` }}
+                className={`h-1.5 rounded-full ${colorClass} transition-all`}
+                style={{ width: `${Math.max((item.value / max) * 100, 6)}%` }}
               />
             </div>
           </div>

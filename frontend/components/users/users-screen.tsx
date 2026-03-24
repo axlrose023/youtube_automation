@@ -21,14 +21,14 @@ function getErrorMessage(err: unknown, fallback: string) {
 }
 
 const AVATAR_COLORS = [
-  "bg-rose-100 text-rose-700",
-  "bg-sky-100 text-sky-700",
-  "bg-amber-100 text-amber-700",
-  "bg-emerald-100 text-emerald-700",
-  "bg-violet-100 text-violet-700",
-  "bg-fuchsia-100 text-fuchsia-700",
-  "bg-teal-100 text-teal-700",
-  "bg-orange-100 text-orange-700",
+  "bg-[var(--brand-soft)] text-[var(--brand)]",
+  "bg-[var(--info-soft)] text-[var(--info)]",
+  "bg-[var(--warning-soft)] text-[var(--warning)]",
+  "bg-[var(--accent-soft)] text-[var(--accent)]",
+  "bg-[var(--danger-soft)] text-[var(--danger)]",
+  "bg-purple-500/10 text-purple-400",
+  "bg-teal-500/10 text-teal-400",
+  "bg-orange-500/10 text-orange-400",
 ];
 
 function avatarColor(name: string) {
@@ -244,38 +244,35 @@ export function UsersScreen() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">Access</div>
-          <h2 className="mt-2 text-2xl font-semibold text-[var(--ink)]">Users management</h2>
+          <h2 className="text-lg font-semibold text-[var(--ink)]">Users management</h2>
+          <p className="mt-1 text-sm text-[var(--muted)]">Manage access and permissions</p>
         </div>
         <Button
-          className="gap-2"
+          className="gap-1.5"
           onClick={() => {
             setShowForm(!showForm);
             setFormError(null);
           }}
         >
-          <Plus size={16} />
+          <Plus size={15} />
           New user
         </Button>
       </div>
 
-      {/* Notice toast */}
       {notice ? (
-        <div className="flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-5 py-3 text-sm text-emerald-700">
-          <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
+        <div className="flex items-center gap-2.5 rounded-lg border border-[var(--accent)]/20 bg-[var(--accent-soft)] px-4 py-2.5 text-sm text-[var(--accent)]">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--accent)]" />
           {notice}
         </div>
       ) : null}
 
-      {/* Inline create form — slides open */}
       {showForm ? (
-        <Card className="p-6">
-          <div className="text-base font-semibold text-[var(--ink)]">Create new user</div>
-          <form className="mt-4 flex flex-wrap items-end gap-4" onSubmit={handleCreate}>
-            <div className="w-52 shrink-0">
+        <Card className="p-5">
+          <div className="text-sm font-semibold text-[var(--ink)]">Create new user</div>
+          <form className="mt-4 flex flex-wrap items-end gap-3" onSubmit={handleCreate}>
+            <div className="w-48 shrink-0">
               <Input
                 label="Username"
                 placeholder="Enter username"
@@ -284,7 +281,7 @@ export function UsersScreen() {
                 onChange={(e) => setForm((prev) => ({ ...prev, username: e.target.value }))}
               />
             </div>
-            <div className="w-52 shrink-0">
+            <div className="w-48 shrink-0">
               <Input
                 label="Password"
                 type="password"
@@ -294,7 +291,7 @@ export function UsersScreen() {
                 onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value }))}
               />
             </div>
-            <label className="flex items-center gap-2 rounded-2xl border border-[var(--line)] bg-[var(--panel-soft)] px-4 py-3 text-sm text-[var(--ink)] cursor-pointer select-none">
+            <label className="flex cursor-pointer select-none items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-2.5 text-sm text-[var(--ink-secondary)]">
               <input
                 type="checkbox"
                 checked={form.is_admin}
@@ -318,63 +315,60 @@ export function UsersScreen() {
             </Button>
           </form>
           {formError ? (
-            <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            <div className="mt-3 rounded-lg border border-[var(--danger)]/20 bg-[var(--danger-soft)] px-3 py-2 text-sm text-[var(--danger)]">
               {formError}
             </div>
           ) : null}
         </Card>
       ) : null}
 
-      {/* Users table */}
       <Card className="overflow-hidden p-0">
-        {/* Table header bar */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] px-6 py-4">
-          <div className="flex items-center gap-3">
-            <div className="text-lg font-semibold text-[var(--ink)]">Users</div>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] px-5 py-4">
+          <div className="flex items-center gap-2.5">
+            <div className="text-sm font-semibold text-[var(--ink)]">Users</div>
             {!loading && !listError ? (
               <Badge tone="neutral">{users.length}</Badge>
             ) : null}
           </div>
           {!loading && !listError && users.length > 0 ? (
             <div className="relative">
-              <Search size={15} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
+              <Search size={13} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
               <input
                 type="text"
                 placeholder="Search..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="w-48 rounded-xl border border-[var(--line)] bg-white py-2 pl-9 pr-4 text-sm text-[var(--ink)] outline-none transition placeholder:text-slate-400 focus:border-[var(--brand)] focus:ring-2 focus:ring-rose-100"
+                className="w-44 rounded-lg border border-[var(--line)] bg-[var(--panel)] py-1.5 pl-8 pr-3 text-sm text-[var(--ink)] outline-none transition placeholder:text-[var(--muted)] focus:border-[var(--brand)] focus:ring-2 focus:ring-[var(--brand-soft)]"
               />
             </div>
           ) : null}
         </div>
 
-        {/* Content */}
         {loading ? <Loader label="Loading users" /> : null}
         {!loading && listError ? (
-          <div className="p-6 text-sm text-rose-700">{listError}</div>
+          <div className="p-5 text-sm text-[var(--danger)]">{listError}</div>
         ) : null}
         {!loading && !listError ? (
           <div className="overflow-x-auto">
             {actionError ? (
-              <div className="flex items-center gap-3 border-b border-rose-200 bg-rose-50 px-6 py-3 text-sm text-rose-700">
-                <span className="h-2 w-2 shrink-0 rounded-full bg-rose-500" />
+              <div className="flex items-center gap-2.5 border-b border-[var(--danger)]/20 bg-[var(--danger-soft)] px-5 py-2.5 text-sm text-[var(--danger)]">
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--danger)]" />
                 {actionError}
               </div>
             ) : null}
             <table className="min-w-full text-sm">
-              <thead className="bg-[var(--panel-soft)] text-left text-[var(--muted)]">
-                <tr>
-                  <th className="px-6 py-3 font-medium">User</th>
-                  <th className="px-6 py-3 font-medium">Status</th>
-                  <th className="px-6 py-3 font-medium">Role</th>
-                  <th className="px-6 py-3 font-medium text-right">Actions</th>
+              <thead>
+                <tr className="border-b border-[var(--line)] text-left text-xs text-[var(--muted)]">
+                  <th className="px-5 py-3 font-medium">User</th>
+                  <th className="px-5 py-3 font-medium">Status</th>
+                  <th className="px-5 py-3 font-medium">Role</th>
+                  <th className="px-5 py-3 font-medium text-right">Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="px-6 py-16 text-center text-sm text-[var(--muted)]">
+                    <td colSpan={4} className="px-5 py-14 text-center text-sm text-[var(--muted)]">
                       {search ? "No users match your search." : "No users yet. Click \"New user\" to get started."}
                     </td>
                   </tr>
@@ -386,56 +380,56 @@ export function UsersScreen() {
                   const initials = user.username.slice(0, 2).toUpperCase();
 
                   return (
-                    <tr key={user.id} className="group border-t border-[var(--line)] transition-colors hover:bg-[var(--panel-soft)]/50">
-                      <td className="px-6 py-3.5">
-                        <div className="flex items-center gap-3">
-                          <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs font-bold ${avatarColor(user.username)}`}>
+                    <tr key={user.id} className="group border-t border-[var(--line)] transition-colors hover:bg-[var(--panel-hover)]">
+                      <td className="px-5 py-3">
+                        <div className="flex items-center gap-2.5">
+                          <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-xs font-bold ${avatarColor(user.username)}`}>
                             {initials}
                           </div>
                           <div className="flex items-center gap-2">
-                            <span className="font-semibold text-[var(--ink)]">{user.username}</span>
+                            <span className="font-medium text-[var(--ink)]">{user.username}</span>
                             {isSelf ? <Badge tone="info">you</Badge> : null}
                           </div>
                         </div>
                       </td>
-                      <td className="px-6 py-3.5">
+                      <td className="px-5 py-3">
                         <Badge tone={user.is_active ? "success" : "warning"}>
                           {user.is_active ? "active" : "disabled"}
                         </Badge>
                       </td>
-                      <td className="px-6 py-3.5">
+                      <td className="px-5 py-3">
                         <Badge tone={user.is_admin ? "warning" : "neutral"}>
                           {user.is_admin ? "admin" : "user"}
                         </Badge>
                       </td>
-                      <td className="px-6 py-3.5">
+                      <td className="px-5 py-3">
                         <div className="flex flex-wrap justify-end gap-1.5">
                           <Button
                             variant="ghost"
-                            className="gap-1.5 px-2.5 py-1.5 text-xs"
+                            className="gap-1 px-2 py-1 text-xs"
                             disabled={!canToggleActive}
                             onClick={() => openToggleConfirm(user, "is_active")}
                           >
-                            {user.is_active ? <UserRoundX size={14} /> : <UserRoundCheck size={14} />}
+                            {user.is_active ? <UserRoundX size={13} /> : <UserRoundCheck size={13} />}
                             {user.is_active ? "Disable" : "Enable"}
                           </Button>
                           {!user.is_admin ? (
                             <Button
                               variant="ghost"
-                              className="gap-1.5 px-2.5 py-1.5 text-xs"
+                              className="gap-1 px-2 py-1 text-xs"
                               onClick={() => openToggleConfirm(user, "is_admin")}
                             >
-                              <ShieldCheck size={14} />
+                              <ShieldCheck size={13} />
                               Promote
                             </Button>
                           ) : null}
                           {canDelete ? (
                             <Button
                               variant="ghost"
-                              className="gap-1.5 border-rose-200 px-2.5 py-1.5 text-xs text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+                              className="gap-1 border-[var(--danger)]/15 px-2 py-1 text-xs text-[var(--danger)] hover:bg-[var(--danger-soft)]"
                               onClick={() => openDeleteConfirm(user)}
                             >
-                              <Trash2 size={14} />
+                              <Trash2 size={13} />
                               Delete
                             </Button>
                           ) : null}

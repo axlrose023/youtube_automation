@@ -1,8 +1,11 @@
 export function Loader({ label = "Loading" }: { label?: string }) {
   return (
-    <div className="flex min-h-[240px] flex-col items-center justify-center gap-4 rounded-[28px] border border-[var(--line)] bg-white/80">
-      <div className="h-12 w-12 animate-spin rounded-full border-4 border-slate-200 border-t-[var(--brand)]" />
-      <div className="text-sm font-medium text-[var(--muted)]">{label}</div>
+    <div className="flex min-h-[200px] flex-col items-center justify-center gap-4 rounded-xl border border-[var(--line)] bg-[var(--panel)]">
+      <div className="relative h-10 w-10">
+        <div className="absolute inset-0 animate-spin rounded-full border-2 border-[var(--line)] border-t-[var(--brand)]" />
+        <div className="absolute inset-1.5 animate-spin rounded-full border-2 border-[var(--line)] border-b-[var(--accent)]" style={{ animationDirection: "reverse", animationDuration: "0.8s" }} />
+      </div>
+      <div className="text-sm text-[var(--muted)]">{label}</div>
     </div>
   );
 }

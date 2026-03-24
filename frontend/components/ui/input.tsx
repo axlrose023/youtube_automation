@@ -8,11 +8,11 @@ type InputProps = InputHTMLAttributes<HTMLInputElement> & {
 
 export function Input({ className, label, hint, ...props }: InputProps) {
   return (
-    <label className="flex flex-col gap-2 text-sm text-[var(--muted)]">
-      {label ? <span className="font-medium text-[var(--ink)]">{label}</span> : null}
+    <label className="flex flex-col gap-1.5 text-sm">
+      {label ? <span className="font-medium text-[var(--ink-secondary)]">{label}</span> : null}
       <input
         className={clsx(
-          "rounded-2xl border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--ink)] outline-none transition placeholder:text-slate-400 focus:border-[var(--brand)] focus:ring-4 focus:ring-emerald-100",
+          "rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-2.5 text-sm text-[var(--ink)] outline-none transition-all placeholder:text-[var(--muted)] focus:border-[var(--brand)] focus:ring-2 focus:ring-[var(--brand-soft)]",
           className,
         )}
         {...props}

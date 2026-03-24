@@ -227,8 +227,8 @@ export function SessionsScreen() {
   return (
     <div className="space-y-6">
       <div>
-        <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">History</div>
-        <h2 className="mt-2 text-2xl font-semibold text-[var(--ink)]">Emulation sessions</h2>
+        <h2 className="text-lg font-semibold text-[var(--ink)]">Emulation sessions</h2>
+        <p className="mt-1 text-sm text-[var(--muted)]">Browse and filter session history</p>
       </div>
 
       <SessionFilters
@@ -249,26 +249,27 @@ export function SessionsScreen() {
       ) : null}
       {!loading && !error && filteredItems.length > 0 ? (
         <>
-          <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-[var(--muted)]">
+          <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-[var(--muted)]">
             <div>
               Showing {(currentPage - 1) * filters.pageSize + 1}-
               {Math.min(currentPage * filters.pageSize, filteredItems.length)} of {filteredItems.length} sessions
             </div>
-            <div>Loaded pool: {allItems.length}</div>
+            <div>Pool: {allItems.length}</div>
           </div>
           <SessionTable items={displayedItems} />
         </>
       ) : null}
 
       <div className="flex items-center justify-between">
-        <div className="text-sm text-[var(--muted)]">
+        <div className="text-xs text-[var(--muted)]">
           Page {currentPage} of {totalPages}
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-1.5">
           <Button
             variant="ghost"
             disabled={currentPage <= 1}
             onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+            className="px-3 py-1.5 text-xs"
           >
             Prev
           </Button>
@@ -277,6 +278,7 @@ export function SessionsScreen() {
               key={pageNumber}
               variant={pageNumber === currentPage ? "primary" : "ghost"}
               onClick={() => setPage(pageNumber)}
+              className="px-3 py-1.5 text-xs"
             >
               {pageNumber}
             </Button>
@@ -285,6 +287,7 @@ export function SessionsScreen() {
             variant="ghost"
             disabled={currentPage >= totalPages}
             onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+            className="px-3 py-1.5 text-xs"
           >
             Next
           </Button>

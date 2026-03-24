@@ -26,24 +26,19 @@ export function ConfirmDialog({
     return null;
   }
 
-  const confirmClassName =
-    confirmTone === "danger"
-      ? "bg-rose-600 text-white hover:bg-rose-700"
-      : undefined;
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 px-4 backdrop-blur-sm">
-      <Card className="w-full max-w-md p-6 shadow-2xl">
-        <div className="text-lg font-semibold text-[var(--ink)]">{title}</div>
-        <p className="mt-2 text-sm leading-6 text-[var(--muted)]">{description}</p>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
+      <Card className="w-full max-w-md p-6 shadow-2xl" glow>
+        <div className="text-base font-semibold text-[var(--ink)]">{title}</div>
+        <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">{description}</p>
         <div className="mt-6 flex justify-end gap-3">
           <Button type="button" variant="ghost" onClick={onCancel} disabled={loading}>
             Cancel
           </Button>
           <Button
             type="button"
+            variant={confirmTone === "danger" ? "danger" : "primary"}
             loading={loading}
-            className={confirmClassName}
             onClick={onConfirm}
           >
             {confirmLabel}

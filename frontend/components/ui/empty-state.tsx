@@ -10,9 +10,9 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div className="panel flex min-h-[220px] flex-col items-center justify-center gap-4 p-8 text-center">
-      <div className="text-lg font-semibold text-[var(--ink)]">{title}</div>
-      <div className="max-w-lg text-sm leading-6 text-[var(--muted)]">{description}</div>
+    <div className="panel flex min-h-[200px] flex-col items-center justify-center gap-3 p-8 text-center">
+      <div className="text-base font-semibold text-[var(--ink)]">{title}</div>
+      <div className="max-w-md text-sm leading-relaxed text-[var(--muted)]">{description}</div>
       {action}
     </div>
   );

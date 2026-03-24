@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Activity, BarChart3, Eye, Film, Globe, Sparkles } from "lucide-react";
 
 import { BarList } from "@/components/dashboard/bar-list";
 import { MetricCard } from "@/components/dashboard/metric-card";
@@ -66,30 +67,40 @@ export function DashboardScreen() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-lg font-semibold text-[var(--ink)]">Dashboard</h2>
+        <p className="mt-1 text-sm text-[var(--muted)]">Overview of your emulation activity</p>
+      </div>
+
       <div className="metric-grid">
         <MetricCard
           label="Sessions"
           value={formatNumber(summary.totalSessions)}
           note={`${summary.completed} completed, ${summary.running} running`}
+          icon={Activity}
+          color="var(--brand)"
         />
         <MetricCard
           label="Ads watched"
           value={formatNumber(summary.totalWatchedAds)}
           note={`${summary.totalAds} captured artifacts`}
-          accent="bg-sky-50 text-sky-700"
+          icon={Eye}
+          color="var(--info)"
         />
         <MetricCard
           label="Video captures"
           value={formatNumber(summary.videoCaptures)}
           note={`${summary.totalAds > 0 ? formatPercent((summary.videoCaptures / summary.totalAds) * 100) : "0%"} capture success`}
-          accent="bg-amber-50 text-amber-700"
+          icon={Film}
+          color="var(--warning)"
         />
         <MetricCard
           label="Landing saves"
           value={formatNumber(summary.landingCompleted)}
           note={`${summary.captureItems.length > 0 ? formatPercent((summary.landingCompleted / summary.captureItems.length) * 100) : "0%"} landing success`}
-          accent="bg-rose-50 text-rose-700"
+          icon={Globe}
+          color="var(--danger)"
         />
         <MetricCard
           label="Avg videos / session"
@@ -99,22 +110,24 @@ export function DashboardScreen() {
               : "0.0"
           }
           note={`${summary.screenshotFallbacks} screenshot fallbacks`}
-          accent="bg-violet-50 text-violet-700"
+          icon={BarChart3}
+          color="#a78bfa"
         />
         <MetricCard
           label="Relevant ads"
           value={formatNumber(summary.relevantAds)}
           note={`${summary.analyzedAds} analyzed, ${summary.rejectedAds} rejected`}
-          accent="bg-emerald-50 text-emerald-700"
+          icon={Sparkles}
+          color="var(--accent)"
         />
       </div>
 
-      <div className="grid gap-8 xl:grid-cols-[1.4fr_0.8fr]">
+      <div className="grid gap-6 xl:grid-cols-[1.4fr_0.8fr]">
         <RecentSessions items={items.slice(0, 8)} />
         <SessionLauncher />
       </div>
 
-      <div className="grid gap-8 lg:grid-cols-2">
+      <div className="grid gap-6 lg:grid-cols-2">
         <BarList title="Top advertiser domains" items={advertiserItems} colorClass="bg-sky-500" />
         <BarList title="Top searched topics" items={topicItems} colorClass="bg-emerald-500" />
       </div>

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Trash2 } from "lucide-react";
+import { Rocket, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
 import { startEmulation } from "@/lib/api";
@@ -88,14 +88,14 @@ export function SessionLauncher() {
   }
 
   return (
-    <Card className="p-6">
-      <div className="mb-6">
-        <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">Quick start</div>
-        <h2 className="mt-2 text-xl font-semibold text-[var(--ink)]">Launch a new emulation</h2>
+    <Card className="p-5" glow>
+      <div className="mb-5 flex items-center gap-2">
+        <Rocket size={16} className="text-[var(--brand)]" />
+        <span className="text-sm font-semibold text-[var(--ink)]">Launch emulation</span>
       </div>
 
       <form className="space-y-4" onSubmit={handleSubmit}>
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-2">
           <Input
             label="Duration, minutes"
             type="number"
@@ -114,18 +114,14 @@ export function SessionLauncher() {
           />
         </div>
 
-        <div className="space-y-3">
-          <div>
-            <div>
-              <div className="text-sm font-medium text-[var(--ink)]">Topics</div>
-              <div className="mt-1 text-xs text-[var(--muted)]">
-                Add one topic per line. A new line appears automatically as you type.
-              </div>
-            </div>
+        <div className="space-y-2">
+          <div className="text-sm font-medium text-[var(--ink-secondary)]">Topics</div>
+          <div className="text-xs text-[var(--muted)]">
+            Add one topic per line. A new line appears automatically.
           </div>
-          <div className="space-y-3">
+          <div className="space-y-2">
             {topics.map((topic, index) => (
-              <div key={index} className="flex items-end gap-3">
+              <div key={index} className="flex items-end gap-2">
                 <Input
                   className="flex-1"
                   placeholder={`Topic ${index + 1}`}
@@ -137,10 +133,10 @@ export function SessionLauncher() {
                   <button
                     type="button"
                     onClick={() => removeTopic(index)}
-                    className="mt-auto inline-flex h-[50px] w-[50px] items-center justify-center rounded-2xl border border-rose-200 bg-rose-50 text-rose-600"
+                    className="flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-lg border border-[var(--danger)]/20 bg-[var(--danger-soft)] text-[var(--danger)] transition hover:bg-[var(--danger)]/20"
                     aria-label={`Remove topic ${index + 1}`}
                   >
-                    <Trash2 size={16} />
+                    <Trash2 size={14} />
                   </button>
                 ) : null}
               </div>
@@ -149,7 +145,7 @@ export function SessionLauncher() {
         </div>
 
         {error ? (
-          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+          <div className="rounded-lg border border-[var(--danger)]/20 bg-[var(--danger-soft)] px-3 py-2 text-sm text-[var(--danger)]">
             {error}
           </div>
         ) : null}

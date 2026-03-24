@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
+  ArrowLeft,
   ChevronDown,
   ChevronUp,
   FileImage,
@@ -71,17 +72,6 @@ function getAnalysisLabel(result: string | null, status?: string | null) {
     return "Analysis pending";
   }
   return "No analysis";
-}
-
-function getPreviewText(ad: EmulationWatchedAd | null) {
-  const text = ad?.full_text?.replace(/\s+/g, " ").trim();
-  if (!text) {
-    return null;
-  }
-  if (text.length <= 140) {
-    return text;
-  }
-  return `${text.slice(0, 140).trim()}...`;
 }
 
 function getBaseName(value: string | null | undefined) {
@@ -315,20 +305,21 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
     <div className="space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <Link to="/sessions" className="text-sm text-[var(--brand)]">
-            Back to sessions
+          <Link to="/sessions" className="inline-flex items-center gap-1.5 text-sm text-[var(--brand)] transition hover:text-[var(--brand-strong)]">
+            <ArrowLeft size={14} />
+            Sessions
           </Link>
-          <h2 className="mt-2 text-2xl font-semibold text-[var(--ink)]">
+          <h2 className="mt-2 text-lg font-semibold text-[var(--ink)]">
             Session {session.session_id.slice(0, 12)}
           </h2>
-          <div className="mt-2 flex flex-wrap items-center gap-3">
+          <div className="mt-2 flex flex-wrap items-center gap-2">
             <Badge tone={getStatusTone(session.status) as never}>{session.status}</Badge>
-            <span className="text-sm text-[var(--muted)]">
+            <span className="text-xs text-[var(--muted)]">
               {formatDate(session.queued_at)}
             </span>
           </div>
         </div>
-        <div className="flex flex-wrap gap-3">
+        <div className="flex flex-wrap gap-2">
           {session.status === "running" ? (
             <Button variant="danger" onClick={() => void handleAction("stop")}>
               Stop
@@ -347,77 +338,57 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
 
       <div className="metric-grid">
         <Card>
-          <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">
-            Requested
-          </div>
-          <div className="mt-3 text-3xl font-semibold text-[var(--ink)]">
-            {session.requested_duration_minutes}m
-          </div>
-          <div className="mt-2 text-sm text-[var(--muted)]">
-            Actual {formatMinutes(session.elapsed_minutes)}
-          </div>
+          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Requested</div>
+          <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">{session.requested_duration_minutes}m</div>
+          <div className="mt-1 text-xs text-[var(--muted)]">Actual {formatMinutes(session.elapsed_minutes)}</div>
         </Card>
         <Card>
-          <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">
-            Videos
-          </div>
-          <div className="mt-3 text-3xl font-semibold text-[var(--ink)]">
-            {formatNumber(session.watched_videos_count)}
-          </div>
-          <div className="mt-2 text-sm text-[var(--muted)]">
-            {formatNumber(session.videos_watched)} completed watch actions
-          </div>
+          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Videos</div>
+          <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">{formatNumber(session.watched_videos_count)}</div>
+          <div className="mt-1 text-xs text-[var(--muted)]">{formatNumber(session.videos_watched)} completed</div>
         </Card>
         <Card>
-          <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">
-            Ads
-          </div>
-          <div className="mt-3 text-3xl font-semibold text-[var(--ink)]">
-            {formatNumber(session.watched_ads_count)}
-          </div>
-          <div className="mt-2 text-sm text-[var(--muted)]">
-            {session.captures.video_captures} video captures
-          </div>
+          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Ads</div>
+          <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">{formatNumber(session.watched_ads_count)}</div>
+          <div className="mt-1 text-xs text-[var(--muted)]">{session.captures.video_captures} video captures</div>
         </Card>
         <Card>
-          <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted)]">
-            Traffic
-          </div>
-          <div className="mt-3 text-3xl font-semibold text-[var(--ink)]">
-            {formatBytes(session.bytes_downloaded)}
-          </div>
-          <div className="mt-2 text-sm text-[var(--muted)]">downloaded traffic</div>
+          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Traffic</div>
+          <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">{formatBytes(session.bytes_downloaded)}</div>
+          <div className="mt-1 text-xs text-[var(--muted)]">downloaded</div>
         </Card>
       </div>
 
       {liveStatus ? (
-        <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-          <Card className="p-6">
-            <div className="mb-4 text-lg font-semibold text-[var(--ink)]">
-              Live runtime
+        <div className="grid gap-4 xl:grid-cols-2">
+          <Card className="p-5" glow>
+            <div className="mb-3 flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-75" />
+                <span className="inline-flex h-2 w-2 rounded-full bg-[var(--accent)]" />
+              </span>
+              <span className="text-sm font-semibold text-[var(--ink)]">Live runtime</span>
             </div>
-            <div className="space-y-3 text-sm">
+            <div className="space-y-2 text-sm">
               <div className="flex justify-between gap-4">
                 <span className="text-[var(--muted)]">Profile</span>
-                <span>{liveStatus.profile_id || "—"}</span>
+                <span className="text-[var(--ink-secondary)]">{liveStatus.profile_id || "—"}</span>
               </div>
               <div className="flex justify-between gap-4">
                 <span className="text-[var(--muted)]">Elapsed</span>
-                <span>{formatMinutes(liveStatus.elapsed_minutes)}</span>
+                <span className="text-[var(--ink-secondary)]">{formatMinutes(liveStatus.elapsed_minutes)}</span>
               </div>
               <div className="flex justify-between gap-4">
                 <span className="text-[var(--muted)]">Topics searched</span>
-                <span>{liveStatus.topics_searched.join(", ") || "—"}</span>
+                <span className="text-[var(--ink-secondary)]">{liveStatus.topics_searched.join(", ") || "—"}</span>
               </div>
             </div>
           </Card>
-          <Card className="p-6">
-            <div className="mb-4 text-lg font-semibold text-[var(--ink)]">
-              Current watch
-            </div>
+          <Card className="p-5">
+            <div className="mb-3 text-sm font-semibold text-[var(--ink)]">Current watch</div>
             {liveStatus.current_watch ? (
-              <div className="space-y-3">
-                <div className="text-lg font-semibold text-[var(--ink)]">
+              <div className="space-y-2">
+                <div className="text-base font-semibold text-[var(--ink)]">
                   {liveStatus.current_watch.title}
                 </div>
                 <div className="text-sm text-[var(--muted)]">
@@ -439,14 +410,14 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
         </div>
       ) : null}
 
-      <div className="flex gap-3">
+      <div className="flex gap-1.5">
         {(["overview", ...(hasAds ? (["ads"] as const) : [])] as const).map((tab) => (
           <button
             key={tab}
-            className={`rounded-2xl px-4 py-2 text-sm font-semibold transition ${
+            className={`rounded-lg px-3 py-1.5 text-sm font-medium capitalize transition-all ${
               activeTab === tab
-                ? "bg-[var(--brand)] text-white"
-                : "border border-[var(--line)] bg-white text-[var(--ink)]"
+                ? "bg-[var(--brand-soft)] text-[var(--brand)]"
+                : "text-[var(--muted)] hover:bg-[var(--panel-hover)] hover:text-[var(--ink)]"
             }`}
             onClick={() => setActiveTab(tab)}
           >
@@ -456,60 +427,52 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
       </div>
 
       {activeTab === "overview" ? (
-        <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-          <Card className="p-6">
-            <div className="mb-4 text-lg font-semibold text-[var(--ink)]">Topics</div>
-            <div className="flex flex-wrap gap-2">
-              {session.topics_searched.length > 0
-                ? session.topics_searched.map((topic) => (
-                    <span
-                      key={topic}
-                      className="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-700"
-                    >
-                      {topic}
-                    </span>
-                  ))
-                : session.requested_topics.map((topic) => (
-                    <span
-                      key={topic}
-                      className="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-700"
-                    >
-                      {topic}
-                    </span>
-                  ))}
+        <div className="grid gap-4 xl:grid-cols-2">
+          <Card className="p-5">
+            <div className="mb-3 text-sm font-semibold text-[var(--ink)]">Topics</div>
+            <div className="flex flex-wrap gap-1.5">
+              {(session.topics_searched.length > 0
+                ? session.topics_searched
+                : session.requested_topics
+              ).map((topic) => (
+                <span
+                  key={topic}
+                  className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-2.5 py-1 text-xs text-[var(--ink-secondary)]"
+                >
+                  {topic}
+                </span>
+              ))}
             </div>
           </Card>
-          <Card className="p-6">
-            <div className="mb-4 text-lg font-semibold text-[var(--ink)]">
-              Session metadata
-            </div>
-            <div className="space-y-3 text-sm">
+          <Card className="p-5">
+            <div className="mb-3 text-sm font-semibold text-[var(--ink)]">Session metadata</div>
+            <div className="space-y-2 text-sm">
               <div className="flex justify-between gap-4">
                 <span className="text-[var(--muted)]">Queued</span>
-                <span>{formatDate(session.queued_at)}</span>
+                <span className="text-[var(--ink-secondary)]">{formatDate(session.queued_at)}</span>
               </div>
               <div className="flex justify-between gap-4">
                 <span className="text-[var(--muted)]">Started</span>
-                <span>{formatDate(session.started_at)}</span>
+                <span className="text-[var(--ink-secondary)]">{formatDate(session.started_at)}</span>
               </div>
               <div className="flex justify-between gap-4">
                 <span className="text-[var(--muted)]">Finished</span>
-                <span>{formatDate(session.finished_at)}</span>
+                <span className="text-[var(--ink-secondary)]">{formatDate(session.finished_at)}</span>
               </div>
             </div>
           </Card>
           <Card className="p-0 xl:col-span-2">
-            <div className="border-b border-[var(--line)] px-6 py-4 text-lg font-semibold text-[var(--ink)]">
+            <div className="border-b border-[var(--line)] px-5 py-4 text-sm font-semibold text-[var(--ink)]">
               Watched videos
             </div>
             {(session.watched_videos ?? []).length > 0 ? (
               <div className="divide-y divide-[var(--line)]">
                 {(session.watched_videos ?? []).map((video) => (
-                  <div key={`${video.position}-${video.recorded_at}`} className="px-6 py-4">
+                  <div key={`${video.position}-${video.recorded_at}`} className="px-5 py-3">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
-                        <div className="font-semibold text-[var(--ink)]">{video.title}</div>
-                        <div className="mt-1 text-sm text-[var(--muted)]">
+                        <div className="text-sm font-medium text-[var(--ink)]">{video.title}</div>
+                        <div className="mt-0.5 text-xs text-[var(--muted)]">
                           {video.search_keyword || "no search keyword"} ·{" "}
                           {video.watched_seconds.toFixed(1)}s /{" "}
                           {video.target_seconds.toFixed(1)}s
@@ -523,7 +486,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                 ))}
               </div>
             ) : (
-              <div className="px-6 py-8 text-sm text-[var(--muted)]">
+              <div className="px-5 py-8 text-sm text-[var(--muted)]">
                 No watched videos were recorded for this session yet.
               </div>
             )}
@@ -553,17 +516,17 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
             const isExpanded = expandedAd === item.position;
 
             return (
-              <Card key={`ad-card-${item.position}`} className="p-6">
-                <div className="flex flex-wrap items-start justify-between gap-4">
+              <Card key={`ad-card-${item.position}`} className="p-5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
-                    <div className="mt-2 text-lg font-semibold text-[var(--ink)]">
+                    <div className="text-sm font-semibold text-[var(--ink)]">
                       {item.ad?.headline_text ||
                         item.primaryCapture?.headline_text ||
                         item.ad?.advertiser_domain ||
                         item.primaryCapture?.advertiser_domain ||
                         "Untitled ad"}
                     </div>
-                    <div className="mt-2 text-sm text-[var(--muted)]">
+                    <div className="mt-1 text-xs text-[var(--muted)]">
                       {item.ad?.display_url ||
                         item.primaryCapture?.display_url ||
                         item.ad?.advertiser_domain ||
@@ -571,7 +534,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                         "unknown domain"}
                     </div>
                   </div>
-                  <div className="flex flex-wrap justify-end gap-2">
+                  <div className="flex flex-wrap justify-end gap-1.5">
                     {item.ad ? (
                       <Badge tone={item.ad.completed ? "success" : "warning"}>
                         {item.ad.completed ? "completed" : "partial"}
@@ -609,7 +572,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                   </div>
                 </div>
 
-                <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-sm text-[var(--muted)]">
+                <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-[var(--muted)]">
                   <div>Watched: {item.ad?.watched_seconds.toFixed(1) || "—"}s</div>
                   <div>CTA: {item.ad?.cta_text || "—"}</div>
                   <div>
@@ -622,35 +585,36 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                   </div>
                 </div>
 
-                <div className="mt-4 flex items-center justify-end gap-3">
+                <div className="mt-3 flex items-center justify-end">
                   <Button
                     type="button"
                     variant="ghost"
                     onClick={() => setExpandedAd((prev) => (prev === item.position ? null : item.position))}
+                    className="gap-1.5 px-2.5 py-1.5 text-xs"
                   >
-                    {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                    {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                     {isExpanded ? "Hide details" : "Show details"}
                   </Button>
                 </div>
 
                 {isExpanded ? (
-                  <div className="mt-5 space-y-4 border-t border-[var(--line)] pt-5">
+                  <div className="mt-4 space-y-3 border-t border-[var(--line)] pt-4">
                     {item.ad?.full_text ? (
-                      <div className="rounded-2xl border border-[var(--line)] bg-white px-4 py-4 text-sm text-[var(--ink)]">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-semibold text-[var(--ink)]">Ad text</span>
+                      <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold text-[var(--ink)]">Ad text</span>
                           <Badge tone="info">visible text</Badge>
                         </div>
-                        <div className="mt-3 whitespace-pre-wrap leading-6 text-[var(--ink)]">
+                        <div className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-[var(--ink-secondary)]">
                           {item.ad.full_text}
                         </div>
                       </div>
                     ) : null}
 
                     {item.primaryCapture?.analysis_status ? (
-                      <div className="rounded-2xl border border-[var(--line)] bg-white px-4 py-4 text-sm text-[var(--ink)]">
+                      <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-semibold text-[var(--ink)]">Ad analysis</span>
+                          <span className="text-xs font-semibold text-[var(--ink)]">Ad analysis</span>
                           <Badge
                             tone={
                               getAnalysisTone(
@@ -668,9 +632,9 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                           {analysisCategory ? <Badge tone="info">{analysisCategory}</Badge> : null}
                         </div>
                         {analysisReason ? (
-                          <div className="mt-3 leading-6 text-[var(--ink)]">{analysisReason}</div>
+                          <div className="mt-2 text-sm leading-relaxed text-[var(--ink-secondary)]">{analysisReason}</div>
                         ) : (
-                          <div className="mt-3 text-[var(--muted)]">
+                          <div className="mt-2 text-[var(--muted)]">
                             {item.primaryCapture.analysis_status === "pending"
                               ? "The ad is waiting for analysis."
                               : item.primaryCapture.analysis_status === "failed"
@@ -682,15 +646,15 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                     ) : null}
 
                     {item.captures.length > 0 && !mediaHiddenByAnalysis ? (
-                      <div className="space-y-3 rounded-2xl border border-[var(--line)] bg-white px-4 py-4 text-sm">
-                        <div className="text-sm font-semibold text-[var(--ink)]">
+                      <div className="space-y-3 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
+                        <div className="text-xs font-semibold text-[var(--ink)]">
                           Media preview
                           {item.captures.length > 1 ? ` (${item.captures.length} segments)` : ""}
                         </div>
                         {item.captures.map((capture, index) => (
                           <div
                             key={`${capture.ad_position}-${index}`}
-                            className="space-y-3 rounded-2xl bg-[var(--panel-soft)] p-4"
+                            className="space-y-3 rounded-lg bg-[var(--bg-soft)] p-4"
                           >
                             {(() => {
                               const videoUrl = buildMediaUrl(capture.video_file);
@@ -703,26 +667,26 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                               return (
                                 <>
                             {item.captures.length > 1 ? (
-                              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--muted)]">
+                              <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">
                                 Segment {index + 1}
                               </div>
                             ) : null}
 
                             <div className="grid gap-3 lg:grid-cols-3">
-                              <div className="relative overflow-hidden rounded-2xl bg-slate-950 p-4 text-white min-h-40">
-                                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(248,113,113,0.28),_transparent_55%)]" />
+                              <div className="relative overflow-hidden rounded-lg bg-[var(--panel-soft)] p-4 min-h-36">
+                                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(108,92,231,0.06),_transparent_55%)]" />
                                 <div className="relative flex h-full flex-col justify-between">
                                   <div className="flex items-center justify-between">
                                     <Badge tone={capture.video_status === "completed" ? "success" : "warning"}>
                                       {capture.video_status === "completed" ? "video saved" : "video pending"}
                                     </Badge>
-                                    <Film size={18} className="text-white/70" />
+                                    <Film size={15} className="text-[var(--muted)]" />
                                   </div>
                                   {videoUrl ? (
-                                    <div className="py-4">
+                                    <div className="py-3">
                                       <video
                                         key={videoUrl}
-                                        className="h-36 w-full rounded-xl bg-black object-cover"
+                                        className="h-32 w-full rounded-lg bg-slate-900 object-cover"
                                         controls
                                         preload="metadata"
                                         src={videoUrl}
@@ -730,21 +694,21 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                                           try {
                                             event.currentTarget.currentTime = 0;
                                           } catch {
-                                            // Ignore browser seek restrictions for read-only preview.
+                                            // Ignore browser seek restrictions
                                           }
                                         }}
                                       />
                                     </div>
                                   ) : (
-                                    <div className="flex items-center justify-center py-5">
-                                      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-white/10 backdrop-blur-sm">
-                                        <PlayCircle size={34} className="text-white" />
+                                    <div className="flex items-center justify-center py-4">
+                                      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[var(--brand-soft)]">
+                                        <PlayCircle size={28} className="text-[var(--brand)]" />
                                       </div>
                                     </div>
                                   )}
                                   <div>
-                                    <div className="text-sm font-semibold">Ad video</div>
-                                    <div className="mt-1 truncate text-xs text-white/70">
+                                    <div className="text-xs font-semibold text-[var(--ink)]">Ad video</div>
+                                    <div className="mt-0.5 truncate text-xs text-[var(--muted)]">
                                       {getBaseName(capture.video_file) || "video.webm"}
                                     </div>
                                     {videoUrl ? (
@@ -752,7 +716,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                                         href={videoUrl}
                                         target="_blank"
                                         rel="noreferrer"
-                                        className="mt-2 inline-flex text-xs font-semibold text-white/85 underline underline-offset-4 hover:text-white"
+                                        className="mt-1.5 inline-flex text-xs font-medium text-[var(--brand)] hover:underline"
                                       >
                                         Open video
                                       </a>
@@ -761,93 +725,93 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                                 </div>
                               </div>
 
-                              <div className="rounded-2xl border border-[var(--line)] bg-white p-4 min-h-40">
+                              <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4 min-h-36">
                                 <div className="flex items-center justify-between">
                                   <Badge tone={capture.screenshot_paths.length > 0 ? "info" : "neutral"}>
                                     {capture.screenshot_paths.length} screenshots
                                   </Badge>
-                                  <FileImage size={18} className="text-[var(--muted)]" />
+                                  <FileImage size={15} className="text-[var(--muted)]" />
                                 </div>
-                                <div className="mt-4">
+                                <div className="mt-3">
                                   {screenshotUrl ? (
                                     <a href={screenshotUrl} target="_blank" rel="noreferrer">
                                       <img
                                         src={screenshotUrl}
                                         alt="Ad screenshot preview"
-                                        className="h-28 w-full rounded-xl border border-slate-200 object-cover"
+                                        className="h-24 w-full rounded-lg border border-[var(--line)] object-cover"
                                       />
                                     </a>
                                   ) : (
-                                    <div className="flex items-end gap-3">
+                                    <div className="flex items-end gap-2">
                                       {[0, 1, 2].map((layer) => (
                                         <div
                                           key={layer}
-                                          className={`rounded-xl border border-slate-200 bg-gradient-to-br from-slate-100 to-slate-200 ${
+                                          className={`rounded-lg border border-[var(--line)] bg-[var(--bg-soft)] ${
                                             layer === 0
-                                              ? "h-24 w-20"
+                                              ? "h-20 w-16"
                                               : layer === 1
-                                                ? "h-20 w-16"
-                                                : "h-16 w-12"
+                                                ? "h-16 w-12"
+                                                : "h-12 w-10"
                                           }`}
                                         />
                                       ))}
                                     </div>
                                   )}
                                 </div>
-                                <div className="mt-4 text-sm font-semibold text-[var(--ink)]">
+                                <div className="mt-3 text-xs font-semibold text-[var(--ink)]">
                                   Screenshot timeline
                                 </div>
-                                <div className="mt-1 flex items-center justify-between gap-3">
+                                <div className="mt-0.5 flex items-center justify-between gap-2">
                                   <div className="text-xs text-[var(--muted)]">
-                                    Fallback frames and sampled moments from the ad.
+                                    Fallback frames from the ad.
                                   </div>
                                   {screenshotUrl ? (
                                     <a
                                       href={screenshotUrl}
                                       target="_blank"
                                       rel="noreferrer"
-                                      className="shrink-0 text-xs font-semibold text-[var(--brand)] underline underline-offset-4"
+                                      className="shrink-0 text-xs font-medium text-[var(--brand)] hover:underline"
                                     >
-                                      Open screenshot
+                                      Open
                                     </a>
                                   ) : null}
                                 </div>
                               </div>
 
-                              <div className="rounded-2xl border border-[var(--line)] bg-white p-4 min-h-40">
+                              <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4 min-h-36">
                                 <div className="flex items-center justify-between">
                                   <Badge tone={capture.landing_status === "completed" ? "info" : "warning"}>
                                     {capture.landing_status === "completed" ? "landing saved" : "landing pending"}
                                   </Badge>
-                                  <Globe size={18} className="text-[var(--muted)]" />
+                                  <Globe size={15} className="text-[var(--muted)]" />
                                 </div>
-                                <div className="mt-5 overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
-                                  <div className="flex items-center gap-1.5 border-b border-slate-200 px-3 py-2">
-                                    <span className="h-2.5 w-2.5 rounded-full bg-rose-300" />
-                                    <span className="h-2.5 w-2.5 rounded-full bg-amber-300" />
-                                    <span className="h-2.5 w-2.5 rounded-full bg-emerald-300" />
+                                <div className="mt-4 overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--bg-soft)]">
+                                  <div className="flex items-center gap-1.5 border-b border-[var(--line)] px-3 py-1.5">
+                                    <span className="h-2 w-2 rounded-full bg-[var(--danger)]" />
+                                    <span className="h-2 w-2 rounded-full bg-[var(--warning)]" />
+                                    <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
                                   </div>
-                                  <div className="px-3 py-4">
-                                    <div className="flex items-center gap-2 text-sm font-semibold text-[var(--ink)]">
-                                      <FolderOpen size={15} />
+                                  <div className="px-3 py-3">
+                                    <div className="flex items-center gap-2 text-xs font-semibold text-[var(--ink)]">
+                                      <FolderOpen size={13} />
                                       {getLandingHost(capture.landing_url) || "landing page"}
                                     </div>
-                                    <div className="mt-2 truncate text-xs text-[var(--muted)]">
+                                    <div className="mt-1 truncate text-xs text-[var(--muted)]">
                                       {getBaseName(capture.landing_dir) || "landing/"}
                                     </div>
                                   </div>
                                 </div>
-                                <div className="mt-4 text-xs text-[var(--muted)]">
-                                  Saved HTML and assets snapshot.
+                                <div className="mt-3 text-xs text-[var(--muted)]">
+                                  Saved HTML snapshot.
                                 </div>
                                 {landingIndexUrl ? (
                                   <a
                                     href={landingIndexUrl}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="mt-3 inline-flex text-xs font-semibold text-[var(--brand)] underline underline-offset-4"
+                                    className="mt-2 inline-flex text-xs font-medium text-[var(--brand)] hover:underline"
                                   >
-                                    Open landing snapshot
+                                    Open landing
                                   </a>
                                 ) : null}
                               </div>
