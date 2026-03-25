@@ -40,6 +40,7 @@ from .utils import (
     build_capture_summary,
     calculate_history_elapsed_minutes,
     map_ad_capture,
+    normalize_watched_ads_payload,
     normalized_ads_count,
     normalized_videos_count,
 )
@@ -240,17 +241,15 @@ class EmulationSessionService:
             return data
 
         now_ts = datetime.datetime.now(datetime.UTC).timestamp()
-        runtime_grace_seconds = 5 * 60
+        runtime_grace_seconds = 60
         if (started_at + (float(duration_minutes) * 60.0) + runtime_grace_seconds) > now_ts:
             return data
 
         last_activity_at = last_activity_timestamp(data)
-        if (now_ts - last_activity_at) <= (10 * 60):
+        if (now_ts - last_activity_at) <= 60:
             return data
 
-        if await self._session_store.is_run_lock_active(session_id) and (now_ts - last_activity_at) <= (
-            20 * 60
-        ):
+        if await self._session_store.is_run_lock_active(session_id) and (now_ts - last_activity_at) <= 90:
             return data
 
         error = (
@@ -264,6 +263,10 @@ class EmulationSessionService:
             finished_at=finished_at,
             current_watch=None,
             error=error,
+        )
+        await self._session_store.clear_session_locks(
+            session_id,
+            profile_id=normalize_profile_id(data.get("profile_id")),
         )
         live_payload = await self._session_store.get(session_id) or {**data}
         live_payload["status"] = "failed"
@@ -591,7 +594,11 @@ class EmulationHistoryService:
     ) -> EmulationHistoryItem:
         watched_videos = payload.watched_videos if include_details else None
         watched_ads_analytics = payload.watched_ads_analytics if include_details else None
-        watched_ads = payload.watched_ads if (include_details and include_raw_ads) else None
+        watched_ads = (
+            normalize_watched_ads_payload(payload.watched_ads)
+            if (include_details and include_raw_ads)
+            else None
+        )
         watched_videos_count = normalized_videos_count(payload)
         watched_ads_count = normalized_ads_count(payload)
 

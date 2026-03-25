@@ -527,6 +527,18 @@ class AdHandler:
         rec._state_entry.update(rec.to_dict())
 
     def _publish_record(self, rec: AdRecord) -> dict[str, object] | None:
+        if self._should_ignore_record(rec):
+            if rec._capture_task:
+                self._pending_records.append(rec)
+            logger.info(
+                "Session %s: ignoring empty ad segment (capture=%s watched=%.1fs end_reason=%s)",
+                self._state.session_id,
+                rec.capture_id,
+                rec.watched_seconds or 0.0,
+                rec.end_reason,
+            )
+            return None
+
         if rec._state_entry is not None:
             return rec._state_entry
 
@@ -543,6 +555,31 @@ class AdHandler:
         if not landing and not advertiser:
             return None
         return "|".join((advertiser, headline, landing))
+
+    def _should_ignore_record(self, rec: AdRecord) -> bool:
+        watched = rec.watched_seconds or 0.0
+        has_text = bool(
+            (rec.advertiser_domain or "").strip()
+            or (rec.display_url or "").strip()
+            or (rec.headline_text or "").strip()
+            or (rec.description_text or "").strip()
+            or rec.visible_lines
+            or rec.caption_lines
+            or rec.text_samples
+            or rec.landing_urls
+        )
+        has_landing_signal = bool(
+            rec.capture_id
+            and rec._capture_result
+            and (
+                rec._capture_result.landing_url
+                or rec._capture_result.landing_dir
+                or rec._capture_result.screenshot_paths
+            )
+        )
+        # Ignore recorder noise: a sub-2s segment with no advertiser/text/landing
+        # is not a meaningful ad record even if a tiny video chunk was flushed.
+        return watched <= 2.0 and not has_text and not has_landing_signal
 
     def _is_continuation_segment(
         self,

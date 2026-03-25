@@ -15,6 +15,8 @@ from .clock import SessionClock
 
 logger = logging.getLogger(__name__)
 _ACTION_CANCEL_GRACE_SECONDS = 2.0
+_ACTION_PROGRESS_POLL_SECONDS = 3.0
+_POST_DEADLINE_WATCH_STALL_GRACE_SECONDS = 30.0
 
 
 class SessionRuntimeClosedError(RuntimeError):
@@ -62,7 +64,7 @@ class ActionDispatcher:
         action_task = asyncio.create_task(handler())
 
         try:
-            await asyncio.wait_for(action_task, timeout=timeout_s)
+            await self._await_action(action_task, action, timeout_s)
             self._state.consecutive_fails = 0
             elapsed_s = time.monotonic() - started_at
             videos_delta = self._state.videos_watched - videos_before
@@ -218,4 +220,78 @@ class ActionDispatcher:
                 "target closed",
                 "browser has been closed",
             )
+        )
+
+    async def _await_action(
+        self,
+        action_task: asyncio.Task[None],
+        action: Action,
+        timeout_s: float,
+    ) -> None:
+        deadline = time.monotonic() + timeout_s
+        post_deadline_stall_started_at: float | None = None
+        last_progress_signature = (
+            self._watch_progress_signature() if action in WATCH_ACTIONS else None
+        )
+
+        while True:
+            remaining_timeout = deadline - time.monotonic()
+            if remaining_timeout <= 0:
+                raise TimeoutError
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(action_task),
+                    timeout=min(_ACTION_PROGRESS_POLL_SECONDS, remaining_timeout),
+                )
+                return
+            except TimeoutError:
+                pass
+
+            if action not in WATCH_ACTIONS:
+                continue
+
+            progress_signature = self._watch_progress_signature()
+            if progress_signature != last_progress_signature:
+                last_progress_signature = progress_signature
+                post_deadline_stall_started_at = None
+                continue
+
+            if self._state.remaining_seconds() > 0:
+                post_deadline_stall_started_at = None
+                continue
+
+            if post_deadline_stall_started_at is None:
+                post_deadline_stall_started_at = time.monotonic()
+                logger.warning(
+                    "Session %s: %s exceeded deadline; waiting %.0fs for watch progress before cancellation",
+                    self._state.session_id,
+                    action,
+                    _POST_DEADLINE_WATCH_STALL_GRACE_SECONDS,
+                )
+                continue
+
+            if (
+                time.monotonic() - post_deadline_stall_started_at
+                >= _POST_DEADLINE_WATCH_STALL_GRACE_SECONDS
+            ):
+                logger.error(
+                    "Session %s: %s stalled past deadline with no progress",
+                    self._state.session_id,
+                    action,
+                )
+                raise TimeoutError
+
+    def _watch_progress_signature(self) -> tuple[object, ...]:
+        current_watch = self._state.current_watch or {}
+        last_ad = self._state.watched_ads[-1] if self._state.watched_ads else {}
+        last_video = self._state.watched_videos[-1] if self._state.watched_videos else {}
+        return (
+            current_watch.get("url"),
+            current_watch.get("watched_seconds"),
+            current_watch.get("target_seconds"),
+            len(self._state.watched_ads),
+            last_ad.get("recorded_at"),
+            len(self._state.watched_videos),
+            last_video.get("recorded_at"),
         )

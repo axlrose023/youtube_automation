@@ -31,6 +31,59 @@ class ResumeSeed(TypedDict, total=False):
     personality: dict | None
 
 
+def _normalize_live_screenshot_paths(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[dict[str, object]] = []
+    for item in value:
+        if isinstance(item, dict):
+            offset_ms = item.get("offset_ms")
+            file_path = item.get("file_path")
+        elif (
+            isinstance(item, (list, tuple))
+            and len(item) == 2
+        ):
+            offset_ms, file_path = item
+        else:
+            continue
+
+        if not isinstance(offset_ms, int | float) or not isinstance(file_path, str):
+            continue
+        normalized.append(
+            {
+                "offset_ms": int(offset_ms),
+                "file_path": file_path,
+            },
+        )
+    return normalized
+
+
+def _normalize_live_ad_capture(value: object) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        return None
+
+    normalized = dict(value)
+    normalized["screenshot_paths"] = _normalize_live_screenshot_paths(
+        value.get("screenshot_paths"),
+    )
+    return normalized
+
+
+def _normalize_live_watched_ads(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        ad = dict(item)
+        ad["capture"] = _normalize_live_ad_capture(item.get("capture"))
+        normalized.append(ad)
+    return normalized
+
+
 def normalize_profile_id(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -50,7 +103,7 @@ def build_status_response(
     if status == "running" and bool(data.get("stop_requested")):
         status = "stopping"
 
-    watched_ads = data.get("watched_ads", [])
+    watched_ads = _normalize_live_watched_ads(data.get("watched_ads"))
     return EmulationSessionStatus(
         session_id=session_id,
         status=status,

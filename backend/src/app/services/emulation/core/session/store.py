@@ -13,6 +13,7 @@ from ..ad_analytics import build_ads_analytics
 _TTL = 86400
 _TERMINAL_STATUSES = {"completed", "failed", "stopped"}
 _STALE_TERMINAL_LOCK_GRACE_SECONDS = 20.0
+_STALE_ACTIVE_LOCK_GRACE_SECONDS = 90.0
 logger = logging.getLogger(__name__)
 
 
@@ -174,6 +175,12 @@ class EmulationSessionStore:
                     and current_age_seconds >= _STALE_TERMINAL_LOCK_GRACE_SECONDS
                 ):
                     is_stale = True
+                elif (
+                    current_status in {"running", "queued"}
+                    and current_age_seconds is not None
+                    and current_age_seconds >= _STALE_ACTIVE_LOCK_GRACE_SECONDS
+                ):
+                    is_stale = True
 
             if is_stale and current_holder:
                 logger.warning(
@@ -216,6 +223,26 @@ class EmulationSessionStore:
         if isinstance(current_holder, bytes):
             current_holder = current_holder.decode("utf-8", errors="ignore")
         if str(current_holder) != holder:
+            return
+        await self._redis.delete(key)
+
+    async def clear_session_locks(
+        self,
+        session_id: str,
+        *,
+        profile_id: str | None = None,
+    ) -> None:
+        await self._redis.delete(self._run_lock_key(session_id))
+        if not profile_id:
+            return
+
+        key = self._profile_lock_key(profile_id)
+        current_holder = await self._redis.get(key)
+        if current_holder is None:
+            return
+        if isinstance(current_holder, bytes):
+            current_holder = current_holder.decode("utf-8", errors="ignore")
+        if self._holder_session_id(str(current_holder)) != session_id:
             return
         await self._redis.delete(key)
 

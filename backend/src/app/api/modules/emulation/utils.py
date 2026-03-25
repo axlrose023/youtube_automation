@@ -72,6 +72,55 @@ def _parse_analysis_summary(raw: str | None) -> dict | None:
         return None
 
 
+def normalize_screenshot_paths(
+    value: object,
+) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[dict[str, object]] = []
+    for item in value:
+        if isinstance(item, dict):
+            offset_ms = item.get("offset_ms")
+            file_path = item.get("file_path")
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            offset_ms, file_path = item
+        else:
+            continue
+
+        if not isinstance(offset_ms, int | float) or not isinstance(file_path, str):
+            continue
+        normalized.append(
+            {
+                "offset_ms": int(offset_ms),
+                "file_path": file_path,
+            },
+        )
+    return normalized
+
+
+def normalize_watched_ads_payload(
+    watched_ads: object,
+) -> list[dict[str, object]]:
+    if not isinstance(watched_ads, list):
+        return []
+
+    normalized: list[dict[str, object]] = []
+    for item in watched_ads:
+        if not isinstance(item, dict):
+            continue
+        ad = dict(item)
+        capture = item.get("capture")
+        if isinstance(capture, dict):
+            capture_payload = dict(capture)
+            capture_payload["screenshot_paths"] = normalize_screenshot_paths(
+                capture.get("screenshot_paths"),
+            )
+            ad["capture"] = capture_payload
+        normalized.append(ad)
+    return normalized
+
+
 def map_ad_capture(capture: AdCapture) -> EmulationAdCaptureHistory:
     screenshot_paths = [
         EmulationAdCaptureScreenshotPath(offset_ms=s.offset_ms, file_path=s.file_path)

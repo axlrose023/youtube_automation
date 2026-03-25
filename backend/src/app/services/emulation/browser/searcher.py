@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from playwright.async_api import ElementHandle, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
-from ..core.config import SEARCH_MODIFIERS
 from ..core.selectors import (
     SEARCH_BUTTON,
     SEARCH_BUTTON_SELECTORS,
@@ -27,9 +26,16 @@ _FINANCE_TOPIC_HINTS = (
     "crypto",
     "bitcoin",
     "ethereum",
+    "forex",
     "finance",
     "financial",
     "invest",
+    "income",
+    "passive",
+    "earn",
+    "yield",
+    "staking",
+    "dividend",
     "stock",
     "market",
     "trading",
@@ -60,13 +66,20 @@ _FINANCE_TOPIC_QUERY_TEMPLATES = (
     ("stock market", "stock market explained investing basics"),
     ("stocks", "stocks explained for beginners"),
     ("crypto investments", "crypto investing for beginners portfolio"),
+    ("crypto earnings", "crypto staking yield passive income for beginners"),
+    ("passive income", "passive income investing dividends staking explained"),
+    ("side income", "passive income dividends staking forex crypto investing explained"),
     ("investments", "investing basics portfolio investing for beginners"),
     ("investment", "investment basics portfolio investing"),
     ("crypto", "crypto for beginners explained"),
+    ("forex trading", "forex trading for beginners mt5 broker basics"),
     ("bitcoin", "bitcoin explained"),
     ("ethereum", "ethereum explained"),
     ("finance", "financial literacy and finance basics explained"),
 )
+_CRYPTO_TOKENS = {"crypto", "cryptocurrency", "bitcoin", "btc", "ethereum", "eth", "defi", "blockchain"}
+_CRYPTO_EARN_TOKENS = {"earn", "earning", "earnings", "money", "profit", "profits", "yield", "staking", "stake", "passive", "income", "apy", "apr", "rewards"}
+_FOREX_TOKENS = {"forex", "fx", "cfd", "mt4", "mt5", "broker"}
 
 
 class Searcher:
@@ -124,11 +137,9 @@ class Searcher:
             await self.search()
             return
 
-        modifier = random.choice(SEARCH_MODIFIERS)
-        refined = f"{base_topic} {modifier}"
-        logger.info("Session %s: refine_search '%s' -> '%s'", self._state.session_id, base_topic, refined)
+        logger.info("Session %s: repeat_search '%s'", self._state.session_id, base_topic)
         self._state.current_topic = base_topic
-        await self._execute_search(refined, fallback_to_regular_search=True)
+        await self._execute_search(base_topic, fallback_to_regular_search=True)
 
     async def _execute_search(
         self,
@@ -249,17 +260,7 @@ class Searcher:
         logger.info("Session %s: scanned search results before click (hovered=%d)", self._state.session_id, hovered)
 
     def _build_search_query(self, topic: str) -> str:
-        normalized = " ".join(topic.lower().split())
-        if not self._is_finance_context(normalized):
-            return topic
-        for needle, query in _FINANCE_TOPIC_QUERY_TEMPLATES:
-            if needle in normalized:
-                return query
-        if any(hint in normalized for hint in _FINANCE_QUERY_HINTS):
-            return topic
-        if len(normalized.split()) >= 4:
-            return topic
-        return f"{topic} {random.choice(_FINANCE_SEARCH_MODIFIERS)}"
+        return " ".join(topic.split())
 
     def _is_finance_context(self, topic: str) -> bool:
         topics_blob = " ".join(filter(None, [*self._state.topics, self._state.current_topic or "", topic])).lower()

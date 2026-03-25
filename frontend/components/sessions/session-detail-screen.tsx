@@ -8,6 +8,8 @@ import {
   Film,
   FolderOpen,
   Globe,
+  LayoutPanelTop,
+  Megaphone,
   PlayCircle,
 } from "lucide-react";
 
@@ -31,6 +33,7 @@ import type {
   EmulationHistoryDetail,
   EmulationSessionStatus,
   EmulationWatchedAd,
+  EmulationWatchedVideo,
 } from "@/types/api";
 
 type AdCard = {
@@ -38,6 +41,10 @@ type AdCard = {
   ad: EmulationWatchedAd | null;
   captures: EmulationAdCapture[];
   primaryCapture: EmulationAdCapture | null;
+};
+
+type SessionVideoItem = EmulationWatchedVideo & {
+  runtime?: boolean;
 };
 
 function readAnalysisField(
@@ -261,6 +268,46 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
       });
   }, [session]);
 
+  const sessionVideos = useMemo<SessionVideoItem[]>(() => {
+    const persisted = [...(session?.watched_videos ?? [])];
+    const current = liveStatus?.current_watch;
+    if (!current) {
+      return persisted;
+    }
+
+    const alreadyTracked = persisted.some(
+      (video) =>
+        video.url === current.url ||
+        (video.title === current.title &&
+          (video.search_keyword ?? null) === (current.search_keyword ?? null)),
+    );
+    if (alreadyTracked) {
+      return persisted;
+    }
+
+    return [
+      {
+        position: 0,
+        action: current.action,
+        title: current.title,
+        url: current.url,
+        watched_seconds: current.watched_seconds,
+        target_seconds: current.target_seconds ?? current.watched_seconds,
+        watch_ratio:
+          current.target_seconds && current.target_seconds > 0
+            ? current.watched_seconds / current.target_seconds
+            : null,
+        completed: false,
+        search_keyword: current.search_keyword ?? null,
+        matched_topics: current.matched_topics,
+        keywords: current.keywords,
+        recorded_at: current.started_at,
+        runtime: true,
+      },
+      ...persisted,
+    ];
+  }, [session?.watched_videos, liveStatus?.current_watch]);
+
   const hasAds = adCards.length > 0;
   const visibleAdCards = showAllAds ? adCards : adCards.slice(0, 4);
 
@@ -410,18 +457,24 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
         </div>
       ) : null}
 
-      <div className="flex gap-1.5">
+      <div className="inline-flex rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">
         {(["overview", ...(hasAds ? (["ads"] as const) : [])] as const).map((tab) => (
           <button
             key={tab}
-            className={`rounded-lg px-3 py-1.5 text-sm font-medium capitalize transition-all ${
+            className={`inline-flex min-w-[122px] items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium capitalize transition-all ${
               activeTab === tab
-                ? "bg-[var(--brand-soft)] text-[var(--brand)]"
-                : "text-[var(--muted)] hover:bg-[var(--panel-hover)] hover:text-[var(--ink)]"
+                ? "bg-[var(--panel)] text-[var(--brand)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
+                : "text-[var(--muted)] hover:bg-[var(--panel)] hover:text-[var(--ink)]"
             }`}
             onClick={() => setActiveTab(tab)}
           >
-            {tab}
+            {tab === "overview" ? <LayoutPanelTop size={15} /> : <Megaphone size={15} />}
+            <span>{tab}</span>
+            {tab === "ads" ? (
+              <span className="rounded-md bg-[var(--bg-soft)] px-1.5 py-0.5 text-[11px] font-semibold text-[var(--ink-secondary)]">
+                {adCards.length}
+              </span>
+            ) : null}
           </button>
         ))}
       </div>
@@ -465,9 +518,9 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
             <div className="border-b border-[var(--line)] px-5 py-4 text-sm font-semibold text-[var(--ink)]">
               Watched videos
             </div>
-            {(session.watched_videos ?? []).length > 0 ? (
+            {sessionVideos.length > 0 ? (
               <div className="divide-y divide-[var(--line)]">
-                {(session.watched_videos ?? []).map((video) => (
+                {sessionVideos.map((video) => (
                   <div key={`${video.position}-${video.recorded_at}`} className="px-5 py-3">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div>
@@ -478,8 +531,8 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                           {video.target_seconds.toFixed(1)}s
                         </div>
                       </div>
-                      <Badge tone={video.completed ? "success" : "warning"}>
-                        {video.completed ? "completed" : "partial"}
+                      <Badge tone={video.runtime ? "info" : video.completed ? "success" : "warning"}>
+                        {video.runtime ? "running" : video.completed ? "completed" : "partial"}
                       </Badge>
                     </div>
                   </div>
@@ -516,17 +569,18 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
             const isExpanded = expandedAd === item.position;
 
             return (
-              <Card key={`ad-card-${item.position}`} className="p-5">
-                <div className="flex flex-wrap items-start justify-between gap-3">
+              <Card key={`ad-card-${item.position}`} className="overflow-hidden p-0">
+                <div className="border-b border-[var(--line)] px-5 py-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-semibold text-[var(--ink)]">
+                    <div className="text-base font-semibold text-[var(--ink)]">
                       {item.ad?.headline_text ||
                         item.primaryCapture?.headline_text ||
                         item.ad?.advertiser_domain ||
                         item.primaryCapture?.advertiser_domain ||
                         "Untitled ad"}
                     </div>
-                    <div className="mt-1 text-xs text-[var(--muted)]">
+                    <div className="mt-1 text-sm text-[var(--muted)]">
                       {item.ad?.display_url ||
                         item.primaryCapture?.display_url ||
                         item.ad?.advertiser_domain ||
@@ -571,36 +625,49 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                     ) : null}
                   </div>
                 </div>
+                </div>
 
-                <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-[var(--muted)]">
-                  <div>Watched: {item.ad?.watched_seconds.toFixed(1) || "—"}s</div>
-                  <div>CTA: {item.ad?.cta_text || "—"}</div>
-                  <div>
-                    Duration:{" "}
-                    {(
-                      item.ad?.ad_duration_seconds ??
-                      item.primaryCapture?.ad_duration_seconds
-                    )?.toFixed(1) || "—"}
-                    s
+                <div className="grid gap-2 px-5 py-4 text-xs text-[var(--muted)] sm:grid-cols-3">
+                  <div className="rounded-lg bg-[var(--panel-soft)] px-3 py-2.5">
+                    <div className="font-medium text-[var(--ink-secondary)]">Watched</div>
+                    <div className="mt-1 text-sm text-[var(--ink)]">
+                      {item.ad?.watched_seconds.toFixed(1) || "—"}s
+                    </div>
+                  </div>
+                  <div className="rounded-lg bg-[var(--panel-soft)] px-3 py-2.5">
+                    <div className="font-medium text-[var(--ink-secondary)]">CTA</div>
+                    <div className="mt-1 text-sm text-[var(--ink)]">{item.ad?.cta_text || "—"}</div>
+                  </div>
+                  <div className="rounded-lg bg-[var(--panel-soft)] px-3 py-2.5">
+                    <div className="font-medium text-[var(--ink-secondary)]">Duration</div>
+                    <div className="mt-1 text-sm text-[var(--ink)]">
+                      {(
+                        item.ad?.ad_duration_seconds ??
+                        item.primaryCapture?.ad_duration_seconds
+                      )?.toFixed(1) || "—"}s
+                    </div>
                   </div>
                 </div>
 
-                <div className="mt-3 flex items-center justify-end">
+                <div className="px-5 pb-4">
+                  <div className="flex items-center justify-end">
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant={isExpanded ? "secondary" : "ghost"}
                     onClick={() => setExpandedAd((prev) => (prev === item.position ? null : item.position))}
-                    className="gap-1.5 px-2.5 py-1.5 text-xs"
+                    className="gap-1.5 px-3 py-2 text-xs"
                   >
                     {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                     {isExpanded ? "Hide details" : "Show details"}
                   </Button>
                 </div>
+                </div>
 
                 {isExpanded ? (
-                  <div className="mt-4 space-y-3 border-t border-[var(--line)] pt-4">
+                  <div className="border-t border-[var(--line)] bg-[var(--bg-soft)]/55 px-5 py-4">
+                    <div className="space-y-3">
                     {item.ad?.full_text ? (
-                      <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
+                      <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
                         <div className="flex items-center gap-2">
                           <span className="text-xs font-semibold text-[var(--ink)]">Ad text</span>
                           <Badge tone="info">visible text</Badge>
@@ -612,7 +679,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                     ) : null}
 
                     {item.primaryCapture?.analysis_status ? (
-                      <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
+                      <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
                         <div className="flex flex-wrap items-center gap-2">
                           <span className="text-xs font-semibold text-[var(--ink)]">Ad analysis</span>
                           <Badge
@@ -646,7 +713,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                     ) : null}
 
                     {item.captures.length > 0 && !mediaHiddenByAnalysis ? (
-                      <div className="space-y-3 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
+                      <div className="space-y-3 rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
                         <div className="text-xs font-semibold text-[var(--ink)]">
                           Media preview
                           {item.captures.length > 1 ? ` (${item.captures.length} segments)` : ""}
@@ -824,6 +891,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                       </div>
                     ) : null}
 
+                    </div>
                   </div>
                 ) : null}
               </Card>

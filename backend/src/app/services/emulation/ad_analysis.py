@@ -14,11 +14,30 @@ logger = logging.getLogger(__name__)
 
 _MAX_VIDEO_SIZE_MB = 20
 
-_ANALYSIS_PROMPT = """\
-Watch this advertisement video (both visual and audio).
+_RELEVANCE_SCOPE = """\
+Classify relevance for a narrow acquisition scope.
 
-Is this ad related to ANY of these topics: cryptocurrency, crypto, forex, trading, finance, investments, fintech, blockchain, DeFi, NFT, stock market, banking, loans, insurance?
+Mark the ad as RELEVANT only if it directly promotes one of these end-user outcomes:
+- forex trading, CFDs, brokers, MT4/MT5, prop firms, funded accounts, copy trading, trading signals
+- crypto trading, crypto exchanges, wallets, staking, yield, DeFi earning products, "earn with crypto"
+- investing or trading products aimed at retail users to grow money, generate returns, receive yield, or make profit
+- money-making offers tied to investing, trading, passive income, side income, or financial speculation
 
+Mark the ad as NOT RELEVANT if it is mainly about any of these:
+- generic fintech or B2B software
+- AI tools, competitor tracking, market intelligence, analytics, CRM, productivity, project management
+- payment infrastructure, banking APIs, card issuing, treasury tools, accounting, invoicing, ERP, tax software
+- business services for finance companies rather than ads asking the viewer to trade, invest, or earn
+- general finance content that does not clearly sell a trading, investing, yield, or money-making product
+- ordinary banking, loans, insurance, or payments unless the ad explicitly pitches returns, trading, or profit
+
+Important:
+- Do NOT mark an ad as relevant just because it mentions finance companies, market analysis, competitor monitoring, pricing changes, or financial terminology.
+- Be conservative. If the connection to trading, investing, yield, or making money is weak or indirect, return "not_relevant".
+- Relevance must come from what the viewer is being asked to do, not just the industry the advertiser serves.
+"""
+
+_ANALYSIS_RESPONSE_FORMAT = """\
 Respond with ONLY a JSON object.
 
 If the ad IS relevant, include these fields:
@@ -26,47 +45,47 @@ If the ad IS relevant, include these fields:
 - "reason": short explanation (1 sentence)
 - "advertiser": brand or company name
 - "product": what is being advertised
-- "category": one of "crypto", "forex", "trading", "banking", "insurance", "investments", "fintech", "other_finance"
+- "category": one of "crypto", "forex", "trading", "broker", "prop_firm", "investing", "yield", "make_money", "other_relevant"
 - "cta": call to action if present (e.g. "Sign up now", "Download the app")
 - "language": detected language of the ad
 
 If the ad is NOT relevant, include only:
 - "result": "not_relevant"
 - "reason": short explanation (1 sentence)
+"""
+
+_ANALYSIS_PROMPT = f"""\
+Watch this advertisement video (both visual and audio).
+
+{_RELEVANCE_SCOPE}
+
+{_ANALYSIS_RESPONSE_FORMAT}
 
 If the video is corrupted, silent with no visuals, or completely unrecognizable:
 - "result": "unclear"
 - "reason": short explanation
 
 Examples:
-{"result": "relevant", "reason": "Binance crypto exchange promoting zero-fee trading", "advertiser": "Binance", "product": "Crypto trading platform", "category": "crypto", "cta": "Trade now with zero fees", "language": "English"}
-{"result": "not_relevant", "reason": "Nike ad for running shoes"}
-{"result": "unclear", "reason": "Video is black screen with no audio"}
+{{"result": "relevant", "reason": "Binance promotes crypto trading for users who want to buy and trade digital assets", "advertiser": "Binance", "product": "Crypto exchange", "category": "crypto", "cta": "Trade now", "language": "English"}}
+{{"result": "relevant", "reason": "Broker ad invites viewers to start forex trading on MT5", "advertiser": "Exness", "product": "Forex trading platform", "category": "forex", "cta": "Open account", "language": "English"}}
+{{"result": "not_relevant", "reason": "AI competitor monitoring tool for businesses, not a trading or investing offer"}}
+{{"result": "unclear", "reason": "Video is black screen with no audio"}}
 """
 
-_TEXT_ANALYSIS_PROMPT = """\
+_TEXT_ANALYSIS_PROMPT = f"""\
 Analyze this advertisement metadata and visible text.
 
-Is this ad related to ANY of these topics: cryptocurrency, crypto, forex, trading, finance, investments, fintech, blockchain, DeFi, NFT, stock market, banking, loans, insurance?
+{_RELEVANCE_SCOPE}
 
-Respond with ONLY a JSON object.
-
-If the ad IS relevant, include these fields:
-- "result": "relevant"
-- "reason": short explanation (1 sentence)
-- "advertiser": brand or company name
-- "product": what is being advertised
-- "category": one of "crypto", "forex", "trading", "banking", "insurance", "investments", "fintech", "other_finance"
-- "cta": call to action if present (e.g. "Sign up now", "Download the app")
-- "language": detected language of the ad
-
-If the ad is NOT relevant, include only:
-- "result": "not_relevant"
-- "reason": short explanation (1 sentence)
+{_ANALYSIS_RESPONSE_FORMAT}
 
 If the metadata is insufficient or ambiguous:
 - "result": "unclear"
 - "reason": short explanation
+
+Examples:
+{{"result": "relevant", "reason": "The ad promotes a crypto app where users can stake tokens and earn yield", "advertiser": "Bybit", "product": "Crypto earning app", "category": "yield", "cta": "Start earning", "language": "English"}}
+{{"result": "not_relevant", "reason": "The ad is for business intelligence software serving fintech companies, not for trading or earning money"}}
 """
 
 

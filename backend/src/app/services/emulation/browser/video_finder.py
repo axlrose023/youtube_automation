@@ -12,9 +12,16 @@ _FINANCE_TOPIC_HINTS = (
     "crypto",
     "bitcoin",
     "ethereum",
+    "forex",
     "finance",
     "financial",
     "invest",
+    "income",
+    "passive",
+    "earn",
+    "yield",
+    "staking",
+    "dividend",
     "stock",
     "market",
     "trading",
@@ -71,11 +78,58 @@ _FINANCE_NEGATIVE_TITLE_HINTS = (
     "surges",
     "explodes",
 )
+_FINANCE_ENTERTAINMENT_TITLE_HINTS = (
+    "crimson desert",
+    "black desert",
+    "hero wars",
+    "gameplay",
+    "walkthrough",
+    "boss fight",
+    "mmorpg",
+    "mmo",
+    "rpg",
+    "trailer",
+    "gaming",
+    "let's play",
+)
 _FINANCE_GENERAL_TOKENS = ("finance", "financial", "financial literacy", "personal finance")
 _FINANCIAL_MARKET_TOKENS = ("financial market", "financial markets", "capital market", "capital markets")
 _INVESTMENT_TOKENS = ("investing", "investment", "investments", "portfolio", "diversif")
 _STOCK_TOKENS = ("stock market", "stocks", "equities", "equity market")
 _CRYPTO_TOKENS = ("crypto", "cryptocurrency", "digital asset", "bitcoin", "ethereum")
+_EARNING_TOKENS = ("passive income", "side income", "earn money", "make money", "income", "yield", "staking")
+_INCOME_POSITIVE_TOKENS = (
+    "dividend",
+    "yield",
+    "staking",
+    "stake",
+    "invest",
+    "investment",
+    "portfolio",
+    "reit",
+    "crypto",
+    "forex",
+    "trading",
+    "apy",
+    "apr",
+)
+_INCOME_NEGATIVE_TOKENS = (
+    "side job",
+    "side jobs",
+    "job ideas",
+    "jobs for",
+    "gig",
+    "gigs",
+    "freelance",
+    "freelancer",
+    "work from home",
+    "remote work",
+    "hustle",
+    "hustles",
+    "doordash",
+    "uber",
+    "babysitting",
+)
 
 
 class VideoFinder:
@@ -506,6 +560,7 @@ class VideoFinder:
 
         if self._is_finance_context():
             score += self._score_finance_title_quality(normalized)
+            score += self._score_finance_noise_penalty(normalized, preferred_topic)
 
         if normalized.startswith("i ") or normalized.startswith("i'm ") or normalized.startswith("my "):
             score -= 1.0
@@ -563,6 +618,11 @@ class VideoFinder:
                 score -= 1.2
             elif self._contains_any(normalized_title, _CRYPTO_TOKENS):
                 score -= 1.0
+        elif "passive income" in normalized_topic or "side income" in normalized_topic:
+            if self._contains_any(normalized_title, _INCOME_POSITIVE_TOKENS):
+                score += 2.4
+            if self._contains_any(normalized_title, _INCOME_NEGATIVE_TOKENS):
+                score -= 3.0
 
         return score
 
@@ -582,6 +642,22 @@ class VideoFinder:
             score -= 0.5
         if normalized_title.count("!") >= 2:
             score -= 0.8
+        return score
+
+    def _score_finance_noise_penalty(
+        self,
+        normalized_title: str,
+        preferred_topic: str | None,
+    ) -> float:
+        score = 0.0
+        for hint in _FINANCE_ENTERTAINMENT_TITLE_HINTS:
+            if hint in normalized_title:
+                score -= 4.0
+
+        normalized_topic = " ".join((preferred_topic or "").lower().split())
+        if normalized_topic and self._contains_any(normalized_topic, _EARNING_TOKENS):
+            if self._contains_any(normalized_title, _FINANCE_ENTERTAINMENT_TITLE_HINTS):
+                score -= 3.0
         return score
 
     @staticmethod
