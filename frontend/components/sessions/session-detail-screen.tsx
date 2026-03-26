@@ -65,6 +65,20 @@ function getAnalysisTone(result: string | null) {
   return "neutral";
 }
 
+function resolveAnalysisResult(capture: EmulationAdCapture | null) {
+  const result = readAnalysisField(capture, "result");
+  if (result === "relevant" || result === "not_relevant") {
+    return result;
+  }
+  if (capture?.analysis_status === "completed") {
+    return "relevant";
+  }
+  if (capture?.analysis_status === "not_relevant") {
+    return "not_relevant";
+  }
+  return null;
+}
+
 function getAnalysisLabel(result: string | null, status?: string | null) {
   if (result === "relevant") {
     return "Relevant";
@@ -100,6 +114,32 @@ function getLandingHost(value: string | null | undefined) {
   } catch {
     return value;
   }
+}
+
+function getPostProcessingLabel(
+  status: string | null | undefined,
+  progress?: { done: number; total: number } | null,
+) {
+  if (!status) {
+    return null;
+  }
+
+  if (status === "running") {
+    if (progress && progress.total > 0) {
+      return `Ad analysis in progress (${progress.done}/${progress.total})`;
+    }
+    return "Ad analysis in progress";
+  }
+  if (status === "completed") {
+    if (progress && progress.total > 0) {
+      return `Ad analysis complete (${progress.done}/${progress.total})`;
+    }
+    return "Ad analysis complete";
+  }
+  if (status === "failed") {
+    return "Ad analysis finished with errors";
+  }
+  return null;
 }
 
 function buildMediaUrl(value: string | null | undefined) {
@@ -164,7 +204,12 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
           return;
         }
         setDetail(data);
-        if (data.status === "running" || data.status === "queued") {
+        const shouldPollRuntime =
+          data.status === "running" ||
+          data.status === "queued" ||
+          data.post_processing_status === "running";
+
+        if (shouldPollRuntime) {
           const runtime = await getEmulationStatus(sessionId);
           if (!active) {
             return;
@@ -216,6 +261,10 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
     return {
       ...detail,
       status: liveStatus.status,
+      post_processing_status:
+        liveStatus.post_processing_status ?? detail.post_processing_status,
+      post_processing_progress:
+        liveStatus.post_processing_progress ?? detail.post_processing_progress,
       elapsed_minutes: liveStatus.elapsed_minutes ?? detail.elapsed_minutes,
       bytes_downloaded: liveStatus.bytes_downloaded,
       topics_searched: liveStatus.topics_searched,
@@ -310,6 +359,26 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
 
   const hasAds = adCards.length > 0;
   const visibleAdCards = showAllAds ? adCards : adCards.slice(0, 4);
+  const postProcessingLabel = getPostProcessingLabel(
+    session?.post_processing_status,
+    session?.post_processing_progress,
+  );
+  const adAnalysisSummary = useMemo(() => {
+    return adCards.reduce(
+      (summary, item) => {
+        const result = resolveAnalysisResult(item.primaryCapture);
+        if (result === "relevant") {
+          summary.relevant += 1;
+        } else if (result === "not_relevant") {
+          summary.notRelevant += 1;
+        } else if (item.primaryCapture?.analysis_status === "pending") {
+          summary.pending += 1;
+        }
+        return summary;
+      },
+      { relevant: 0, notRelevant: 0, pending: 0 },
+    );
+  }, [adCards]);
 
   async function handleAction(action: "stop" | "retry" | "resume") {
     if (!session) {
@@ -365,6 +434,9 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
               {formatDate(session.queued_at)}
             </span>
           </div>
+          {postProcessingLabel ? (
+            <div className="mt-2 text-xs text-[var(--muted)]">{postProcessingLabel}</div>
+          ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
           {session.status === "running" ? (
@@ -397,7 +469,11 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
         <Card>
           <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Ads</div>
           <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">{formatNumber(session.watched_ads_count)}</div>
-          <div className="mt-1 text-xs text-[var(--muted)]">{session.captures.video_captures} video captures</div>
+          <div className="mt-1 text-xs text-[var(--muted)]">
+            {adAnalysisSummary.relevant > 0 || adAnalysisSummary.notRelevant > 0
+              ? `${adAnalysisSummary.relevant} relevant · ${adAnalysisSummary.notRelevant} not relevant`
+              : `${session.captures.video_captures} video captures`}
+          </div>
         </Card>
         <Card>
           <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Traffic</div>
@@ -549,14 +625,21 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
 
       {activeTab === "ads" && hasAds ? (
         <div className="space-y-4">
+          <div className="flex flex-wrap gap-2">
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
+              <span className="font-semibold">{adAnalysisSummary.relevant}</span> relevant
+            </div>
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
+              <span className="font-semibold">{adAnalysisSummary.notRelevant}</span> not relevant
+            </div>
+            {adAnalysisSummary.pending > 0 ? (
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                <span className="font-semibold">{adAnalysisSummary.pending}</span> pending
+              </div>
+            ) : null}
+          </div>
           {visibleAdCards.map((item) => {
-            const analysisResult =
-              readAnalysisField(item.primaryCapture, "result") ??
-              (item.primaryCapture?.analysis_status === "completed"
-                ? "relevant"
-                : item.primaryCapture?.analysis_status === "not_relevant"
-                  ? "not_relevant"
-                  : null);
+            const analysisResult = resolveAnalysisResult(item.primaryCapture);
             const analysisReason = readAnalysisField(item.primaryCapture, "reason");
             const analysisCategory = readAnalysisField(item.primaryCapture, "category");
             const analysisLabel = getAnalysisLabel(

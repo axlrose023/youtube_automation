@@ -21,10 +21,11 @@ export function SessionFilters({
   onReset: () => void;
 }) {
   return (
-    <div className="panel grid gap-3 p-4 lg:grid-cols-[1fr_160px_160px_100px_auto]">
+    <div className="panel grid grid-cols-2 gap-3 p-4 md:grid-cols-[1fr_160px_160px_100px_auto]">
       <Input
         label="Search"
         placeholder="session id, topic, status..."
+        className="col-span-2 md:col-span-1"
         value={value.search}
         onChange={(event) => onChange({ ...value, search: event.target.value })}
       />

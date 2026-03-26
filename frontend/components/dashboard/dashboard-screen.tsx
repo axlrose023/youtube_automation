@@ -122,7 +122,7 @@ export function DashboardScreen() {
         />
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[1.4fr_0.8fr]">
+      <div className="grid gap-6 lg:grid-cols-[1.4fr_0.8fr]">
         <RecentSessions items={items.slice(0, 8)} />
         <SessionLauncher />
       </div>

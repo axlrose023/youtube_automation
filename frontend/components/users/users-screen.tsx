@@ -271,8 +271,8 @@ export function UsersScreen() {
       {showForm ? (
         <Card className="p-5">
           <div className="text-sm font-semibold text-[var(--ink)]">Create new user</div>
-          <form className="mt-4 flex flex-wrap items-end gap-3" onSubmit={handleCreate}>
-            <div className="w-48 shrink-0">
+          <form className="mt-4 grid grid-cols-1 items-end gap-3 sm:flex sm:flex-wrap" onSubmit={handleCreate}>
+            <div className="w-full sm:w-48 sm:shrink-0">
               <Input
                 label="Username"
                 placeholder="Enter username"
@@ -281,7 +281,7 @@ export function UsersScreen() {
                 onChange={(e) => setForm((prev) => ({ ...prev, username: e.target.value }))}
               />
             </div>
-            <div className="w-48 shrink-0">
+            <div className="w-full sm:w-48 sm:shrink-0">
               <Input
                 label="Password"
                 type="password"

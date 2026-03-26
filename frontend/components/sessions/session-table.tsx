@@ -4,9 +4,86 @@ import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { formatDate, formatMinutes, formatNumber } from "@/lib/format";
 import { getStatusTone } from "@/lib/metrics";
-import type { EmulationHistoryItem } from "@/types/api";
+import type { EmulationAdCapture, EmulationHistoryItem } from "@/types/api";
 
-export function SessionTable({ items }: { items: EmulationHistoryItem[] }) {
+function resolveAdResult(capture: EmulationAdCapture): string | null {
+  const value = capture.analysis_summary?.["result"];
+  const result = typeof value === "string" && value.trim() ? value : null;
+  if (result === "relevant" || result === "not_relevant") return result;
+  if (capture.analysis_status === "completed") return "relevant";
+  if (capture.analysis_status === "not_relevant") return "not_relevant";
+  return null;
+}
+
+function countAdRelevance(captures?: EmulationAdCapture[] | null) {
+  let relevant = 0;
+  let notRelevant = 0;
+  for (const c of captures ?? []) {
+    const r = resolveAdResult(c);
+    if (r === "relevant") relevant++;
+    else if (r === "not_relevant") notRelevant++;
+  }
+  return { relevant, notRelevant };
+}
+
+function RelevantCell({ item }: { item: EmulationHistoryItem }) {
+  const { relevant, notRelevant } = countAdRelevance(item.ad_captures);
+  const total = relevant + notRelevant;
+  if (total === 0) return <span className="text-[var(--muted)]">—</span>;
+  return (
+    <>
+      <span className={relevant > 0 ? "text-emerald-500" : undefined}>{relevant}</span>
+      <span className="text-[var(--muted)]">/{total}</span>
+    </>
+  );
+}
+
+/* ── Mobile card ── */
+
+function SessionCard({ item }: { item: EmulationHistoryItem }) {
+  return (
+    <Card className="p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <Link
+            to={`/sessions/${item.session_id}`}
+            className="font-medium text-[var(--ink)] transition hover:text-[var(--brand)]"
+          >
+            {item.session_id.slice(0, 12)}
+          </Link>
+          <div className="mt-0.5 truncate text-xs text-[var(--muted)]">
+            {item.requested_topics.slice(0, 2).join(", ")}
+          </div>
+        </div>
+        <Badge tone={getStatusTone(item.status) as never}>{item.status}</Badge>
+      </div>
+
+      <div className="mt-3 grid grid-cols-3 gap-y-2 text-xs">
+        <Stat label="Requested" value={`${item.requested_duration_minutes}m / ${formatMinutes(item.elapsed_minutes)}`} />
+        <Stat label="Videos" value={formatNumber(item.watched_videos_count)} />
+        <Stat label="Ads" value={formatNumber(item.watched_ads_count)} />
+        <Stat label="Relevant">
+          <RelevantCell item={item} />
+        </Stat>
+        <Stat label="Capture" value={`${item.captures.video_captures}/${item.captures.ads_total}`} />
+        <Stat label="Queued" value={formatDate(item.queued_at)} />
+      </div>
+    </Card>
+  );
+}
+
+function Stat({ label, value, children }: { label: string; value?: string; children?: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-[var(--muted)]">{label}</div>
+      <div className="mt-0.5 text-sm text-[var(--ink)]">{children ?? value}</div>
+    </div>
+  );
+}
+
+/* ── Desktop table ── */
+
+function DesktopTable({ items }: { items: EmulationHistoryItem[] }) {
   return (
     <Card className="overflow-hidden p-0">
       <div className="overflow-x-auto">
@@ -18,6 +95,7 @@ export function SessionTable({ items }: { items: EmulationHistoryItem[] }) {
               <th className="px-5 py-3 font-medium">Requested</th>
               <th className="px-5 py-3 font-medium">Videos</th>
               <th className="px-5 py-3 font-medium">Ads</th>
+              <th className="px-5 py-3 font-medium">Relevant</th>
               <th className="px-5 py-3 font-medium">Capture</th>
               <th className="px-5 py-3 font-medium">Queued</th>
             </tr>
@@ -41,6 +119,9 @@ export function SessionTable({ items }: { items: EmulationHistoryItem[] }) {
                 </td>
                 <td className="px-5 py-3 text-[var(--muted)]">{formatNumber(item.watched_videos_count)}</td>
                 <td className="px-5 py-3 text-[var(--muted)]">{formatNumber(item.watched_ads_count)}</td>
+                <td className="px-5 py-3">
+                  <RelevantCell item={item} />
+                </td>
                 <td className="px-5 py-3 text-[var(--muted)]">
                   {item.captures.video_captures}/{item.captures.ads_total}
                 </td>
@@ -51,5 +132,25 @@ export function SessionTable({ items }: { items: EmulationHistoryItem[] }) {
         </table>
       </div>
     </Card>
+  );
+}
+
+/* ── Export ── */
+
+export function SessionTable({ items }: { items: EmulationHistoryItem[] }) {
+  return (
+    <>
+      {/* Mobile: card stack */}
+      <div className="flex flex-col gap-3 md:hidden">
+        {items.map((item) => (
+          <SessionCard key={item.session_id} item={item} />
+        ))}
+      </div>
+
+      {/* Desktop: table */}
+      <div className="hidden md:block">
+        <DesktopTable items={items} />
+      </div>
+    </>
   );
 }

@@ -34,10 +34,19 @@ export interface StartEmulationResponse {
   status: string;
 }
 
+export interface EmulationSessionActionRequest {
+  session_id: string;
+}
+
 export interface CaptureSummary {
   ads_total: number;
   video_captures: number;
   screenshot_fallbacks: number;
+}
+
+export interface PostProcessingProgress {
+  done: number;
+  total: number;
 }
 
 export interface EmulationAdCapture {
@@ -121,6 +130,8 @@ export interface EmulationAnalyticsAd {
 export interface EmulationHistoryItem {
   session_id: string;
   status: string;
+  post_processing_status?: string | null;
+  post_processing_progress?: PostProcessingProgress | null;
   requested_duration_minutes: number;
   requested_topics: string[];
   queued_at: string;
@@ -148,6 +159,8 @@ export interface EmulationHistoryDetail extends EmulationHistoryItem {}
 export interface EmulationSessionStatus {
   session_id: string;
   status: string;
+  post_processing_status?: string | null;
+  post_processing_progress?: PostProcessingProgress | null;
   profile_id?: string | null;
   elapsed_minutes?: number | null;
   orchestration_enabled: boolean;

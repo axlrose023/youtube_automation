@@ -31,14 +31,14 @@ export function LoginPage() {
   }
 
   return (
-    <main className="relative flex min-h-screen items-center justify-center px-6 py-10">
+    <main className="relative flex min-h-screen items-center justify-center px-4 py-8 sm:px-6 sm:py-10">
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="absolute -left-1/4 -top-1/4 h-[600px] w-[600px] rounded-full bg-[var(--brand)] opacity-[0.06] blur-[120px]" />
         <div className="absolute -bottom-1/4 -right-1/4 h-[600px] w-[600px] rounded-full bg-[var(--accent)] opacity-[0.04] blur-[120px]" />
       </div>
 
       <div className="relative grid w-full max-w-5xl gap-8 lg:grid-cols-[1fr_400px]">
-        <div className="flex flex-col justify-between rounded-xl border border-[var(--line)] bg-[var(--panel)] p-10 backdrop-blur-xl">
+        <div className="hidden flex-col justify-between rounded-xl border border-[var(--line)] bg-[var(--panel)] p-10 backdrop-blur-xl lg:flex">
           <div>
             <div className="flex items-center gap-2.5">
               <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--brand)] text-white shadow-[0_4px_14px_rgba(108,92,231,0.25)]">
@@ -69,7 +69,13 @@ export function LoginPage() {
           </div>
         </div>
 
-        <Card className="p-8" glow>
+        <Card className="p-6 sm:p-8" glow>
+          <div className="mb-6 flex items-center gap-2.5 lg:hidden">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--brand)] text-white">
+              <Tv2 size={16} />
+            </div>
+            <span className="text-sm font-semibold text-[var(--ink)]">YouTube Ops</span>
+          </div>
           <div className="mb-8">
             <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Sign in</div>
             <h2 className="mt-2 text-2xl font-semibold text-[var(--ink)]">Welcome back</h2>

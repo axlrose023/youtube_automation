@@ -17,7 +17,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <main
         id="app-main-scroll"
         ref={mainRef}
-        className="mx-auto h-[calc(100vh-64px)] max-w-[1400px] overflow-y-auto px-6 py-6 scrollbar-thin"
+        className="mx-auto h-[calc(100vh-56px)] max-w-[1400px] overflow-y-auto px-4 py-4 scrollbar-thin md:h-[calc(100vh-64px)] md:px-6 md:py-6"
       >
         {children}
       </main>
