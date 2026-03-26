@@ -22,6 +22,10 @@ class StartEmulationResponse(BaseModel):
     status: str
 
 
+class EmulationSessionActionRequest(BaseModel):
+    session_id: UUID
+
+
 class EmulationWatchedVideo(BaseModel):
     position: int
     action: str
@@ -130,9 +134,16 @@ class EmulationCurrentWatch(BaseModel):
     keywords: list[str] = Field(default_factory=list)
 
 
+class EmulationPostProcessingProgress(BaseModel):
+    done: int = 0
+    total: int = 0
+
+
 class EmulationSessionStatus(BaseModel):
     session_id: UUID
     status: str
+    post_processing_status: str | None = None
+    post_processing_progress: EmulationPostProcessingProgress | None = None
     profile_id: str | None = None
     elapsed_minutes: float | None = None
     orchestration_enabled: bool = False
@@ -182,6 +193,8 @@ class EmulationCaptureSummary(BaseModel):
 class EmulationHistoryItem(BaseModel):
     session_id: UUID
     status: str
+    post_processing_status: str | None = None
+    post_processing_progress: EmulationPostProcessingProgress | None = None
     requested_duration_minutes: int
     requested_topics: list[str] = Field(default_factory=list)
     queued_at: datetime.datetime

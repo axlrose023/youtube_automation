@@ -69,9 +69,15 @@ class SessionLoop:
             if self._clock.deadline_reached() or remaining <= 1.0:
                 break
 
+            await self._sync_progress_once()
+            if self._stop_requested:
+                break
+
             if self._clock.time_for_break():
                 logger.info("Session %s: taking break after cycle %d", session_id, cycle_number)
-                await self._fatigue.take_break()
+                await self._fatigue.take_break(stop_check=self._check_stop_requested)
+                if self._stop_requested:
+                    break
                 self._fatigue.maybe_switch_mode()
 
     async def _run_cycle(self) -> None:
@@ -169,3 +175,9 @@ class SessionLoop:
                 self._state.session_id,
                 exc,
             )
+
+    async def _check_stop_requested(self) -> bool:
+        if self._stop_requested or self._state.stop_requested:
+            return True
+        await self._sync_progress_once()
+        return self._stop_requested or self._state.stop_requested

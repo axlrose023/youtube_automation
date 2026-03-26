@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from playwright.async_api import ElementHandle, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
+from ..core.config import TOPIC_BALANCE_ROTATE_SEARCH_PROBABILITY
 from ..core.selectors import (
     SEARCH_BUTTON,
     SEARCH_BUTTON_SELECTORS,
@@ -96,20 +97,41 @@ class Searcher:
         self._nav = navigator
 
     async def search(self) -> None:
-        unsearched = self._state.unsearched_topics()
-        style = self._state.personality.search_style
-        if unsearched:
-            if random.random() > style:
-                topic = unsearched[0]
-            else:
-                topic = random.choice(unsearched)
-        elif self._state.topics:
-            if random.random() > style and self._state.current_topic in self._state.topics:
-                topic = self._state.current_topic
-            else:
-                topic = random.choice(self._state.topics)
+        forced_topic = (self._state.forced_search_topic or "").strip()
+        if forced_topic and forced_topic in self._state.topics:
+            topic = forced_topic
+            self._state.forced_search_topic = None
         else:
-            topic = "youtube"
+            unsearched = self._state.unsearched_topics()
+            style = self._state.personality.search_style
+            if unsearched:
+                if random.random() > style:
+                    topic = unsearched[0]
+                else:
+                    topic = random.choice(unsearched)
+            elif self._state.topics:
+                rebalance_topic = None
+                if self._state.topic_balance_enabled():
+                    rebalance_topic = self._state.least_covered_topic()
+
+                if (
+                    rebalance_topic
+                    and rebalance_topic != self._state.current_topic
+                    and random.random() < TOPIC_BALANCE_ROTATE_SEARCH_PROBABILITY
+                ):
+                    topic = rebalance_topic
+                    logger.info(
+                        "Session %s: topic balance rotate search -> '%s' (coverage=%s)",
+                        self._state.session_id,
+                        topic,
+                        self._state.topic_watch_seconds_map(),
+                    )
+                elif random.random() > style and self._state.current_topic in self._state.topics:
+                    topic = self._state.current_topic
+                else:
+                    topic = random.choice(self._state.topics)
+            else:
+                topic = "youtube"
 
         query = self._build_search_query(topic)
         if query == topic:

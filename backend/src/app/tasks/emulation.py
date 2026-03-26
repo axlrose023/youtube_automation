@@ -287,6 +287,7 @@ async def emulation_task(
             session_id, status="running", started_at=started_at_ts,
             finished_at=None, error=None,
             orchestration=orchestration, profile_id=resolved_profile_id,
+            post_processing_status=None, post_processing_done=0, post_processing_total=0,
         )
         live_payload = await session_store.get(session_id) or {}
         await _persist_safely(
@@ -404,9 +405,37 @@ async def emulation_task(
         # ── Analyze ad creatives ───────────────────────────────
         if ad_analysis is not None:
             try:
-                await ad_analysis.analyze_session_captures(session_id)
+                analysis_total = await ad_analysis.get_session_analysis_workload(session_id)
+                if analysis_total > 0:
+                    await session_store.update(
+                        session_id,
+                        post_processing_status="running",
+                        post_processing_done=0,
+                        post_processing_total=analysis_total,
+                    )
+                final_status, done, total = await ad_analysis.analyze_session_captures(session_id)
+                if total > 0:
+                    await session_store.update(
+                        session_id,
+                        post_processing_status=final_status or "completed",
+                        post_processing_done=done,
+                        post_processing_total=total,
+                    )
+                else:
+                    await session_store.update(
+                        session_id,
+                        post_processing_status=None,
+                        post_processing_done=0,
+                        post_processing_total=0,
+                    )
             except Exception:
                 logger.exception("Session %s: ad analysis failed", session_id)
+                await session_store.update(
+                    session_id,
+                    post_processing_status="failed",
+                    post_processing_done=0,
+                    post_processing_total=0,
+                )
         else:
             logger.warning("Session %s: ad analysis service unavailable", session_id)
 

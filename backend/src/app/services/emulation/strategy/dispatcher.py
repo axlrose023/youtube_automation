@@ -9,14 +9,15 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 from ..browser.navigator import Navigator
 from ..browser.watcher import VideoWatcher
 from ..core.actions import SEARCH_ACTIONS, WATCH_ACTIONS, Action
-from ..core.config import MAX_CONSECUTIVE_FAILURES
+from ..core.config import AD_COMPLETION_OVERFLOW_MAX_S, MAX_CONSECUTIVE_FAILURES
 from ..core.session.state import SessionState
 from .clock import SessionClock
 
 logger = logging.getLogger(__name__)
-_ACTION_CANCEL_GRACE_SECONDS = 2.0
+_ACTION_CANCEL_GRACE_SECONDS = 10.0
 _ACTION_PROGRESS_POLL_SECONDS = 3.0
 _POST_DEADLINE_WATCH_STALL_GRACE_SECONDS = 30.0
+_WATCH_ACTION_TIMEOUT_BUFFER_SECONDS = AD_COMPLETION_OVERFLOW_MAX_S + 20.0
 
 
 class SessionRuntimeClosedError(RuntimeError):
@@ -154,7 +155,9 @@ class ActionDispatcher:
         if remaining <= 0:
             return 0.0
         if action in WATCH_ACTIONS:
-            return max(remaining + 5.0, 15.0)
+            # Watch actions may legitimately run slightly past the nominal
+            # remaining time while an ad pod is still being captured/flushed.
+            return max(remaining + _WATCH_ACTION_TIMEOUT_BUFFER_SECONDS, 30.0)
         return min(max(remaining, 5.0), 45.0)
 
     def _update_anchor_streak(self, action: Action, videos_delta: int) -> None:

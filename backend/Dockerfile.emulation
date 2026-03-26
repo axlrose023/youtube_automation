@@ -8,6 +8,7 @@ RUN set -eux; \
       ca-certificates \
       build-essential \
       libpq-dev \
+      ffmpeg \
       x11vnc \
       xvfb \
       fluxbox \

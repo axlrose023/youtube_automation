@@ -209,6 +209,16 @@ class VideoWatcher:
             return False
         if self._state.remaining_seconds() < CONTINUE_CURRENT_VIDEO_MIN_REMAINING_S:
             return False
+        if self._state.should_force_pre_coverage_rotation():
+            logger.info(
+                "Session %s: %s — skipping continue_current to rotate topics (current=%s spent=%.0fs pending=%d)",
+                self._state.session_id,
+                profile.action,
+                self._state.current_topic or "<none>",
+                self._state.current_topic_watch_seconds(),
+                len(self._state.unsearched_topics()),
+            )
+            return False
         if random.random() >= CONTINUE_CURRENT_VIDEO_PROBABILITY:
             return False
 
@@ -325,6 +335,7 @@ class VideoWatcher:
             mark_completed=profile.mark_completed,
             after_coverage=self._state.all_topics_covered(),
         )
+        watch_s = self._duration.cap_after_topic_balance(watch_s, profile.action)
         watch_s = self._duration.cap_to_remaining(watch_s)
         self._state.update_current_watch(target_seconds=first_eval + watch_s)
         if watch_s <= 0:
@@ -374,6 +385,7 @@ class VideoWatcher:
             mark_completed=profile.mark_completed,
             after_coverage=self._state.all_topics_covered(),
         )
+        watch_s = self._duration.cap_after_topic_balance(watch_s, profile.action)
         return self._duration.cap_to_remaining(watch_s)
 
     def _record_and_finalize(

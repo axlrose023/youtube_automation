@@ -13,7 +13,7 @@ from ..ad_analytics import build_ads_analytics
 _TTL = 86400
 _TERMINAL_STATUSES = {"completed", "failed", "stopped"}
 _STALE_TERMINAL_LOCK_GRACE_SECONDS = 20.0
-_STALE_ACTIVE_LOCK_GRACE_SECONDS = 90.0
+_STALE_ACTIVE_LOCK_GRACE_SECONDS = 30.0
 logger = logging.getLogger(__name__)
 
 
@@ -79,6 +79,9 @@ class EmulationSessionStore:
             "watched_ads_analytics": [],
             "total_duration_seconds": 0,
             "bytes_downloaded": 0,
+            "post_processing_status": None,
+            "post_processing_done": 0,
+            "post_processing_total": 0,
             "mode": None,
             "fatigue": None,
             "personality": None,

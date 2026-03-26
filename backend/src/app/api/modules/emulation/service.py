@@ -38,6 +38,7 @@ from .session_runtime import (
 )
 from .utils import (
     build_capture_summary,
+    build_post_processing_state,
     calculate_history_elapsed_minutes,
     map_ad_capture,
     normalize_watched_ads_payload,
@@ -601,10 +602,16 @@ class EmulationHistoryService:
         )
         watched_videos_count = normalized_videos_count(payload)
         watched_ads_count = normalized_ads_count(payload)
+        post_processing_status, post_processing_progress = build_post_processing_state(
+            session_status=payload.status,
+            ad_captures=ad_captures,
+        )
 
         return EmulationHistoryItem(
             session_id=payload.session_id,
             status=payload.status,
+            post_processing_status=post_processing_status,
+            post_processing_progress=post_processing_progress,
             requested_duration_minutes=payload.requested_duration_minutes,
             requested_topics=payload.requested_topics or [],
             queued_at=payload.queued_at,

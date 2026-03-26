@@ -104,9 +104,22 @@ def build_status_response(
         status = "stopping"
 
     watched_ads = _normalize_live_watched_ads(data.get("watched_ads"))
+    post_processing_status = data.get("post_processing_status")
+    progress = None
+    done = data.get("post_processing_done")
+    total = data.get("post_processing_total")
+    if isinstance(total, int | float) and int(total) > 0:
+        progress = {
+            "done": int(done or 0),
+            "total": int(total),
+        }
     return EmulationSessionStatus(
         session_id=session_id,
         status=status,
+        post_processing_status=(
+            str(post_processing_status) if isinstance(post_processing_status, str) else None
+        ),
+        post_processing_progress=progress,
         profile_id=normalize_profile_id(data.get("profile_id")),
         elapsed_minutes=calculate_session_elapsed_minutes(data),
         orchestration_enabled=bool(orchestration.get("enabled")),

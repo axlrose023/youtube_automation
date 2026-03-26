@@ -5,7 +5,6 @@ import time
 from datetime import UTC, datetime
 
 from taskiq.kicker import AsyncKicker
-from taskiq.schedule_sources import LabelScheduleSource
 
 from app.services.emulation.core.ad_analytics import build_ads_analytics
 from app.services.emulation.core.orchestration import (
@@ -205,7 +204,7 @@ class EmulationOrchestrationService:
         profile_id: str | None,
         resume_at_ts: float,
     ) -> None:
-        from app.tiq import EMULATION_QUEUE_NAME, broker
+        from app.tiq import EMULATION_QUEUE_NAME, broker, dynamic_schedule_source
 
         resume_at = datetime.fromtimestamp(resume_at_ts, tz=UTC)
         await AsyncKicker(
@@ -213,7 +212,7 @@ class EmulationOrchestrationService:
             task_name="emulation_task",
             labels={"queue_name": EMULATION_QUEUE_NAME},
         ).schedule_by_time(
-            source=LabelScheduleSource(broker),
+            source=dynamic_schedule_source,
             time=resume_at,
             session_id=session_id,
             duration_minutes=duration_minutes,

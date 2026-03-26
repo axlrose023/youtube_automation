@@ -15,10 +15,13 @@ from ..core.config import (
     FULL_WATCH_CHANCE_SHORT_B,
     REALISM_MIN_WATCH_AFTER_COVERAGE_S,
     REALISM_MIN_WATCH_S,
+    REALISM_MIN_WATCH_TRIGGER_REMAINING_S,
     REALISM_MULTI_TOPIC_BUDGET_FRACTION,
     REALISM_MULTI_TOPIC_MAX_WATCH_S,
     REALISM_MULTI_TOPIC_MIN_WATCH_S,
-    REALISM_MIN_WATCH_TRIGGER_REMAINING_S,
+    TOPIC_BALANCE_FORCE_SEARCH_EXCESS_S,
+    TOPIC_BALANCE_FORCE_SEARCH_MIN_REMAINING_S,
+    TOPIC_BALANCE_POST_COVERAGE_CAP_S,
 )
 from ..core.session.state import SessionState
 from .playback import PlaybackController
@@ -158,6 +161,33 @@ class WatchDurationCalculator:
 
     def cap_to_remaining(self, seconds: float) -> float:
         return min(seconds, self._state.remaining_seconds())
+
+    def cap_after_topic_balance(self, seconds: float, action: str) -> float:
+        if not self._state.topic_balance_enabled():
+            return seconds
+        if not self._state.all_topics_covered():
+            return seconds
+        if self._state.remaining_seconds() < TOPIC_BALANCE_FORCE_SEARCH_MIN_REMAINING_S:
+            return seconds
+
+        excess = self._state.current_topic_excess_seconds()
+        if excess < TOPIC_BALANCE_FORCE_SEARCH_EXCESS_S:
+            return seconds
+
+        cap = random.uniform(*TOPIC_BALANCE_POST_COVERAGE_CAP_S)
+        limited = min(seconds, cap)
+        if limited < seconds:
+            logger.info(
+                "Session %s: %s topic-balance cap %.0fs -> %.0fs (current=%s excess=%.0fs coverage=%s)",
+                self._state.session_id,
+                action,
+                seconds,
+                limited,
+                self._state.current_topic or "<none>",
+                excess,
+                self._state.topic_watch_seconds_map(),
+            )
+        return limited
 
     def _should_watch_full(self, video_dur: float, *, mode_a: bool) -> bool:
         if video_dur > 1200 and self._state.fatigue > 0.5:

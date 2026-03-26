@@ -13,6 +13,13 @@ _TOPIC_ALIASES: dict[str, tuple[str, ...]] = {
     "stock market": ("stock market", "stocks", "equities", "equity market"),
     "crypto": ("crypto", "cryptocurrency", "digital assets"),
     "crypto investments": ("crypto investing", "crypto investment", "invest in crypto", "crypto portfolio"),
+    "крипто инвестиции": (
+        "инвестиции в криптовалюту",
+        "криптовалюта инвестиции",
+        "инвестирование в криптовалюту",
+        "crypto investing",
+        "invest in crypto",
+    ),
     "passive income": (
         "passive income",
         "investment income",
@@ -44,6 +51,22 @@ _TOPIC_ALIASES: dict[str, tuple[str, ...]] = {
         "crypto staking",
     ),
     "forex trading": ("forex trading", "fx trading", "cfd trading", "mt4", "mt5", "forex broker"),
+    "форекс заработок": (
+        "как заработать на форекс",
+        "заработок на форекс",
+        "трейдинг на форекс",
+        "forex trading",
+        "forex income",
+        "forex broker",
+    ),
+    "форекс инвестиции": (
+        "инвестиции на форекс",
+        "инвестиции в памм",
+        "памм счета",
+        "доверительное управление на forex",
+        "forex investing",
+        "forex investment",
+    ),
     "bitcoin": ("bitcoin", "btc"),
     "ethereum": ("ethereum", "eth"),
 }
@@ -90,6 +113,14 @@ _FOREX_TOKENS = {
     "broker",
 }
 
+_SEMANTIC_FAMILY_PATTERNS: dict[str, tuple[str, ...]] = {
+    "crypto": ("crypto", "crypt", "крипт", "bitcoin", "btc", "битко", "ethereum", "eth", "эфир", "defi", "blockchain", "блокч"),
+    "invest": ("invest", "investment", "portfolio", "инвест", "портфел"),
+    "earn": ("earn", "income", "profit", "yield", "reward", "staking", "stake", "apy", "apr", "дивид", "доход", "заработ", "прибыл", "пассив"),
+    "forex": ("forex", "форекс", "fx", "cfd", "mt4", "mt5", "broker", "брокер", "памм"),
+    "trade": ("trade", "trading", "трейд", "торгов"),
+}
+
 
 def normalize_text(value: str) -> str:
     return " ".join(value.lower().split())
@@ -101,6 +132,16 @@ def _extract_tokens(value: str) -> set[str]:
         for token in re.findall(r"[\wа-яА-ЯёЁ]+", value.lower())
         if len(token) >= 3
     }
+
+
+def _semantic_families(value: str) -> set[str]:
+    tokens = _extract_tokens(normalize_text(value))
+    families: set[str] = set()
+    for token in tokens:
+        for family, patterns in _SEMANTIC_FAMILY_PATTERNS.items():
+            if any(token.startswith(pattern) for pattern in patterns):
+                families.add(family)
+    return families
 
 
 def _topic_variants(topic: str) -> tuple[str, ...]:
@@ -169,6 +210,17 @@ def is_title_on_specific_topic(title: str | None, topic: str | None) -> bool:
     variants = _topic_variants(normalized_topic)
     if any(variant and variant in normalized_title for variant in variants):
         return True
+
+    topic_families = _semantic_families(normalized_topic)
+    title_families = _semantic_families(normalized_title)
+
+    if topic_families:
+        if topic_families.issubset(title_families):
+            return True
+        if {"forex", "earn"}.issubset(topic_families) and "forex" in title_families and ("earn" in title_families or "trade" in title_families):
+            return True
+        if {"forex", "invest"}.issubset(topic_families) and "forex" in title_families and ("invest" in title_families or "trade" in title_families):
+            return True
 
     title_tokens = _extract_tokens(normalized_title)
     for variant in variants:

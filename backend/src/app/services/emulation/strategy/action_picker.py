@@ -12,6 +12,8 @@ from ..core.config import (
     SEARCH_MIN_ACTIONS_BETWEEN_OPTIONAL_SEARCHES,
     SEARCH_PRESSURE_STYLE_WEIGHT,
     SEARCH_PRESSURE_THRESHOLDS,
+    TOPIC_BALANCE_FORCE_SEARCH_EXCESS_S,
+    TOPIC_BALANCE_FORCE_SEARCH_MIN_REMAINING_S,
     TASK_FATIGUE_HIGH,
     TASK_FATIGUE_MEDIUM,
     VIDEO_PACE_GRACE_COMPLETED,
@@ -36,6 +38,15 @@ class ActionPicker:
 
     def pick(self) -> Action:
         unsearched = self._state.unsearched_topics()
+
+        if self._state.resume_needs_reanchor and self._state.current_topic:
+            logger.info(
+                "Session %s: resume bootstrap -> re-anchor search for %s",
+                self._state.session_id,
+                self._state.current_topic,
+            )
+            self._state.resume_needs_reanchor = False
+            return self._finalize(Action.SEARCH)
 
         if self._state.no_video_streak >= 2:
             self._state.no_video_streak = 0
@@ -65,6 +76,26 @@ class ActionPicker:
                 self._state.session_id,
                 self._state.offtopic_or_reco_streak,
                 self._offtopic_reanchor_limit,
+            )
+            return self._finalize(Action.SEARCH)
+
+        if self._state.should_force_pre_coverage_rotation():
+            logger.info(
+                "Session %s: pre-coverage rotation -> search (current=%s, spent=%.0fs, pending_topics=%d)",
+                self._state.session_id,
+                self._state.current_topic or "<none>",
+                self._state.current_topic_watch_seconds(),
+                len(unsearched),
+            )
+            return self._finalize(Action.SEARCH)
+
+        if self._should_force_topic_rebalance(unsearched):
+            logger.info(
+                "Session %s: topic balance rebalance -> search (current=%s, next=%s, excess=%.0fs)",
+                self._state.session_id,
+                self._state.current_topic or "<none>",
+                self._state.least_covered_topic() or "<none>",
+                self._state.current_topic_excess_seconds(),
             )
             return self._finalize(Action.SEARCH)
 
@@ -161,6 +192,13 @@ class ActionPicker:
             Action.GO_BACK: 2,
         }
 
+        if unsearched and self._state.should_block_recommended_before_coverage():
+            weights[Action.CLICK_RECOMMENDED] = 0
+            weights[Action.WATCH_FOCUSED] = max(weights[Action.WATCH_FOCUSED] - 20, 10)
+            weights[Action.SEARCH] += 18
+            weights[Action.SCROLL_RESULTS] += 10
+            weights[Action.IDLE] += 6
+
         if self._state.fatigue > TASK_FATIGUE_MEDIUM:
             weights[Action.WATCH_FOCUSED] += 6
             weights[Action.IDLE] += 3
@@ -221,6 +259,15 @@ class ActionPicker:
         if not self._state.searched_topics:
             return True
         return self._actions_since_search >= SEARCH_MIN_ACTIONS_BETWEEN_OPTIONAL_SEARCHES
+
+    def _should_force_topic_rebalance(self, unsearched: list[str]) -> bool:
+        if unsearched or not self._state.topic_balance_enabled():
+            return False
+        if self._actions_since_search < 1:
+            return False
+        if self._state.remaining_seconds() < TOPIC_BALANCE_FORCE_SEARCH_MIN_REMAINING_S:
+            return False
+        return self._state.current_topic_excess_seconds() >= TOPIC_BALANCE_FORCE_SEARCH_EXCESS_S
 
     def _pace_guard_reason(self, unsearched: list[str]) -> str | None:
         if not unsearched and self._is_completed_video_pace_high():

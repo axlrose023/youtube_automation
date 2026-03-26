@@ -16,6 +16,7 @@ from .schema import (
     EmulationHistoryDetailResponse,
     EmulationHistoryParams,
     EmulationHistoryResponse,
+    EmulationSessionActionRequest,
     EmulationSessionStatus,
     StartEmulationRequest,
     StartEmulationResponse,
@@ -79,28 +80,28 @@ async def get_emulation_status(
     return await session_service.get_status(session_id)
 
 
-@router.post("/{session_id}/stop", response_model=StopEmulationResponse)
+@router.post("/stop", response_model=StopEmulationResponse)
 async def stop_emulation(
-    session_id: str,
+    request: EmulationSessionActionRequest,
     session_service: FromDishka[EmulationSessionService],
 ) -> StopEmulationResponse:
-    return await session_service.stop_session(session_id)
+    return await session_service.stop_session(str(request.session_id))
 
 
-@router.post("/{session_id}/retry", response_model=StartEmulationResponse)
+@router.post("/retry", response_model=StartEmulationResponse)
 async def retry_emulation(
-    session_id: str,
+    request: EmulationSessionActionRequest,
     session_service: FromDishka[EmulationSessionService],
 ) -> StartEmulationResponse:
-    return await session_service.retry_session(session_id)
+    return await session_service.retry_session(str(request.session_id))
 
 
-@router.post("/{session_id}/resume", response_model=StartEmulationResponse)
+@router.post("/resume", response_model=StartEmulationResponse)
 async def resume_emulation(
-    session_id: str,
+    request: EmulationSessionActionRequest,
     session_service: FromDishka[EmulationSessionService],
 ) -> StartEmulationResponse:
-    return await session_service.resume_session(session_id)
+    return await session_service.resume_session(str(request.session_id))
 
 
 @router.delete("/history/{session_id}", status_code=204)

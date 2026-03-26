@@ -3,7 +3,14 @@ import time
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from ..config import LOCK_TASK_MODE
+from ..config import (
+    LOCK_TASK_MODE,
+    TOPIC_BALANCE_MIN_DURATION_MINUTES,
+    TOPIC_ROTATION_BLOCK_RECOMMENDED_S,
+    TOPIC_ROTATION_FORCE_SEARCH_MIN_REMAINING_S,
+    TOPIC_ROTATION_MAX_CURRENT_TOPIC_S,
+    TOPIC_ROTATION_MAX_CURRENT_TOPIC_S_HEAVY,
+)
 from .topic_matcher import (
     build_topic_tokens,
     is_title_on_specific_topic,
@@ -60,6 +67,8 @@ class SessionState:
     topic_drifted: bool = False
     last_watch_on_topic: bool | None = None
     current_topic: str | None = None
+    resume_needs_reanchor: bool = False
+    forced_search_topic: str | None = None
 
     consecutive_fails: int = 0
     no_video_streak: int = 0
@@ -105,6 +114,77 @@ class SessionState:
 
     def all_topics_covered(self) -> bool:
         return not self.unsearched_topics()
+
+    def topic_balance_enabled(self) -> bool:
+        return len(self.topics) > 1 and self.duration_minutes >= TOPIC_BALANCE_MIN_DURATION_MINUTES
+
+    def topic_watch_seconds_map(self) -> dict[str, float]:
+        totals = {topic: 0.0 for topic in self.topics}
+        for payload in self.watched_videos:
+            topic = self._topic_bucket_from_payload(payload)
+            if topic is None:
+                continue
+            totals[topic] += self._coerce_float(payload.get("watched_seconds")) or 0.0
+
+        current_topic = self._topic_bucket_from_payload(self.current_watch)
+        if current_topic is not None and self.current_watch is not None:
+            totals[current_topic] += self._coerce_float(self.current_watch.get("watched_seconds")) or 0.0
+
+        return {topic: round(seconds, 1) for topic, seconds in totals.items()}
+
+    def least_covered_topic(self, candidates: list[str] | None = None) -> str | None:
+        totals = self.topic_watch_seconds_map()
+        pool = [topic for topic in (candidates or self.topics) if topic in totals]
+        if not pool:
+            return None
+
+        min_spent = min(totals[topic] for topic in pool)
+        least_covered = [topic for topic in pool if totals[topic] <= min_spent + 5.0]
+        if self.current_topic in least_covered and len(least_covered) > 1:
+            least_covered = [topic for topic in least_covered if topic != self.current_topic]
+        return random.choice(least_covered)
+
+    def current_topic_excess_seconds(self) -> float:
+        current = (self.current_topic or "").strip()
+        if current not in self.topics or len(self.topics) < 2:
+            return 0.0
+
+        totals = self.topic_watch_seconds_map()
+        current_spent = totals.get(current, 0.0)
+        other_spent = [totals.get(topic, 0.0) for topic in self.topics if topic != current]
+        if not other_spent:
+            return 0.0
+        return max(current_spent - min(other_spent), 0.0)
+
+    def current_topic_watch_seconds(self) -> float:
+        current = (self.current_topic or "").strip()
+        if current not in self.topics:
+            return 0.0
+        return self.topic_watch_seconds_map().get(current, 0.0)
+
+    def _pre_coverage_rotation_threshold(self) -> float:
+        unsearched = self.unsearched_topics()
+        if len(unsearched) >= 3:
+            return TOPIC_ROTATION_MAX_CURRENT_TOPIC_S_HEAVY
+        return TOPIC_ROTATION_MAX_CURRENT_TOPIC_S
+
+    def should_force_pre_coverage_rotation(self) -> bool:
+        unsearched = self.unsearched_topics()
+        if not unsearched or len(self.topics) < 2:
+            return False
+        if self.current_topic is None:
+            return False
+        if self.remaining_seconds() < TOPIC_ROTATION_FORCE_SEARCH_MIN_REMAINING_S:
+            return False
+        return self.current_topic_watch_seconds() >= self._pre_coverage_rotation_threshold()
+
+    def should_block_recommended_before_coverage(self) -> bool:
+        unsearched = self.unsearched_topics()
+        if not unsearched or self.current_topic is None:
+            return False
+        if self.current_topic_watch_seconds() >= TOPIC_ROTATION_BLOCK_RECOMMENDED_S:
+            return True
+        return self.should_force_pre_coverage_rotation()
 
     # ── Topic matching (delegates to topic_matcher module) ────
 
@@ -337,6 +417,9 @@ class SessionState:
         current_topic = self.bootstrap.get("current_topic")
         if isinstance(current_topic, str) and current_topic.strip():
             self.current_topic = current_topic.strip()
+            if self.current_topic and (self.watched_videos or self.searched_topics):
+                self.resume_needs_reanchor = True
+                self.forced_search_topic = self.current_topic
 
         fatigue = self._coerce_float(self.bootstrap.get("fatigue"))
         if fatigue is not None:
@@ -373,6 +456,27 @@ class SessionState:
         for video in self.watched_videos:
             if isinstance(video, dict):
                 self.mark_video_seen(video.get("url"))
+
+    def _topic_bucket_from_payload(self, payload: dict[str, object] | None) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+
+        search_keyword = payload.get("search_keyword")
+        if isinstance(search_keyword, str):
+            normalized = search_keyword.strip()
+            if normalized in self.topics:
+                return normalized
+
+        for key in ("keywords", "matched_topics"):
+            values = payload.get(key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                if isinstance(value, str):
+                    normalized = value.strip()
+                    if normalized in self.topics:
+                        return normalized
+        return None
 
     # ── Coercion helpers ──────────────────────────────────────
 

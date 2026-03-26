@@ -11,6 +11,7 @@ from .schema import (
     EmulationAdCaptureHistory,
     EmulationAdCaptureScreenshotPath,
     EmulationCaptureSummary,
+    EmulationPostProcessingProgress,
 )
 
 
@@ -53,6 +54,47 @@ def build_capture_summary(
             1 for capture in ad_captures if capture.video_status == VideoStatus.FALLBACK_SCREENSHOTS
         ),
     )
+
+
+def build_post_processing_state(
+    *,
+    session_status: str,
+    ad_captures: list[EmulationAdCaptureHistory] | None,
+) -> tuple[str | None, EmulationPostProcessingProgress | None]:
+    if session_status not in {"completed", "stopped", "failed"}:
+        return None, None
+    if not ad_captures:
+        return None, None
+
+    analyzable = [
+        capture
+        for capture in ad_captures
+        if capture.video_status == VideoStatus.COMPLETED
+    ]
+    total = len(analyzable)
+    if total == 0:
+        return None, None
+
+    terminal_statuses = {"completed", "not_relevant", "failed", "skipped"}
+    done = sum(
+        1
+        for capture in analyzable
+        if str(capture.analysis_status or "").lower() in terminal_statuses
+    )
+    failed = sum(
+        1
+        for capture in analyzable
+        if str(capture.analysis_status or "").lower() == "failed"
+    )
+
+    if done < total:
+        state = "running"
+    elif failed > 0:
+        state = "failed"
+    else:
+        state = "completed"
+
+    return state, EmulationPostProcessingProgress(done=done, total=total)
 
 
 def normalized_videos_count(payload: EmulationSessionHistory) -> int:
@@ -122,10 +164,14 @@ def normalize_watched_ads_payload(
 
 
 def map_ad_capture(capture: AdCapture) -> EmulationAdCaptureHistory:
+    analysis_status = capture.analysis_status
+    hide_media = str(analysis_status) == "not_relevant"
     screenshot_paths = [
         EmulationAdCaptureScreenshotPath(offset_ms=s.offset_ms, file_path=s.file_path)
         for s in sorted(capture.screenshots, key=lambda x: x.offset_ms)
     ]
+    if hide_media:
+        screenshot_paths = []
     return EmulationAdCaptureHistory(
         ad_position=capture.ad_position,
         advertiser_domain=capture.advertiser_domain,
@@ -133,13 +179,13 @@ def map_ad_capture(capture: AdCapture) -> EmulationAdCaptureHistory:
         display_url=capture.display_url,
         headline_text=capture.headline_text,
         ad_duration_seconds=capture.ad_duration_seconds,
-        landing_url=capture.landing_url,
-        landing_dir=capture.landing_dir,
+        landing_url=None if hide_media else capture.landing_url,
+        landing_dir=None if hide_media else capture.landing_dir,
         landing_status=capture.landing_status,
         video_src_url=capture.video_src_url,
-        video_file=capture.video_file,
+        video_file=None if hide_media else capture.video_file,
         video_status=capture.video_status,
-        analysis_status=capture.analysis_status,
+        analysis_status=analysis_status,
         analysis_summary=_parse_analysis_summary(capture.analysis_summary),
         screenshot_paths=screenshot_paths,
     )

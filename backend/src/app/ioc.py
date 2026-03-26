@@ -40,6 +40,7 @@ try:
     from app.clients.gemini import GeminiClient
     from app.services.emulation.ad_analysis import AdAnalysisService
     from app.services.emulation.media_storage import LocalMediaStorage, MediaStorage
+    from app.services.emulation.video_sampling import AdAnalysisVideoSampler
 
     _GEMINI_AVAILABLE = True
 except ModuleNotFoundError:
@@ -162,12 +163,23 @@ if _GEMINI_AVAILABLE:
         def get_media_storage(self, config: Config) -> MediaStorage:
             return LocalMediaStorage(config.storage.ad_captures_path)
 
+        @provide(scope=Scope.APP)
+        def get_ad_analysis_video_sampler(self) -> AdAnalysisVideoSampler:
+            return AdAnalysisVideoSampler()
+
         @provide(scope=Scope.REQUEST)
         async def get_ad_analysis_service(
             self, gemini: GeminiClient, uow: UnitOfWork, config: Config,
             storage: MediaStorage,
+            video_sampler: AdAnalysisVideoSampler,
         ) -> AdAnalysisService:
-            return AdAnalysisService(gemini, uow, config.storage.ad_captures_path, storage)
+            return AdAnalysisService(
+                gemini,
+                uow,
+                config.storage.ad_captures_path,
+                storage,
+                video_sampler,
+            )
 
 
 def get_async_container() -> AsyncContainer:
