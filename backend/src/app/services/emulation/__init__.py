@@ -9,15 +9,15 @@ __all__ = [
 
 def __getattr__(name: str):
     if name == "EmulationResult":
-        from .core.session.state import EmulationResult
+        from .session.state import EmulationResult
 
         return EmulationResult
     if name == "EmulationSessionStore":
-        from .core.session.store import EmulationSessionStore
+        from .session.store import EmulationSessionStore
 
         return EmulationSessionStore
     if name == "EmulationOrchestrationService":
-        from .orchestrator import EmulationOrchestrationService
+        from .orchestration.scheduler import EmulationOrchestrationService
 
         return EmulationOrchestrationService
     if name == "EmulationPersistenceService":

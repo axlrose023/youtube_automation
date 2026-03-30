@@ -15,7 +15,9 @@ services:
       - APP__ENV=dev
       - APP__POSTGRES__HOST=db
       - APP__REDIS__HOST=cache
+      - UV_CACHE_DIR=/tmp/uv-cache
       - TASKIQ_EMULATION_QUEUE_NAME=${TASKIQ_EMULATION_QUEUE_NAME:-taskiq_emulation}
+      - TASKIQ_ANALYSIS_QUEUE_NAME=${TASKIQ_ANALYSIS_QUEUE_NAME:-taskiq_analysis}
     healthcheck:
       test: [ "CMD-SHELL", "wget --no-verbose --tries=1 -O /dev/null http://localhost:${APP__API__PORT}/ping || exit 1" ]
       interval: 10s
@@ -53,6 +55,36 @@ services:
     healthcheck:
       disable: true
 
+  analysis:
+    build:
+      context: .
+      dockerfile: Dockerfile.analysis
+    entrypoint: [ /app/.venv/bin/taskiq ]
+    command: [ worker, "app.tiq:broker", -w, "2", "app.tasks" ]
+    restart: unless-stopped
+    volumes:
+      - ./src:/app/src
+      - ./artifacts:/app/artifacts
+    env_file:
+      - .env
+    environment:
+      - APP__ENV=dev
+      - APP__POSTGRES__HOST=db
+      - APP__REDIS__HOST=cache
+      - UV_CACHE_DIR=/tmp/uv-cache
+      - TASKIQ_ANALYSIS_QUEUE_NAME=${TASKIQ_ANALYSIS_QUEUE_NAME:-taskiq_analysis}
+      - TASKIQ_QUEUE_NAME=${TASKIQ_ANALYSIS_QUEUE_NAME:-taskiq_analysis}
+    ports: []
+    healthcheck:
+      disable: true
+    depends_on:
+      cache:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+
   emulation:
     build:
       context: .
@@ -68,7 +100,9 @@ services:
       - APP__POSTGRES__HOST=db
       - APP__REDIS__HOST=cache
       - DISPLAY=:99
+      - UV_CACHE_DIR=/tmp/uv-cache
       - TASKIQ_EMULATION_QUEUE_NAME=${TASKIQ_EMULATION_QUEUE_NAME:-taskiq_emulation}
+      - TASKIQ_ANALYSIS_QUEUE_NAME=${TASKIQ_ANALYSIS_QUEUE_NAME:-taskiq_analysis}
       - TASKIQ_QUEUE_NAME=${TASKIQ_EMULATION_QUEUE_NAME:-taskiq_emulation}
     ports:
       - "5901:5900"

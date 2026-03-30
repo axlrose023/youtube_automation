@@ -3,10 +3,22 @@ from __future__ import annotations
 import datetime
 import json
 import time
+from pathlib import Path
 
-from app.api.modules.ad_captures.models import AdCapture, VideoStatus
+from fastapi import HTTPException
+from app.settings import get_config
+from app.services.emulation.common import watched_videos_count
 
-from .models import EmulationSessionHistory
+from .models import (
+    ANALYSIS_TERMINAL_STATUSES,
+    AdCapture,
+    AnalysisStatus,
+    EmulationSessionHistory,
+    PostProcessingStatus,
+    SESSION_TERMINAL_STATUSES,
+    SessionStatus,
+    VideoStatus,
+)
 from .schema import (
     EmulationAdCaptureHistory,
     EmulationAdCaptureScreenshotPath,
@@ -22,9 +34,24 @@ def calculate_session_elapsed_minutes(data: dict[str, object]) -> float | None:
 
     status = data.get("status")
     finished_at = data.get("finished_at")
-    if status in {"completed", "failed", "stopped"} and isinstance(finished_at, int | float):
+    if status in SESSION_TERMINAL_STATUSES and isinstance(finished_at, int | float):
         return round((finished_at - started_at) / 60, 1)
     return round((time.time() - started_at) / 60, 1)
+
+
+def resolve_media_path(media_path: str) -> Path:
+    base_path = get_config().storage.ad_captures_path.resolve()
+    candidate = (base_path / media_path).resolve()
+
+    try:
+        candidate.relative_to(base_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Media file not found") from exc
+
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Media file not found")
+
+    return candidate
 
 
 def calculate_history_elapsed_minutes(payload: EmulationSessionHistory) -> float | None:
@@ -58,10 +85,10 @@ def build_capture_summary(
 
 def build_post_processing_state(
     *,
-    session_status: str,
+    session_status: SessionStatus | str,
     ad_captures: list[EmulationAdCaptureHistory] | None,
-) -> tuple[str | None, EmulationPostProcessingProgress | None]:
-    if session_status not in {"completed", "stopped", "failed"}:
+) -> tuple[PostProcessingStatus | None, EmulationPostProcessingProgress | None]:
+    if session_status not in SESSION_TERMINAL_STATUSES:
         return None, None
     if not ad_captures:
         return None, None
@@ -75,30 +102,32 @@ def build_post_processing_state(
     if total == 0:
         return None, None
 
-    terminal_statuses = {"completed", "not_relevant", "failed", "skipped"}
     done = sum(
         1
         for capture in analyzable
-        if str(capture.analysis_status or "").lower() in terminal_statuses
+        if str(capture.analysis_status or "").lower() in ANALYSIS_TERMINAL_STATUSES
     )
     failed = sum(
         1
         for capture in analyzable
-        if str(capture.analysis_status or "").lower() == "failed"
+        if str(capture.analysis_status or "").lower() == AnalysisStatus.FAILED
     )
 
     if done < total:
-        state = "running"
+        state = PostProcessingStatus.RUNNING
     elif failed > 0:
-        state = "failed"
+        state = PostProcessingStatus.FAILED
     else:
-        state = "completed"
+        state = PostProcessingStatus.COMPLETED
 
     return state, EmulationPostProcessingProgress(done=done, total=total)
 
 
 def normalized_videos_count(payload: EmulationSessionHistory) -> int:
-    return max(payload.watched_videos_count, len(payload.watched_videos or []))
+    return watched_videos_count(
+        payload.watched_videos or [],
+        fallback=payload.watched_videos_count,
+    )
 
 
 def normalized_ads_count(payload: EmulationSessionHistory) -> int:
@@ -165,7 +194,7 @@ def normalize_watched_ads_payload(
 
 def map_ad_capture(capture: AdCapture) -> EmulationAdCaptureHistory:
     analysis_status = capture.analysis_status
-    hide_media = str(analysis_status) == "not_relevant"
+    hide_media = str(analysis_status) == AnalysisStatus.NOT_RELEVANT
     screenshot_paths = [
         EmulationAdCaptureScreenshotPath(offset_ms=s.offset_ms, file_path=s.file_path)
         for s in sorted(capture.screenshots, key=lambda x: x.offset_ms)

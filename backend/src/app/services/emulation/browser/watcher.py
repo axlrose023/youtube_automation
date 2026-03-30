@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from playwright.async_api import Page
 
-from ..core.config import (
+from ..config import (
     AD_COMPLETION_OVERFLOW_MAX_S,
     CLICK_RECOMMENDED_FALLBACK_A,
     CLICK_RECOMMENDED_FALLBACK_B,
@@ -36,7 +36,7 @@ from ..core.config import (
     WATCH_FOCUSED_FALLBACK,
     WATCH_LONG_FALLBACK,
 )
-from ..core.session.state import Mode, SessionState
+from ..session.state import Mode, SessionState
 from .ads.handler import AdHandler
 from .humanizer import Humanizer
 from .navigator import Navigator
@@ -272,8 +272,6 @@ class VideoWatcher:
             merge_if_same_url=True,
         )
         self._state.clear_current_watch()
-        if completed:
-            self._state.videos_watched += 1
         self._state.on_video_page = True
         return True
 
@@ -361,8 +359,6 @@ class VideoWatcher:
             target_seconds=first_eval + watch_s, completed=completed,
         )
         self._state.clear_current_watch()
-        if completed:
-            self._state.videos_watched += 1
         self._state.on_video_page = True
         await self._playback.set_speed(1.0)
         logger.info("Session %s: %s done (total watched: %d)", self._state.session_id, profile.action, self._state.videos_watched)
@@ -413,8 +409,6 @@ class VideoWatcher:
         self._state.clear_current_watch()
         if profile.increment_surf:
             self._state.surf_streak += 1
-        if completed:
-            self._state.videos_watched += 1
         self._state.on_video_page = True
 
         logger.info(

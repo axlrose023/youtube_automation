@@ -7,14 +7,14 @@ from typing import TYPE_CHECKING
 from playwright.async_api import Page
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
-from ..core.config import IDLE_FATIGUE_THRESHOLD, IDLE_FATIGUED_RANGE, IDLE_NORMAL_RANGE
-from ..core.selectors import (
+from ..config import IDLE_FATIGUE_THRESHOLD, IDLE_FATIGUED_RANGE, IDLE_NORMAL_RANGE
+from ..selectors import (
     CONSENT_SELECTORS,
     RECOMMENDED_SELECTORS,
     VIDEO_SELECTORS,
     YOUTUBE_URL,
 )
-from ..core.session.state import SessionState
+from ..session.state import SessionState
 from .humanizer import Humanizer
 from .video_finder import VideoFinder
 
@@ -130,6 +130,13 @@ class Navigator:
             return True
 
         if not self._state.topics:
+            return False
+
+        if self._finder.should_keep_current_topic_focus(self._state.current_topic):
+            logger.info(
+                "Session %s: no recommendation for current topic, staying strict to avoid drift",
+                self._state.session_id,
+            )
             return False
 
         logger.info(

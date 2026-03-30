@@ -3,12 +3,13 @@ from __future__ import annotations
 import logging
 import random
 import time
+from typing import Awaitable, Callable
 
 from playwright.async_api import Page
 
 from .browser.ads.capture import AdCaptureProvider
-from .core.session.store import EmulationSessionStore
-from .core.session.state import EmulationResult, SessionState
+from .session.state import EmulationResult, SessionState
+from .session.store import EmulationSessionStore
 from .runtime import build_runtime
 from .session_loop import SessionLoop
 
@@ -25,6 +26,7 @@ class YouTubeEmulator:
         session_id: str,
         capture: AdCaptureProvider | None = None,
         bootstrap: dict[str, object] | None = None,
+        on_capture_ready: Callable[[list[dict[str, object]], dict[str, object]], Awaitable[None]] | None = None,
     ) -> None:
         self.session_store = session_store
 
@@ -36,7 +38,12 @@ class YouTubeEmulator:
         )
         self.session_state = session_state
 
-        runtime = build_runtime(page, session_state, capture)
+        runtime = build_runtime(
+            page,
+            session_state,
+            capture,
+            on_capture_ready=on_capture_ready,
+        )
         self.ads = runtime.ads
         self.humanizer = runtime.humanizer
         self.navigator = runtime.navigator
@@ -112,7 +119,7 @@ class YouTubeEmulator:
         total_duration_seconds = int(max(elapsed_monotonic, elapsed_wallclock))
         return EmulationResult(
             topics_searched=self.session_state.searched_topics,
-            videos_watched=self.session_state.videos_watched,
+            videos_watched=self.session_state.completed_watched_videos_count(),
             bytes_downloaded=final_bytes,
             total_duration_seconds=total_duration_seconds,
             watched_videos=self.session_state.watched_videos,

@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING
 from playwright.async_api import ElementHandle, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
-from ..core.config import TOPIC_BALANCE_ROTATE_SEARCH_PROBABILITY
-from ..core.selectors import (
+from ..config import TOPIC_BALANCE_ROTATE_SEARCH_PROBABILITY
+from ..selectors import (
     SEARCH_BUTTON,
     SEARCH_BUTTON_SELECTORS,
     SEARCH_INPUT_SELECTORS,
     VIDEO_SELECTORS,
 )
-from ..core.session.state import SessionState
+from ..session.state import SessionState
 from .humanizer import Humanizer
 
 if TYPE_CHECKING:

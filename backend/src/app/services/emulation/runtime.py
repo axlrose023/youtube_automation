@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Awaitable, Callable
 
 from playwright.async_api import Page
 
@@ -13,11 +14,11 @@ from .browser.searcher import Searcher
 from .browser.traffic import TrafficTracker
 from .browser.video_finder import VideoFinder
 from .browser.watcher import VideoWatcher
-from .core.session.state import SessionState
-from .strategy.action_picker import ActionPicker
-from .strategy.clock import SessionClock
-from .strategy.dispatcher import ActionDispatcher
-from .strategy.fatigue import FatigueManager
+from .decision import ActionPicker
+from .session.clock import SessionClock
+from .session.fatigue import FatigueManager
+from .session.state import SessionState
+from .workflow.dispatcher import ActionDispatcher
 
 
 @dataclass(frozen=True)
@@ -36,9 +37,10 @@ def build_runtime(
     page: Page,
     state: SessionState,
     capture: AdCaptureProvider | None = None,
+    on_capture_ready: Callable[[list[dict[str, object]], dict[str, object]], Awaitable[None]] | None = None,
 ) -> EmulationRuntime:
     humanizer = Humanizer(page, state)
-    ads = AdHandler(page, humanizer, state, capture=capture)
+    ads = AdHandler(page, humanizer, state, capture=capture, on_capture_ready=on_capture_ready)
     playback = PlaybackController(page, humanizer)
     finder = VideoFinder(page, state, humanizer)
 

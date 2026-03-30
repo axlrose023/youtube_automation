@@ -5,19 +5,20 @@ import logging
 import time
 import uuid
 from dataclasses import replace
+from typing import Awaitable, Callable
 
 from playwright.async_api import Page
 
-from ...core.selectors import (
+from ...selectors import (
     AD_BUTTON_SELECTOR,
     AD_CAPTION_SELECTOR,
     AD_INFO_SELECTOR,
     AD_OVERLAY_SELECTOR,
     AD_SKIP_SELECTOR,
 )
-from ...core.session.state import SessionState
+from ...session.state import SessionState
 from ..humanizer import Humanizer
-from app.api.modules.ad_captures.models import VideoStatus
+from app.api.modules.emulation.models import VideoStatus
 
 from .capture import AdCaptureProvider, CaptureResult
 from .snapshot import (
@@ -40,11 +41,13 @@ class AdHandler:
         humanizer: Humanizer,
         state: SessionState,
         capture: AdCaptureProvider | None = None,
+        on_capture_ready: Callable[[list[dict[str, object]], dict[str, object]], Awaitable[None]] | None = None,
     ) -> None:
         self._page = page
         self._h = humanizer
         self._state = state
         self._capture = capture
+        self._on_capture_ready = on_capture_ready
         self._capturing = False
         self._pending_records: list[AdRecord] = []
         self._interrupted_records: list[AdRecord] | None = None
@@ -310,6 +313,7 @@ class AdHandler:
                     self._state.session_id, rec.capture_id, exc,
                 )
             self._refresh_state_entry(rec)
+            await self._notify_capture_ready(rec)
 
     async def _reconcile_ready_captures(self) -> None:
         if not self._pending_records:
@@ -331,6 +335,7 @@ class AdHandler:
                     self._state.session_id, rec.capture_id, exc,
                 )
             self._refresh_state_entry(rec)
+            await self._notify_capture_ready(rec)
         self._pending_records = remaining
 
     # ── Skip / focus / snapshot ───────────────────────────────
@@ -525,6 +530,18 @@ class AdHandler:
         if rec._state_entry is None:
             return
         rec._state_entry.update(rec.to_dict())
+
+    async def _notify_capture_ready(self, rec: AdRecord) -> None:
+        if self._on_capture_ready is None or rec._state_entry is None:
+            return
+        try:
+            await self._on_capture_ready(self._state.watched_ads, rec._state_entry)
+        except Exception:
+            logger.exception(
+                "Session %s: failed to process finalized ad capture %s",
+                self._state.session_id,
+                rec.capture_id,
+            )
 
     def _publish_record(self, rec: AdRecord) -> dict[str, object] | None:
         if self._should_ignore_record(rec):

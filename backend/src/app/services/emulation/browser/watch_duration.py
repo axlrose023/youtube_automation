@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import random
 
-from ..core.config import (
+from ..config import (
     COVERAGE_CAP_BUDGET_FRACTION,
     COVERAGE_CAP_MIN_S,
     COVERAGE_SEARCH_OVERHEAD_S,
@@ -23,7 +23,7 @@ from ..core.config import (
     TOPIC_BALANCE_FORCE_SEARCH_MIN_REMAINING_S,
     TOPIC_BALANCE_POST_COVERAGE_CAP_S,
 )
-from ..core.session.state import SessionState
+from ..session.state import SessionState
 from .playback import PlaybackController
 
 logger = logging.getLogger(__name__)

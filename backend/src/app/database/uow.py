@@ -2,8 +2,7 @@ from typing import Self
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.modules.ad_captures.gateway import AdCaptureGateway
-from app.api.modules.emulation.gateway import EmulationHistoryGateway
+from app.api.modules.emulation.gateway import AdCaptureGateway, EmulationHistoryGateway
 from app.api.modules.users.gateway import UserGateway
 
 

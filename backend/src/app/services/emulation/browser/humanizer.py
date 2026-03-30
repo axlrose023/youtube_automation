@@ -3,7 +3,7 @@ import random
 
 from playwright.async_api import ElementHandle, Page
 
-from ..core.session.state import SessionState
+from ..session.state import SessionState
 
 
 class Humanizer:

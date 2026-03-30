@@ -4,7 +4,7 @@ import random
 from playwright.async_api import ElementHandle, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
-from ..core.session.state import SessionState
+from ..session.state import SessionState
 from .humanizer import Humanizer
 
 logger = logging.getLogger(__name__)
@@ -98,6 +98,36 @@ _INVESTMENT_TOKENS = ("investing", "investment", "investments", "portfolio", "di
 _STOCK_TOKENS = ("stock market", "stocks", "equities", "equity market")
 _CRYPTO_TOKENS = ("crypto", "cryptocurrency", "digital asset", "bitcoin", "ethereum")
 _EARNING_TOKENS = ("passive income", "side income", "earn money", "make money", "income", "yield", "staking")
+_REWARD_TOPIC_TOKENS = (
+    "reward",
+    "rewards",
+    "airdrop",
+    "airdrops",
+    "quest",
+    "quests",
+    "mission",
+    "missions",
+    "faucet",
+    "faucets",
+    "claim",
+    "claims",
+)
+_CONSUMER_REWARD_TITLE_TOKENS = (
+    "airdrop",
+    "airdrops",
+    "quest",
+    "quests",
+    "mission",
+    "missions",
+    "faucet",
+    "faucets",
+    "claim",
+    "claims",
+    "platform",
+    "platforms",
+    "app",
+    "apps",
+)
 _INCOME_POSITIVE_TOKENS = (
     "dividend",
     "yield",
@@ -261,8 +291,7 @@ class VideoFinder:
                 prefer_best_match = bool(
                     preferred_topic
                     and require_topic_match
-                    and self._is_finance_context()
-                    and not self._state.all_topics_covered()
+                    and self._should_stay_strict_on_preferred_topic(preferred_topic)
                 )
                 if clickable_elements:
                     return self._pick_ranked_candidate(
@@ -504,6 +533,8 @@ class VideoFinder:
         if preferred_topic:
             if self._state.is_title_on_specific_topic(title, preferred_topic):
                 return True
+            if self._should_stay_strict_on_preferred_topic(preferred_topic):
+                return False
             if not self._state.all_topics_covered():
                 return False
         return self._state.is_title_on_topic(title)
@@ -601,6 +632,15 @@ class VideoFinder:
                 score += 1.6
             elif "crypto" in normalized_title:
                 score -= 0.4
+        elif self._contains_any(normalized_topic, _REWARD_TOPIC_TOKENS):
+            if self._contains_any(normalized_title, _CONSUMER_REWARD_TITLE_TOKENS):
+                score += 3.2
+            elif "staking" in normalized_title or "stake" in normalized_title:
+                score -= 3.8
+            elif self._contains_any(normalized_title, _INVESTMENT_TOKENS) or "trading" in normalized_title:
+                score -= 3.4
+            elif self._contains_any(normalized_title, _CRYPTO_TOKENS):
+                score -= 1.8
         elif "crypto" in normalized_topic:
             if "crypto" in normalized_title or "cryptocurrency" in normalized_title:
                 score += 1.5
@@ -672,5 +712,7 @@ class VideoFinder:
         return bool(
             preferred_topic
             and self._is_finance_context()
-            and not self._state.all_topics_covered()
         )
+
+    def should_keep_current_topic_focus(self, preferred_topic: str | None) -> bool:
+        return self._should_stay_strict_on_preferred_topic(preferred_topic)

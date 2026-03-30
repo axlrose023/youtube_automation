@@ -15,6 +15,7 @@ setup_logging(config.env)
 
 DEFAULT_QUEUE_NAME = "taskiq"
 EMULATION_QUEUE_NAME = os.getenv("TASKIQ_EMULATION_QUEUE_NAME", "taskiq_emulation")
+ANALYSIS_QUEUE_NAME = os.getenv("TASKIQ_ANALYSIS_QUEUE_NAME", "taskiq_analysis")
 WORKER_QUEUE_NAME = os.getenv("TASKIQ_QUEUE_NAME", DEFAULT_QUEUE_NAME)
 DYNAMIC_SCHEDULE_PREFIX = os.getenv("TASKIQ_DYNAMIC_SCHEDULE_PREFIX", "taskiq_dynamic_schedule")
 

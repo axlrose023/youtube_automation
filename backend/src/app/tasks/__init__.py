@@ -15,3 +15,10 @@ try:
     __all__ += ["emulation_task"]
 except ModuleNotFoundError:
     pass
+
+try:
+    from .ad_analysis import ad_analysis_task
+
+    __all__ += ["ad_analysis_task"]
+except ModuleNotFoundError:
+    pass

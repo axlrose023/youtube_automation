@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from app.api.modules.ad_captures.models import LandingStatus, VideoStatus
+from app.api.modules.emulation.models import LandingStatus, VideoStatus
 
 if TYPE_CHECKING:
     from .capture import CaptureHandle, CaptureResult
@@ -273,6 +273,8 @@ class AdRecord:
                 "landing_status": r.landing_status,
                 "landing_dir": r.landing_dir,
                 "screenshot_paths": r.screenshot_paths,
+                "analysis_status": "pending",
+                "analysis_summary": None,
             }
         elif self.capture_id:
             capture_payload = {
@@ -283,6 +285,8 @@ class AdRecord:
                 "landing_status": LandingStatus.PENDING,
                 "landing_dir": None,
                 "screenshot_paths": [],
+                "analysis_status": "pending",
+                "analysis_summary": None,
             }
         return {
             "started_at": self.started_at,

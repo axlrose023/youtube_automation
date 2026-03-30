@@ -4,13 +4,12 @@ from dishka import AsyncContainer, Provider, Scope, make_async_container, provid
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.modules.auth.service import AuthService
-from app.api.modules.auth.services import JwtService
 from app.api.modules.emulation.service import (
     EmulationHistoryService,
     EmulationSessionService,
 )
-from app.api.modules.users.service import UserService
+from app.api.modules.users.service import AuthService, UserService
+from app.api.modules.users.services.jwt import JwtService
 from app.clients.providers import HttpClientsProvider
 from app.database.engine import SessionFactory
 from app.database.uow import UnitOfWork
@@ -18,9 +17,9 @@ from app.services.emulation.core.capture_factory import (
     AdCaptureProviderFactory,
     DefaultAdCaptureProviderFactory,
 )
-from app.services.emulation.core.session.store import EmulationSessionStore
-from app.services.emulation.orchestrator import EmulationOrchestrationService
+from app.services.emulation.orchestration.scheduler import EmulationOrchestrationService
 from app.services.emulation.persistence import EmulationPersistenceService
+from app.services.emulation.session.store import EmulationSessionStore
 from app.settings import Config, get_config
 
 try:
@@ -38,9 +37,9 @@ except ModuleNotFoundError:
 
 try:
     from app.clients.gemini import GeminiClient
-    from app.services.emulation.ad_analysis import AdAnalysisService
+    from app.services.emulation.ads.analysis.service import AdAnalysisService
     from app.services.emulation.media_storage import LocalMediaStorage, MediaStorage
-    from app.services.emulation.video_sampling import AdAnalysisVideoSampler
+    from app.services.emulation.ads.analysis.sampler import AdAnalysisVideoSampler
 
     _GEMINI_AVAILABLE = True
 except ModuleNotFoundError:

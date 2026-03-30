@@ -4,14 +4,15 @@ from collections.abc import Awaitable, Callable
 
 from .browser.humanizer import Humanizer
 from .browser.traffic import TrafficTracker
-from .core.actions import WATCH_ACTIONS
-from .core.config import LIVE_PROGRESS_SYNC_INTERVAL_S, WATCH_ACTION_MIN_REMAINING_S
-from .core.session.store import EmulationSessionStore
-from .core.session.state import SessionState
-from .strategy.action_picker import ActionPicker
-from .strategy.clock import SessionClock
-from .strategy.dispatcher import ActionDispatcher
-from .strategy.fatigue import FatigueManager
+from .actions import WATCH_ACTIONS
+from .config import LIVE_PROGRESS_SYNC_INTERVAL_S, WATCH_ACTION_MIN_REMAINING_S
+from .decision import ActionPicker
+from .session.clock import SessionClock
+from .session.fatigue import FatigueManager
+from .session.state import SessionState
+from app.api.modules.emulation.models import SessionStatus
+from .session.store import EmulationSessionStore
+from .workflow.dispatcher import ActionDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -152,7 +153,7 @@ class SessionLoop:
     async def _sync_progress_once(self) -> None:
         session_id = self._state.session_id
         data = await self._store.get(session_id)
-        if data and (data.get("stop_requested") or data.get("status") == "stopped"):
+        if data and (data.get("stop_requested") or data.get("status") == SessionStatus.STOPPED):
             logger.info("Session %s: stop requested by user", session_id)
             self._stop_requested = True
             self._state.request_stop()

@@ -4,6 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.common.schema import Pagination, PaginationParams
+from .models import PostProcessingStatus, SessionStatus
 
 
 class StartEmulationRequest(BaseModel):
@@ -19,11 +20,15 @@ class StartEmulationRequest(BaseModel):
 
 class StartEmulationResponse(BaseModel):
     session_id: UUID
-    status: str
+    status: SessionStatus
 
 
 class EmulationSessionActionRequest(BaseModel):
     session_id: UUID
+
+
+class EmulationStatusBatchRequest(BaseModel):
+    session_ids: list[UUID] = Field(min_length=1, max_length=50)
 
 
 class EmulationWatchedVideo(BaseModel):
@@ -60,6 +65,8 @@ class EmulationLiveAdCapture(BaseModel):
     landing_url: str | None = None
     landing_status: str | None = None
     landing_dir: str | None = None
+    analysis_status: str | None = None
+    analysis_summary: dict | None = None
     screenshot_paths: list[EmulationAdCaptureScreenshotPath] = Field(default_factory=list)
 
 
@@ -141,10 +148,11 @@ class EmulationPostProcessingProgress(BaseModel):
 
 class EmulationSessionStatus(BaseModel):
     session_id: UUID
-    status: str
-    post_processing_status: str | None = None
+    status: SessionStatus
+    post_processing_status: PostProcessingStatus | None = None
     post_processing_progress: EmulationPostProcessingProgress | None = None
     profile_id: str | None = None
+    requested_topics: list[str] = Field(default_factory=list)
     elapsed_minutes: float | None = None
     orchestration_enabled: bool = False
     orchestration_phase: str | None = None
@@ -192,8 +200,8 @@ class EmulationCaptureSummary(BaseModel):
 
 class EmulationHistoryItem(BaseModel):
     session_id: UUID
-    status: str
-    post_processing_status: str | None = None
+    status: SessionStatus
+    post_processing_status: PostProcessingStatus | None = None
     post_processing_progress: EmulationPostProcessingProgress | None = None
     requested_duration_minutes: int
     requested_topics: list[str] = Field(default_factory=list)
@@ -225,9 +233,38 @@ class EmulationHistoryResponse(Pagination[EmulationHistoryItem]):
     model_config = ConfigDict(from_attributes=True)
 
 
+class EmulationStatusBatchResponse(BaseModel):
+    statuses: dict[str, EmulationSessionStatus] = Field(default_factory=dict)
+
+
+class EmulationDashboardSummaryItem(BaseModel):
+    label: str
+    value: int
+
+
+class EmulationDashboardSummaryResponse(BaseModel):
+    total_sessions: int = 0
+    completed: int = 0
+    running: int = 0
+    failed: int = 0
+    stopped: int = 0
+    total_videos_watched: int = 0
+    avg_videos_per_session: float = 0.0
+    total_ads_watched: int = 0
+    total_ad_captures: int = 0
+    video_captures: int = 0
+    screenshot_fallbacks: int = 0
+    landing_completed: int = 0
+    relevant_ads: int = 0
+    not_relevant_ads: int = 0
+    analyzed_ads: int = 0
+    top_advertisers: list[EmulationDashboardSummaryItem] = Field(default_factory=list)
+    top_topics: list[EmulationDashboardSummaryItem] = Field(default_factory=list)
+
+
 class StopEmulationResponse(BaseModel):
     session_id: UUID
-    status: str
+    status: SessionStatus
 
 
 class EmulationCapturesResponse(BaseModel):

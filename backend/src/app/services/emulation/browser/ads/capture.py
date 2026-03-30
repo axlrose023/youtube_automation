@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 from playwright.async_api import BrowserContext, Page, Response
 
-from ...core.config import (
+from ...config import (
     AD_CAPTURE_LANDING_TIMEOUT_MS,
     AD_CAPTURE_MAX_ASSET_SIZE_BYTES,
     AD_CAPTURE_MAX_TOTAL_ASSETS,
@@ -25,7 +25,7 @@ from ...core.config import (
     AD_CAPTURE_SCREENSHOT_PREROLL_TIMEOUT_S,
     AD_CAPTURE_VIDEO_DOWNLOAD_TIMEOUT_S,
 )
-from app.api.modules.ad_captures.models import LandingStatus, VideoStatus
+from app.api.modules.emulation.models import LandingStatus, VideoStatus
 
 from .capture_utils import ASSET_CONTENT_TYPES, IMAGE_PREFIX, asset_filename
 
