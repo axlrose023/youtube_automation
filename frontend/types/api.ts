@@ -38,6 +38,10 @@ export interface EmulationSessionActionRequest {
   session_id: string;
 }
 
+export interface EmulationStatusBatchRequest {
+  session_ids: string[];
+}
+
 export interface CaptureSummary {
   ads_total: number;
   video_captures: number;
@@ -74,6 +78,8 @@ export interface EmulationLiveAdCapture {
   landing_url?: string | null;
   landing_status?: string | null;
   landing_dir?: string | null;
+  analysis_status?: string | null;
+  analysis_summary?: Record<string, unknown> | null;
   screenshot_paths: Array<{ offset_ms: number; file_path: string }>;
 }
 
@@ -169,6 +175,7 @@ export interface EmulationSessionStatus {
   active_budget_seconds?: number | null;
   active_spent_seconds?: number | null;
   bytes_downloaded: number;
+  requested_topics: string[];
   topics_searched: string[];
   videos_watched: number;
   watched_videos_count: number;
@@ -191,4 +198,33 @@ export interface EmulationSessionStatus {
   mode?: string | null;
   fatigue?: number | null;
   error?: string | null;
+}
+
+export interface EmulationStatusBatchResponse {
+  statuses: Record<string, EmulationSessionStatus>;
+}
+
+export interface DashboardSummaryItem {
+  label: string;
+  value: number;
+}
+
+export interface EmulationDashboardSummary {
+  total_sessions: number;
+  completed: number;
+  running: number;
+  failed: number;
+  stopped: number;
+  total_videos_watched: number;
+  avg_videos_per_session: number;
+  total_ads_watched: number;
+  total_ad_captures: number;
+  video_captures: number;
+  screenshot_fallbacks: number;
+  landing_completed: number;
+  relevant_ads: number;
+  not_relevant_ads: number;
+  analyzed_ads: number;
+  top_advertisers: DashboardSummaryItem[];
+  top_topics: DashboardSummaryItem[];
 }

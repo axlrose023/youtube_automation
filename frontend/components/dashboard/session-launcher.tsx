@@ -59,17 +59,17 @@ export function SessionLauncher() {
 
       const normalizedProfileId = profileId.trim();
       if (!normalizedProfileId) {
-        setError("AdsPower profile id is required.");
+        setError("Нужен идентификатор профиля AdsPower.");
         setLoading(false);
         return;
       }
       if (!duration.trim()) {
-        setError("Duration is required.");
+        setError("Нужно указать длительность.");
         setLoading(false);
         return;
       }
       if (payloadTopics.length === 0) {
-        setError("At least one topic is required.");
+        setError("Нужна хотя бы одна тема.");
         setLoading(false);
         return;
       }
@@ -81,7 +81,7 @@ export function SessionLauncher() {
       });
       navigate(`/sessions/${response.session_id}`);
     } catch (err) {
-      setError("Failed to start emulation. Check API/logs and try again.");
+      setError("Не удалось запустить эмуляцию. Проверь API и логи, затем попробуй снова.");
     } finally {
       setLoading(false);
     }
@@ -91,13 +91,13 @@ export function SessionLauncher() {
     <Card className="p-5" glow>
       <div className="mb-5 flex items-center gap-2">
         <Rocket size={16} className="text-[var(--brand)]" />
-        <span className="text-sm font-semibold text-[var(--ink)]">Launch emulation</span>
+        <span className="text-sm font-semibold text-[var(--ink)]">Запуск эмуляции</span>
       </div>
 
       <form className="space-y-4" onSubmit={handleSubmit}>
         <div className="grid gap-3 sm:grid-cols-2">
           <Input
-            label="Duration, minutes"
+            label="Длительность, минут"
             type="number"
             min={1}
             max={480}
@@ -106,8 +106,8 @@ export function SessionLauncher() {
             required
           />
           <Input
-            label="AdsPower profile id"
-            placeholder="Required"
+            label="ID профиля AdsPower"
+            placeholder="Обязательно"
             value={profileId}
             onChange={(event) => setProfileId(event.target.value)}
             required
@@ -115,16 +115,16 @@ export function SessionLauncher() {
         </div>
 
         <div className="space-y-2">
-          <div className="text-sm font-medium text-[var(--ink-secondary)]">Topics</div>
+          <div className="text-sm font-medium text-[var(--ink-secondary)]">Темы</div>
           <div className="text-xs text-[var(--muted)]">
-            Add one topic per line. A new line appears automatically.
+            Добавляй по одной теме в строку. Новая строка появляется автоматически.
           </div>
           <div className="space-y-2">
             {topics.map((topic, index) => (
               <div key={index} className="flex items-end gap-2">
                 <Input
                   className="flex-1"
-                  placeholder={`Topic ${index + 1}`}
+                  placeholder={`Тема ${index + 1}`}
                   value={topic}
                   onChange={(event) => updateTopic(index, event.target.value)}
                   required={index === 0}
@@ -134,7 +134,7 @@ export function SessionLauncher() {
                     type="button"
                     onClick={() => removeTopic(index)}
                     className="flex h-[42px] w-[42px] shrink-0 items-center justify-center rounded-lg border border-[var(--danger)]/20 bg-[var(--danger-soft)] text-[var(--danger)] transition hover:bg-[var(--danger)]/20"
-                    aria-label={`Remove topic ${index + 1}`}
+                    aria-label={`Удалить тему ${index + 1}`}
                   >
                     <Trash2 size={14} />
                   </button>
@@ -151,7 +151,7 @@ export function SessionLauncher() {
         ) : null}
 
         <Button type="submit" loading={loading} className="w-full">
-          Start emulation
+          Запустить эмуляцию
         </Button>
       </form>
     </Card>

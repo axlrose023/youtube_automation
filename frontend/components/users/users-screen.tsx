@@ -85,7 +85,7 @@ export function UsersScreen() {
       setUsers(data.items);
       setListError(null);
     } catch {
-      setListError("Failed to load users.");
+      setListError("Не удалось загрузить пользователей.");
     } finally {
       setLoading(false);
     }
@@ -113,7 +113,7 @@ export function UsersScreen() {
     const password = form.password.trim();
 
     if (!username || !password) {
-      setFormError("Username and password are required.");
+      setFormError("Нужно заполнить логин и пароль.");
       return;
     }
 
@@ -123,10 +123,10 @@ export function UsersScreen() {
       await createUser({ ...form, username, password });
       setForm({ username: "", password: "", is_admin: false });
       setShowForm(false);
-      showNotice("User created successfully.");
+      showNotice("Пользователь создан.");
       await loadUsers();
     } catch (err) {
-      setFormError(getErrorMessage(err, "Failed to create user."));
+      setFormError(getErrorMessage(err, "Не удалось создать пользователя."));
     } finally {
       setCreating(false);
     }
@@ -150,17 +150,17 @@ export function UsersScreen() {
 
     try {
       await updateUser(user.id, { [field]: nextValue });
-      showNotice(`User ${field === "is_active" ? "status" : "role"} updated.`);
+      showNotice(field === "is_active" ? "Статус пользователя обновлен." : "Роль пользователя обновлена.");
       await loadUsers();
     } catch (err) {
-      setActionError(getErrorMessage(err, `Failed to update ${field}.`));
+      setActionError(getErrorMessage(err, `Не удалось обновить поле ${field}.`));
     }
   }
 
   function openDeleteConfirm(user: User) {
     const canDelete = !user.is_admin || currentUser?.id === user.id;
     if (!canDelete) {
-      setActionError("Admins cannot delete other admins.");
+      setActionError("Администраторы не могут удалять других администраторов.");
       return;
     }
     setConfirmState({ kind: "delete", user });
@@ -175,10 +175,10 @@ export function UsersScreen() {
         logout();
         return;
       }
-      showNotice("User deleted.");
+      showNotice("Пользователь удален.");
       await loadUsers();
     } catch (err) {
-      setActionError(getErrorMessage(err, "Failed to delete user."));
+      setActionError(getErrorMessage(err, "Не удалось удалить пользователя."));
     }
   }
 
@@ -189,9 +189,9 @@ export function UsersScreen() {
 
     if (confirmState.kind === "delete") {
       return {
-        title: "Delete user",
-        description: `Delete "${confirmState.user.username}"? The user will be soft-deleted and hidden from the list.`,
-        confirmLabel: "Delete",
+        title: "Удалить пользователя",
+        description: `Удалить "${confirmState.user.username}"? Пользователь будет мягко удален и скрыт из списка.`,
+        confirmLabel: "Удалить",
         confirmTone: "danger" as const,
       };
     }
@@ -200,17 +200,17 @@ export function UsersScreen() {
 
     if (field === "is_active") {
       return {
-        title: nextValue ? "Enable user" : "Disable user",
-        description: `${nextValue ? "Enable" : "Disable"} "${user.username}"?`,
-        confirmLabel: nextValue ? "Enable" : "Disable",
+        title: nextValue ? "Включить пользователя" : "Отключить пользователя",
+        description: `${nextValue ? "Включить" : "Отключить"} "${user.username}"?`,
+        confirmLabel: nextValue ? "Включить" : "Отключить",
         confirmTone: nextValue ? ("default" as const) : ("danger" as const),
       };
     }
 
     return {
-      title: "Promote user",
-      description: `Promote "${user.username}" to admin?`,
-      confirmLabel: "Promote",
+      title: "Повысить пользователя",
+      description: `Сделать "${user.username}" администратором?`,
+      confirmLabel: "Повысить",
       confirmTone: "default" as const,
     };
   }, [confirmState]);
@@ -236,8 +236,8 @@ export function UsersScreen() {
   if (!currentUser?.is_admin) {
     return (
       <EmptyState
-        title="Admin only"
-        description="Users management is available only for administrators."
+        title="Только для админа"
+        description="Управление пользователями доступно только администраторам."
       />
     );
   }
@@ -246,8 +246,8 @@ export function UsersScreen() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h2 className="text-lg font-semibold text-[var(--ink)]">Users management</h2>
-          <p className="mt-1 text-sm text-[var(--muted)]">Manage access and permissions</p>
+          <h2 className="text-lg font-semibold text-[var(--ink)]">Управление пользователями</h2>
+          <p className="mt-1 text-sm text-[var(--muted)]">Доступы и права</p>
         </div>
         <Button
           className="gap-1.5"
@@ -257,7 +257,7 @@ export function UsersScreen() {
           }}
         >
           <Plus size={15} />
-          New user
+          Новый пользователь
         </Button>
       </div>
 
@@ -270,12 +270,12 @@ export function UsersScreen() {
 
       {showForm ? (
         <Card className="p-5">
-          <div className="text-sm font-semibold text-[var(--ink)]">Create new user</div>
+          <div className="text-sm font-semibold text-[var(--ink)]">Создать пользователя</div>
           <form className="mt-4 grid grid-cols-1 items-end gap-3 sm:flex sm:flex-wrap" onSubmit={handleCreate}>
             <div className="w-full sm:w-48 sm:shrink-0">
               <Input
-                label="Username"
-                placeholder="Enter username"
+                label="Логин"
+                placeholder="Введите логин"
                 required
                 value={form.username}
                 onChange={(e) => setForm((prev) => ({ ...prev, username: e.target.value }))}
@@ -283,9 +283,9 @@ export function UsersScreen() {
             </div>
             <div className="w-full sm:w-48 sm:shrink-0">
               <Input
-                label="Password"
+                label="Пароль"
                 type="password"
-                placeholder="Enter password"
+                placeholder="Введите пароль"
                 required
                 value={form.password}
                 onChange={(e) => setForm((prev) => ({ ...prev, password: e.target.value }))}
@@ -298,10 +298,10 @@ export function UsersScreen() {
                 onChange={(e) => setForm((prev) => ({ ...prev, is_admin: e.target.checked }))}
                 className="accent-[var(--brand)]"
               />
-              Admin
+              Админ
             </label>
             <Button type="submit" loading={creating}>
-              Create
+              Создать
             </Button>
             <Button
               type="button"
@@ -311,7 +311,7 @@ export function UsersScreen() {
                 setFormError(null);
               }}
             >
-              Cancel
+              Отмена
             </Button>
           </form>
           {formError ? (
@@ -325,7 +325,7 @@ export function UsersScreen() {
       <Card className="overflow-hidden p-0">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--line)] px-5 py-4">
           <div className="flex items-center gap-2.5">
-            <div className="text-sm font-semibold text-[var(--ink)]">Users</div>
+            <div className="text-sm font-semibold text-[var(--ink)]">Пользователи</div>
             {!loading && !listError ? (
               <Badge tone="neutral">{users.length}</Badge>
             ) : null}
@@ -335,7 +335,7 @@ export function UsersScreen() {
               <Search size={13} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
               <input
                 type="text"
-                placeholder="Search..."
+                placeholder="Поиск..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="w-44 rounded-lg border border-[var(--line)] bg-[var(--panel)] py-1.5 pl-8 pr-3 text-sm text-[var(--ink)] outline-none transition placeholder:text-[var(--muted)] focus:border-[var(--brand)] focus:ring-2 focus:ring-[var(--brand-soft)]"
@@ -344,7 +344,7 @@ export function UsersScreen() {
           ) : null}
         </div>
 
-        {loading ? <Loader label="Loading users" /> : null}
+        {loading ? <Loader label="Загрузка пользователей" /> : null}
         {!loading && listError ? (
           <div className="p-5 text-sm text-[var(--danger)]">{listError}</div>
         ) : null}
@@ -359,17 +359,17 @@ export function UsersScreen() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="border-b border-[var(--line)] text-left text-xs text-[var(--muted)]">
-                  <th className="px-5 py-3 font-medium">User</th>
-                  <th className="px-5 py-3 font-medium">Status</th>
-                  <th className="px-5 py-3 font-medium">Role</th>
-                  <th className="px-5 py-3 font-medium text-right">Actions</th>
+                  <th className="px-5 py-3 font-medium">Пользователь</th>
+                  <th className="px-5 py-3 font-medium">Статус</th>
+                  <th className="px-5 py-3 font-medium">Роль</th>
+                  <th className="px-5 py-3 font-medium text-right">Действия</th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
                     <td colSpan={4} className="px-5 py-14 text-center text-sm text-[var(--muted)]">
-                      {search ? "No users match your search." : "No users yet. Click \"New user\" to get started."}
+                      {search ? "По вашему запросу ничего не найдено." : "Пользователей пока нет. Нажми «Новый пользователь», чтобы начать."}
                     </td>
                   </tr>
                 ) : null}
@@ -388,18 +388,18 @@ export function UsersScreen() {
                           </div>
                           <div className="flex items-center gap-2">
                             <span className="font-medium text-[var(--ink)]">{user.username}</span>
-                            {isSelf ? <Badge tone="info">you</Badge> : null}
+                            {isSelf ? <Badge tone="info">вы</Badge> : null}
                           </div>
                         </div>
                       </td>
                       <td className="px-5 py-3">
                         <Badge tone={user.is_active ? "success" : "warning"}>
-                          {user.is_active ? "active" : "disabled"}
+                          {user.is_active ? "активен" : "отключен"}
                         </Badge>
                       </td>
                       <td className="px-5 py-3">
                         <Badge tone={user.is_admin ? "warning" : "neutral"}>
-                          {user.is_admin ? "admin" : "user"}
+                          {user.is_admin ? "админ" : "пользователь"}
                         </Badge>
                       </td>
                       <td className="px-5 py-3">
@@ -411,7 +411,7 @@ export function UsersScreen() {
                             onClick={() => openToggleConfirm(user, "is_active")}
                           >
                             {user.is_active ? <UserRoundX size={13} /> : <UserRoundCheck size={13} />}
-                            {user.is_active ? "Disable" : "Enable"}
+                            {user.is_active ? "Отключить" : "Включить"}
                           </Button>
                           {!user.is_admin ? (
                             <Button
@@ -420,7 +420,7 @@ export function UsersScreen() {
                               onClick={() => openToggleConfirm(user, "is_admin")}
                             >
                               <ShieldCheck size={13} />
-                              Promote
+                              Повысить
                             </Button>
                           ) : null}
                           {canDelete ? (
@@ -430,7 +430,7 @@ export function UsersScreen() {
                               onClick={() => openDeleteConfirm(user)}
                             >
                               <Trash2 size={13} />
-                              Delete
+                              Удалить
                             </Button>
                           ) : null}
                         </div>

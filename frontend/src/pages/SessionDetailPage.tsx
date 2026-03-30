@@ -9,8 +9,8 @@ export function SessionDetailPage() {
   if (!sessionId) {
     return (
       <EmptyState
-        title="Session is missing"
-        description="No session id was provided in the route."
+        title="Сессия не указана"
+        description="В маршруте не передан идентификатор сессии."
       />
     );
   }

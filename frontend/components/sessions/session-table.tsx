@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { formatDate, formatMinutes, formatNumber } from "@/lib/format";
-import { getStatusTone } from "@/lib/metrics";
+import { formatSessionStatus, getStatusTone } from "@/lib/metrics";
 import type { EmulationAdCapture, EmulationHistoryItem } from "@/types/api";
 
 function resolveAdResult(capture: EmulationAdCapture): string | null {
@@ -52,21 +52,21 @@ function SessionCard({ item }: { item: EmulationHistoryItem }) {
             {item.session_id.slice(0, 12)}
           </Link>
           <div className="mt-0.5 truncate text-xs text-[var(--muted)]">
-            {item.requested_topics.slice(0, 2).join(", ")}
+            {item.requested_topics.join(", ") || "—"}
           </div>
         </div>
-        <Badge tone={getStatusTone(item.status) as never}>{item.status}</Badge>
+        <Badge tone={getStatusTone(item.status) as never}>{formatSessionStatus(item.status)}</Badge>
       </div>
 
       <div className="mt-3 grid grid-cols-3 gap-y-2 text-xs">
-        <Stat label="Requested" value={`${item.requested_duration_minutes}m / ${formatMinutes(item.elapsed_minutes)}`} />
-        <Stat label="Videos" value={formatNumber(item.watched_videos_count)} />
-        <Stat label="Ads" value={formatNumber(item.watched_ads_count)} />
-        <Stat label="Relevant">
+        <Stat label="Запрошено" value={`${item.requested_duration_minutes}m / ${formatMinutes(item.elapsed_minutes)}`} />
+        <Stat label="Видео" value={formatNumber(item.videos_watched)} />
+        <Stat label="Реклама" value={formatNumber(item.watched_ads_count)} />
+        <Stat label="Релевантно">
           <RelevantCell item={item} />
         </Stat>
-        <Stat label="Capture" value={`${item.captures.video_captures}/${item.captures.ads_total}`} />
-        <Stat label="Queued" value={formatDate(item.queued_at)} />
+        <Stat label="Записано" value={`${item.captures.video_captures}/${item.captures.ads_total}`} />
+        <Stat label="Очередь" value={formatDate(item.queued_at)} />
       </div>
     </Card>
   );
@@ -90,14 +90,14 @@ function DesktopTable({ items }: { items: EmulationHistoryItem[] }) {
         <table className="min-w-full text-sm">
           <thead>
             <tr className="border-b border-[var(--line)] text-left text-xs text-[var(--muted)]">
-              <th className="px-5 py-3 font-medium">Session</th>
-              <th className="px-5 py-3 font-medium">Status</th>
-              <th className="px-5 py-3 font-medium">Requested</th>
-              <th className="px-5 py-3 font-medium">Videos</th>
-              <th className="px-5 py-3 font-medium">Ads</th>
-              <th className="px-5 py-3 font-medium">Relevant</th>
-              <th className="px-5 py-3 font-medium">Capture</th>
-              <th className="px-5 py-3 font-medium">Queued</th>
+              <th className="px-5 py-3 font-medium">Сессия</th>
+              <th className="px-5 py-3 font-medium">Статус</th>
+              <th className="px-5 py-3 font-medium">Запрошено</th>
+              <th className="px-5 py-3 font-medium">Видео</th>
+              <th className="px-5 py-3 font-medium">Реклама</th>
+              <th className="px-5 py-3 font-medium">Релевантно</th>
+              <th className="px-5 py-3 font-medium">Записано</th>
+              <th className="px-5 py-3 font-medium">Очередь</th>
             </tr>
           </thead>
           <tbody>
@@ -108,16 +108,16 @@ function DesktopTable({ items }: { items: EmulationHistoryItem[] }) {
                     {item.session_id.slice(0, 12)}
                   </Link>
                   <div className="mt-0.5 text-xs text-[var(--muted)]">
-                    {item.requested_topics.slice(0, 2).join(", ")}
+                    {item.requested_topics.join(", ") || "—"}
                   </div>
                 </td>
                 <td className="px-5 py-3">
-                  <Badge tone={getStatusTone(item.status) as never}>{item.status}</Badge>
+                  <Badge tone={getStatusTone(item.status) as never}>{formatSessionStatus(item.status)}</Badge>
                 </td>
                 <td className="px-5 py-3 text-[var(--muted)]">
                   {item.requested_duration_minutes}m / {formatMinutes(item.elapsed_minutes)}
                 </td>
-                <td className="px-5 py-3 text-[var(--muted)]">{formatNumber(item.watched_videos_count)}</td>
+                <td className="px-5 py-3 text-[var(--muted)]">{formatNumber(item.videos_watched)}</td>
                 <td className="px-5 py-3 text-[var(--muted)]">{formatNumber(item.watched_ads_count)}</td>
                 <td className="px-5 py-3">
                   <RelevantCell item={item} />

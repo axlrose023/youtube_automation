@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { EmptyState } from "@/components/ui/empty-state";
 import { Loader } from "@/components/ui/loader";
-import { getEmulationHistory, getEmulationStatus } from "@/lib/api";
-import type { EmulationHistoryItem } from "@/types/api";
+import { getEmulationHistory, getEmulationStatusBatch } from "@/lib/api";
+import type { EmulationHistoryItem, EmulationSessionStatus } from "@/types/api";
 import {
   SessionFilters,
   type SessionFiltersValue,
@@ -20,6 +20,61 @@ const initialFilters: SessionFiltersValue = {
 
 const HISTORY_POOL_PAGE_SIZE = 100;
 const HISTORY_POOL_MAX_PAGES = 5;
+
+function areItemsEquivalent(left: EmulationHistoryItem, right: EmulationHistoryItem) {
+  return (
+    left.status === right.status &&
+    left.post_processing_status === right.post_processing_status &&
+    (left.post_processing_progress?.done ?? null) === (right.post_processing_progress?.done ?? null) &&
+    (left.post_processing_progress?.total ?? null) === (right.post_processing_progress?.total ?? null) &&
+    left.elapsed_minutes === right.elapsed_minutes &&
+    left.bytes_downloaded === right.bytes_downloaded &&
+    left.total_duration_seconds === right.total_duration_seconds &&
+    left.videos_watched === right.videos_watched &&
+    left.watched_videos_count === right.watched_videos_count &&
+    left.watched_ads_count === right.watched_ads_count &&
+    left.mode === right.mode &&
+    left.fatigue === right.fatigue &&
+    left.error === right.error &&
+    left.captures.ads_total === right.captures.ads_total &&
+    left.captures.video_captures === right.captures.video_captures &&
+    left.captures.screenshot_fallbacks === right.captures.screenshot_fallbacks &&
+    left.topics_searched.join("\u0000") === right.topics_searched.join("\u0000")
+  );
+}
+
+function mergeLiveItem(item: EmulationHistoryItem, status: EmulationSessionStatus): EmulationHistoryItem {
+  const videoCaptures = status.watched_ads.filter(
+    (ad) => ad.capture?.video_status === "completed",
+  ).length;
+  const screenshotFallbacks = status.watched_ads.filter(
+    (ad) =>
+      (ad.capture?.screenshot_paths?.length ?? 0) > 0 &&
+      ad.capture?.video_status !== "completed",
+  ).length;
+
+  return {
+    ...item,
+    status: status.status,
+    post_processing_status: status.post_processing_status ?? item.post_processing_status,
+    post_processing_progress: status.post_processing_progress ?? item.post_processing_progress,
+    elapsed_minutes: status.elapsed_minutes ?? item.elapsed_minutes,
+    bytes_downloaded: status.bytes_downloaded ?? item.bytes_downloaded,
+    total_duration_seconds: status.total_duration_seconds ?? item.total_duration_seconds,
+    videos_watched: status.videos_watched ?? item.videos_watched,
+    watched_videos_count: status.watched_videos_count ?? item.watched_videos_count,
+    watched_ads_count: status.watched_ads_count ?? item.watched_ads_count,
+    topics_searched: status.topics_searched ?? item.topics_searched,
+    mode: status.mode ?? item.mode,
+    fatigue: status.fatigue ?? item.fatigue,
+    error: status.error ?? item.error,
+    captures: {
+      ads_total: status.watched_ads_count,
+      video_captures: videoCaptures,
+      screenshot_fallbacks: screenshotFallbacks,
+    },
+  };
+}
 
 export function SessionsScreen() {
   const [allItems, setAllItems] = useState<EmulationHistoryItem[]>([]);
@@ -52,7 +107,7 @@ export function SessionsScreen() {
 
       setAllItems(items);
     } catch (err) {
-      setError("Failed to load sessions.");
+      setError("Не удалось загрузить сессии.");
     } finally {
       setLoading(false);
     }
@@ -110,91 +165,90 @@ export function SessionsScreen() {
     return filteredItems.slice(start, start + filters.pageSize);
   }, [currentPage, filteredItems, filters.pageSize]);
 
+  const trackedItems = useMemo(
+    () => paginatedItems.map((item) => liveItems[item.session_id] ?? item),
+    [liveItems, paginatedItems],
+  );
+  const activeItems = useMemo(
+    () => trackedItems.filter((item) => ["queued", "running", "stopping"].includes(item.status)),
+    [trackedItems],
+  );
+  const activePollKey = useMemo(
+    () =>
+      activeItems
+        .map((item) => `${item.session_id}:${item.status}:${item.post_processing_status ?? ""}`)
+        .join("|"),
+    [activeItems],
+  );
+
   useEffect(() => {
-    const activeItems = paginatedItems.filter((item) =>
-      ["queued", "running", "stopping"].includes(item.status),
-    );
-
     if (activeItems.length === 0) {
-      setLiveItems((prev) => {
-        if (Object.keys(prev).length === 0) {
-          return prev;
-        }
-
-        const next = { ...prev };
-        let changed = false;
-        for (const key of Object.keys(next)) {
-          if (!activeItems.some((item) => item.session_id === key)) {
-            delete next[key];
-            changed = true;
-          }
-        }
-        return changed ? next : prev;
-      });
+      setLiveItems((prev) => (Object.keys(prev).length === 0 ? prev : {}));
       return;
     }
 
     let cancelled = false;
 
     const hydrateLive = async () => {
-      const results = await Promise.all(
-        activeItems.map(async (item) => {
-          try {
-            const status = await getEmulationStatus(item.session_id);
-            const videoCaptures = status.watched_ads.filter(
-              (ad) => ad.capture?.video_status === "completed",
-            ).length;
-            const screenshotFallbacks = status.watched_ads.filter(
-              (ad) =>
-                (ad.capture?.screenshot_paths?.length ?? 0) > 0 &&
-                ad.capture?.video_status !== "completed",
-            ).length;
-
-            const merged: EmulationHistoryItem = {
-              ...item,
-              status: status.status,
-              elapsed_minutes: status.elapsed_minutes ?? item.elapsed_minutes,
-              bytes_downloaded: status.bytes_downloaded ?? item.bytes_downloaded,
-              total_duration_seconds: status.total_duration_seconds ?? item.total_duration_seconds,
-              videos_watched: status.videos_watched ?? item.videos_watched,
-              watched_videos_count: status.watched_videos_count ?? item.watched_videos_count,
-              watched_ads_count: status.watched_ads_count ?? item.watched_ads_count,
-              topics_searched: status.topics_searched ?? item.topics_searched,
-              watched_videos: status.watched_videos ?? item.watched_videos,
-              watched_ads: status.watched_ads ?? item.watched_ads,
-              watched_ads_analytics: status.watched_ads_analytics ?? item.watched_ads_analytics,
-              mode: status.mode ?? item.mode,
-              fatigue: status.fatigue ?? item.fatigue,
-              error: status.error ?? item.error,
-              captures: {
-                ads_total: status.watched_ads_count,
-                video_captures: videoCaptures,
-                screenshot_fallbacks: screenshotFallbacks,
-              },
-            };
-
-            return [item.session_id, merged] as const;
-          } catch {
-            return null;
-          }
-        }),
-      );
+      const activeIds = new Set(activeItems.map((item) => item.session_id));
+      let statuses: Record<string, EmulationSessionStatus> = {};
+      try {
+        const response = await getEmulationStatusBatch([...activeIds]);
+        statuses = response.statuses;
+      } catch {
+        return;
+      }
 
       if (cancelled) {
         return;
       }
 
-      setLiveItems((prev) => {
-        const next = { ...prev };
-        let changed = false;
+      const mergedById: Record<string, EmulationHistoryItem> = {};
+      for (const item of activeItems) {
+        const status = statuses[item.session_id];
+        if (!status) {
+          continue;
+        }
+        mergedById[item.session_id] = mergeLiveItem(item, status);
+      }
 
-        for (const result of results) {
-          if (!result) {
+      setAllItems((prev) => {
+        let changed = false;
+        const next = prev.map((item) => {
+          const merged = mergedById[item.session_id];
+          if (!merged) {
+            return item;
+          }
+          if (!areItemsEquivalent(item, merged)) {
+            changed = true;
+            return merged;
+          }
+          return item;
+        });
+        return changed ? next : prev;
+      });
+
+      setLiveItems((prev) => {
+        const next: Record<string, EmulationHistoryItem> = {};
+        let changed = Object.keys(prev).some((key) => !activeIds.has(key));
+
+        for (const sessionId of activeIds) {
+          if (prev[sessionId]) {
+            next[sessionId] = prev[sessionId];
+          }
+        }
+
+        for (const item of activeItems) {
+          const merged = mergedById[item.session_id];
+          if (!merged) {
             continue;
           }
-          const [sessionId, merged] = result;
-          next[sessionId] = merged;
-          changed = true;
+          const sessionId = item.session_id;
+          if (!next[sessionId] || !areItemsEquivalent(next[sessionId], merged)) {
+            changed = true;
+            next[sessionId] = merged;
+            continue;
+          }
         }
 
         return changed ? next : prev;
@@ -210,12 +264,9 @@ export function SessionsScreen() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [paginatedItems]);
+  }, [activePollKey]);
 
-  const displayedItems = useMemo(
-    () => paginatedItems.map((item) => liveItems[item.session_id] ?? item),
-    [liveItems, paginatedItems],
-  );
+  const displayedItems = trackedItems;
 
   const pageNumbers = useMemo(() => {
     const start = Math.max(1, currentPage - 2);
@@ -227,8 +278,8 @@ export function SessionsScreen() {
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold text-[var(--ink)]">Emulation sessions</h2>
-        <p className="mt-1 text-sm text-[var(--muted)]">Browse and filter session history</p>
+        <h2 className="text-lg font-semibold text-[var(--ink)]">Сессии эмуляции</h2>
+        <p className="mt-1 text-sm text-[var(--muted)]">Просмотр и фильтрация истории сессий</p>
       </div>
 
       <SessionFilters
@@ -237,24 +288,24 @@ export function SessionsScreen() {
         onReset={() => setFilters(initialFilters)}
       />
 
-      {loading ? <Loader label="Loading sessions" /> : null}
+      {loading ? <Loader label="Загрузка сессий" /> : null}
       {!loading && error ? (
-        <EmptyState title="Sessions unavailable" description={error} />
+        <EmptyState title="Сессии недоступны" description={error} />
       ) : null}
       {!loading && !error && filteredItems.length === 0 ? (
         <EmptyState
-          title="No sessions matched"
-          description="Adjust the filters or start a new emulation from the dashboard."
+          title="Ничего не найдено"
+          description="Измени фильтры или запусти новую эмуляцию из дашборда."
         />
       ) : null}
       {!loading && !error && filteredItems.length > 0 ? (
         <>
           <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-[var(--muted)]">
             <div>
-              Showing {(currentPage - 1) * filters.pageSize + 1}-
-              {Math.min(currentPage * filters.pageSize, filteredItems.length)} of {filteredItems.length} sessions
+              Показано {(currentPage - 1) * filters.pageSize + 1}-
+              {Math.min(currentPage * filters.pageSize, filteredItems.length)} из {filteredItems.length} сессий
             </div>
-            <div>Pool: {allItems.length}</div>
+            <div>В выборке: {allItems.length}</div>
           </div>
           <SessionTable items={displayedItems} />
         </>
@@ -262,7 +313,7 @@ export function SessionsScreen() {
 
       <div className="flex items-center justify-between">
         <div className="text-xs text-[var(--muted)]">
-          Page {currentPage} of {totalPages}
+          Страница {currentPage} из {totalPages}
         </div>
         <div className="flex flex-wrap gap-1.5">
           <Button
@@ -271,7 +322,7 @@ export function SessionsScreen() {
             onClick={() => setPage((prev) => Math.max(1, prev - 1))}
             className="px-3 py-1.5 text-xs"
           >
-            Prev
+            Назад
           </Button>
           {pageNumbers.map((pageNumber) => (
             <Button
@@ -289,7 +340,7 @@ export function SessionsScreen() {
             onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
             className="px-3 py-1.5 text-xs"
           >
-            Next
+            Далее
           </Button>
         </div>
       </div>

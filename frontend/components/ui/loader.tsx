@@ -1,4 +1,4 @@
-export function Loader({ label = "Loading" }: { label?: string }) {
+export function Loader({ label = "Загрузка" }: { label?: string }) {
   return (
     <div className="flex min-h-[200px] flex-col items-center justify-center gap-4 rounded-xl border border-[var(--line)] bg-[var(--panel)]">
       <div className="relative h-10 w-10">

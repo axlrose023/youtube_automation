@@ -33,7 +33,7 @@ export function ConfirmDialog({
         <p className="mt-2 text-sm leading-relaxed text-[var(--muted)]">{description}</p>
         <div className="mt-6 flex justify-end gap-3">
           <Button type="button" variant="ghost" onClick={onCancel} disabled={loading}>
-            Cancel
+            Отмена
           </Button>
           <Button
             type="button"

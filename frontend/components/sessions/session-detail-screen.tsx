@@ -2,8 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
+  Check,
   ChevronDown,
   ChevronUp,
+  Clock,
   FileImage,
   Film,
   FolderOpen,
@@ -18,16 +20,17 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Loader } from "@/components/ui/loader";
+import { apiClient } from "@/lib/api-client";
 import {
   getEmulationDetail,
   getEmulationStatus,
   resumeEmulation,
   retryEmulation,
+  streamEmulationStatus,
   stopEmulation,
 } from "@/lib/api";
 import { formatBytes, formatDate, formatMinutes, formatNumber } from "@/lib/format";
-import { getStatusTone } from "@/lib/metrics";
-import { getAccessToken } from "@/lib/tokens";
+import { formatSessionStatus, getStatusTone } from "@/lib/metrics";
 import type {
   EmulationAdCapture,
   EmulationHistoryDetail,
@@ -81,18 +84,37 @@ function resolveAnalysisResult(capture: EmulationAdCapture | null) {
 
 function getAnalysisLabel(result: string | null, status?: string | null) {
   if (result === "relevant") {
-    return "Relevant";
+    return "Релевантно";
   }
   if (result === "not_relevant") {
-    return "Not relevant";
+    return "Не релевантно";
   }
   if (status === "failed") {
-    return "Analysis failed";
+    return "Ошибка анализа";
   }
   if (status === "pending") {
-    return "Analysis pending";
+    return "Анализ ожидает";
   }
-  return "No analysis";
+  return "Нет анализа";
+}
+
+function formatCaptureStatus(status: string | null | undefined) {
+  switch (status) {
+    case "completed":
+      return "завершено";
+    case "pending":
+      return "ожидается";
+    case "failed":
+      return "ошибка";
+    case "skipped":
+      return "пропущено";
+    case "fallback_screenshots":
+      return "скриншоты";
+    case "no_src":
+      return "без источника";
+    default:
+      return status ?? "—";
+  }
 }
 
 function getBaseName(value: string | null | undefined) {
@@ -118,36 +140,50 @@ function getLandingHost(value: string | null | undefined) {
 
 function getPostProcessingLabel(
   status: string | null | undefined,
+  sessionStatus: string | null | undefined,
+  watchedAdsCount: number,
   progress?: { done: number; total: number } | null,
 ) {
   if (!status) {
+    if (
+      sessionStatus === "completed" ||
+      sessionStatus === "failed" ||
+      sessionStatus === "stopped"
+    ) {
+      if (watchedAdsCount === 0) {
+        return "Анализ рекламы не требуется";
+      }
+      return "Состояние анализа рекламы недоступно";
+    }
     return null;
   }
 
+  if (status === "queued") {
+    if (progress && progress.total > 0) {
+      return `Анализ рекламы в очереди (${progress.done}/${progress.total})`;
+    }
+    return "Анализ рекламы в очереди";
+  }
   if (status === "running") {
     if (progress && progress.total > 0) {
-      return `Ad analysis in progress (${progress.done}/${progress.total})`;
+      return `Анализ рекламы выполняется (${progress.done}/${progress.total})`;
     }
-    return "Ad analysis in progress";
+    return "Анализ рекламы выполняется";
   }
   if (status === "completed") {
     if (progress && progress.total > 0) {
-      return `Ad analysis complete (${progress.done}/${progress.total})`;
+      return `Анализ рекламы завершен (${progress.done}/${progress.total})`;
     }
-    return "Ad analysis complete";
+    return "Анализ рекламы завершен";
   }
   if (status === "failed") {
-    return "Ad analysis finished with errors";
+    return "Анализ рекламы завершился с ошибками";
   }
   return null;
 }
 
-function buildMediaUrl(value: string | null | undefined) {
+function buildMediaPath(value: string | null | undefined) {
   if (!value) {
-    return null;
-  }
-  const accessToken = getAccessToken();
-  if (!accessToken) {
     return null;
   }
   const encoded = value
@@ -155,7 +191,70 @@ function buildMediaUrl(value: string | null | undefined) {
     .filter(Boolean)
     .map((segment) => encodeURIComponent(segment))
     .join("/");
-  return `/api/emulation/media/${encoded}?access_token=${encodeURIComponent(accessToken)}`;
+  return `/emulation/media/${encoded}`;
+}
+
+async function downloadProtectedMedia(
+  value: string | null | undefined,
+  filename: string,
+) {
+  const mediaPath = buildMediaPath(value);
+  if (!mediaPath) {
+    return;
+  }
+
+  try {
+    const response = await apiClient.get<Blob>(mediaPath, { responseType: "blob" });
+    const objectUrl = URL.createObjectURL(response.data);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (error) {
+    console.error("Не удалось скачать защищенный медиафайл", error);
+  }
+}
+
+function useProtectedMediaBlobUrl(value: string | null | undefined) {
+  const mediaPath = useMemo(() => buildMediaPath(value), [value]);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!mediaPath) {
+      setBlobUrl(null);
+      return;
+    }
+
+    let active = true;
+    let objectUrl: string | null = null;
+
+    void apiClient
+      .get<Blob>(mediaPath, { responseType: "blob" })
+      .then((response) => {
+        if (!active) {
+          return;
+        }
+        objectUrl = URL.createObjectURL(response.data);
+        setBlobUrl(objectUrl);
+      })
+      .catch(() => {
+        if (active) {
+          setBlobUrl(null);
+        }
+      });
+
+    return () => {
+      active = false;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [mediaPath]);
+
+  return blobUrl;
 }
 
 function buildLiveCapture(ad: EmulationWatchedAd | null): EmulationAdCapture | null {
@@ -177,10 +276,192 @@ function buildLiveCapture(ad: EmulationWatchedAd | null): EmulationAdCapture | n
     video_src_url: capture.video_src_url ?? null,
     video_file: capture.video_file ?? null,
     video_status: capture.video_status ?? "pending",
-    analysis_status: null,
-    analysis_summary: null,
+    analysis_status: capture.analysis_status ?? "pending",
+    analysis_summary: capture.analysis_summary ?? null,
     screenshot_paths: capture.screenshot_paths ?? [],
   };
+}
+
+function CaptureMediaPreview({
+  capture,
+  index,
+  totalSegments,
+}: {
+  capture: EmulationAdCapture;
+  index: number;
+  totalSegments: number;
+}) {
+  const videoUrl = useProtectedMediaBlobUrl(capture.video_file);
+  const firstScreenshot = capture.screenshot_paths[0]?.file_path;
+  const screenshotUrl = useProtectedMediaBlobUrl(firstScreenshot);
+  const landingFileName = `${getBaseName(capture.landing_dir) || "landing"}.html`;
+  const canDownloadLanding = Boolean(capture.landing_dir && capture.landing_status === "completed");
+
+  return (
+    <div className="space-y-3 rounded-lg bg-[var(--bg-soft)] p-4">
+      {totalSegments > 1 ? (
+        <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">
+          Сегмент {index + 1}
+        </div>
+      ) : null}
+
+      <div className="grid gap-3 lg:grid-cols-3">
+        <div className="relative min-h-36 overflow-hidden rounded-lg bg-[var(--panel-soft)] p-4">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(108,92,231,0.06),_transparent_55%)]" />
+          <div className="relative flex h-full flex-col justify-between">
+            <div className="flex items-center justify-between">
+              <Badge tone={capture.video_status === "completed" ? "success" : "warning"}>
+                {capture.video_status === "completed" ? "видео сохранено" : "видео ожидается"}
+              </Badge>
+              <Film size={15} className="text-[var(--muted)]" />
+            </div>
+            {videoUrl ? (
+              <div className="py-3">
+                <video
+                  key={videoUrl}
+                  className="h-32 w-full rounded-lg bg-slate-900 object-cover"
+                  controls
+                  preload="metadata"
+                  src={videoUrl}
+                  onLoadedMetadata={(event) => {
+                    try {
+                      event.currentTarget.currentTime = 0;
+                    } catch {
+                      // Ignore browser seek restrictions
+                    }
+                  }}
+                />
+              </div>
+            ) : (
+              <div className="flex items-center justify-center py-4">
+                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[var(--brand-soft)]">
+                  <PlayCircle size={28} className="text-[var(--brand)]" />
+                </div>
+              </div>
+            )}
+            <div>
+              <div className="text-xs font-semibold text-[var(--ink)]">Видео рекламы</div>
+              <div className="mt-0.5 truncate text-xs text-[var(--muted)]">
+                {getBaseName(capture.video_file) || "video.webm"}
+              </div>
+              {videoUrl ? (
+                <a
+                  href={videoUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1.5 inline-flex text-xs font-medium text-[var(--brand)] hover:underline"
+                >
+                  Открыть видео
+                </a>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        <div className="min-h-36 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4">
+          <div className="flex items-center justify-between">
+            <Badge tone={capture.screenshot_paths.length > 0 ? "info" : "neutral"}>
+              {capture.screenshot_paths.length} скриншотов
+            </Badge>
+            <FileImage size={15} className="text-[var(--muted)]" />
+          </div>
+          <div className="mt-3">
+            {screenshotUrl ? (
+              <a href={screenshotUrl} target="_blank" rel="noreferrer">
+                <img
+                  src={screenshotUrl}
+                  alt="Превью скриншота рекламы"
+                  className="h-24 w-full rounded-lg border border-[var(--line)] object-cover"
+                />
+              </a>
+            ) : (
+              <div className="flex items-end gap-2">
+                {[0, 1, 2].map((layer) => (
+                  <div
+                    key={layer}
+                    className={`rounded-lg border border-[var(--line)] bg-[var(--bg-soft)] ${
+                      layer === 0 ? "h-20 w-16" : layer === 1 ? "h-16 w-12" : "h-12 w-10"
+                    }`}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="mt-3 text-xs font-semibold text-[var(--ink)]">Лента скриншотов</div>
+          <div className="mt-0.5 flex items-center justify-between gap-2">
+            <div className="text-xs text-[var(--muted)]">Резервные кадры из рекламы.</div>
+            {screenshotUrl ? (
+              <a
+                href={screenshotUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="shrink-0 text-xs font-medium text-[var(--brand)] hover:underline"
+              >
+                Открыть
+              </a>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="min-h-36 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4">
+          <div className="flex items-center justify-between">
+            <Badge tone={capture.landing_status === "completed" ? "info" : "warning"}>
+              {capture.landing_status === "completed" ? "лендинг сохранен" : "лендинг ожидается"}
+            </Badge>
+            <Globe size={15} className="text-[var(--muted)]" />
+          </div>
+          <div className="mt-4 overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--bg-soft)]">
+            <div className="flex items-center gap-1.5 border-b border-[var(--line)] px-3 py-1.5">
+              <span className="h-2 w-2 rounded-full bg-[var(--danger)]" />
+              <span className="h-2 w-2 rounded-full bg-[var(--warning)]" />
+              <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
+            </div>
+            <div className="px-3 py-3">
+              <div className="flex items-center gap-2 text-xs font-semibold text-[var(--ink)]">
+                <FolderOpen size={13} />
+                {getLandingHost(capture.landing_url) || "лендинг"}
+              </div>
+              <div className="mt-1 truncate text-xs text-[var(--muted)]">
+                {getBaseName(capture.landing_dir) || "landing/"}
+              </div>
+            </div>
+          </div>
+          <div className="mt-3 text-xs text-[var(--muted)]">
+            Сохраненный HTML-снимок.
+          </div>
+          {canDownloadLanding ? (
+            <button
+              type="button"
+              onClick={() => void downloadProtectedMedia(
+                capture.landing_dir ? `${capture.landing_dir}/index.html` : null,
+                landingFileName,
+              )}
+              className="mt-2 inline-flex text-xs font-medium text-[var(--brand)] hover:underline"
+            >
+              Скачать HTML лендинга
+            </button>
+          ) : (
+            <div className="mt-2 text-xs text-[var(--muted)]">
+              HTML лендинга недоступен для этой записи.
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function shouldTrackLiveStatus(
+  status: string | null | undefined,
+  postProcessingStatus: string | null | undefined,
+) {
+  return (
+    status === "queued" ||
+    status === "running" ||
+    status === "stopping" ||
+    postProcessingStatus === "queued" ||
+    postProcessingStatus === "running"
+  );
 }
 
 export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
@@ -192,38 +473,23 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
   const [activeTab, setActiveTab] = useState<"overview" | "ads">("overview");
   const [expandedAd, setExpandedAd] = useState<number | null>(null);
   const [showAllAds, setShowAllAds] = useState(false);
+  const [adFilter, setAdFilter] = useState<"all" | "relevant" | "not_relevant" | "pending">("all");
+  const [adSort, setAdSort] = useState<"position" | "duration">("position");
 
   useEffect(() => {
     let active = true;
-    let timer: number | undefined;
 
-    async function pull() {
+    async function loadDetail() {
       try {
         const data = await getEmulationDetail(sessionId);
         if (!active) {
           return;
         }
+        setError(null);
         setDetail(data);
-        const shouldPollRuntime =
-          data.status === "running" ||
-          data.status === "queued" ||
-          data.post_processing_status === "running";
-
-        if (shouldPollRuntime) {
-          const runtime = await getEmulationStatus(sessionId);
-          if (!active) {
-            return;
-          }
-          setLiveStatus(runtime);
-          timer = window.setTimeout(() => {
-            void pull();
-          }, 2500);
-        } else {
-          setLiveStatus(null);
-        }
       } catch (err) {
         if (active) {
-          setError("Failed to load session detail.");
+          setError("Не удалось загрузить детали сессии.");
         }
       } finally {
         if (active) {
@@ -232,14 +498,129 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
       }
     }
 
-    void pull();
+    void loadDetail();
     return () => {
       active = false;
-      if (timer) {
-        window.clearTimeout(timer);
-      }
     };
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!detail) {
+      return;
+    }
+
+    if (!shouldTrackLiveStatus(detail.status, detail.post_processing_status ?? null)) {
+      setLiveStatus(null);
+      return;
+    }
+
+    let active = true;
+    let fallbackTimer: number | undefined;
+    let streamClosedGracefully = false;
+    let syncingTerminalDetail = false;
+
+    const syncTerminalDetail = async () => {
+      if (!active || syncingTerminalDetail) {
+        return;
+      }
+      syncingTerminalDetail = true;
+      try {
+        const nextDetail = await getEmulationDetail(sessionId);
+        if (!active) {
+          return;
+        }
+        setError(null);
+        setDetail(nextDetail);
+        if (
+          !shouldTrackLiveStatus(
+            nextDetail.status,
+            nextDetail.post_processing_status ?? null,
+          )
+        ) {
+          setLiveStatus(null);
+        }
+      } catch {
+        if (active) {
+          setError("Не удалось загрузить детали сессии.");
+        }
+      } finally {
+        syncingTerminalDetail = false;
+      }
+    };
+
+    const startPollingFallback = () => {
+      const poll = async () => {
+        try {
+          const runtime = await getEmulationStatus(sessionId);
+          if (!active) {
+            return;
+          }
+          setError(null);
+          setLiveStatus(runtime);
+
+          if (!shouldTrackLiveStatus(runtime.status, runtime.post_processing_status ?? null)) {
+            await syncTerminalDetail();
+            return;
+          }
+
+          fallbackTimer = window.setTimeout(() => {
+            void poll();
+          }, 2500);
+        } catch {
+          if (active) {
+            setError("Не удалось загрузить живой статус сессии.");
+          }
+        }
+      };
+
+      void poll();
+    };
+
+    const stopStream = streamEmulationStatus(sessionId, {
+      onStatus: (status) => {
+        if (!active) {
+          return;
+        }
+        setError(null);
+        setLiveStatus(status);
+        if (!shouldTrackLiveStatus(status.status, status.post_processing_status ?? null)) {
+          void syncTerminalDetail();
+        }
+      },
+      onClose: () => {
+        if (!active) {
+          return;
+        }
+        streamClosedGracefully = true;
+        void syncTerminalDetail();
+      },
+      onError: () => {
+        if (!active || streamClosedGracefully) {
+          return;
+        }
+        startPollingFallback();
+      },
+    });
+
+    return () => {
+      active = false;
+      stopStream();
+      if (fallbackTimer) {
+        window.clearTimeout(fallbackTimer);
+      }
+    };
+  }, [detail?.status, detail?.post_processing_status, sessionId]);
+
+  const showLiveRuntime = useMemo(
+    () =>
+      liveStatus
+        ? shouldTrackLiveStatus(
+            liveStatus.status,
+            liveStatus.post_processing_status ?? null,
+          )
+        : false,
+    [liveStatus],
+  );
 
   const session = useMemo<EmulationHistoryDetail>(() => {
     if (!detail) {
@@ -267,15 +648,24 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
         liveStatus.post_processing_progress ?? detail.post_processing_progress,
       elapsed_minutes: liveStatus.elapsed_minutes ?? detail.elapsed_minutes,
       bytes_downloaded: liveStatus.bytes_downloaded,
-      topics_searched: liveStatus.topics_searched,
+      requested_topics:
+        liveStatus.requested_topics.length > 0
+          ? liveStatus.requested_topics
+          : detail.requested_topics,
+      topics_searched:
+        liveStatus.topics_searched.length > 0
+          ? liveStatus.topics_searched
+          : detail.topics_searched,
       videos_watched: liveStatus.videos_watched,
       watched_videos_count: liveStatus.watched_videos_count,
       watched_videos: liveStatus.watched_videos,
       watched_ads_count: liveStatus.watched_ads_count,
       watched_ads: liveStatus.watched_ads,
       watched_ads_analytics: liveStatus.watched_ads_analytics,
+      total_duration_seconds: liveStatus.total_duration_seconds ?? detail.total_duration_seconds,
       mode: liveStatus.mode ?? detail.mode,
       fatigue: liveStatus.fatigue ?? detail.fatigue,
+      error: liveStatus.error ?? detail.error,
       captures: {
         ads_total: liveStatus.watched_ads_count,
         video_captures: liveVideoCaptures,
@@ -357,10 +747,35 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
     ];
   }, [session?.watched_videos, liveStatus?.current_watch]);
 
+  const filteredAdCards = useMemo(() => {
+    let cards = adCards;
+
+    if (adFilter !== "all") {
+      cards = cards.filter((item) => {
+        const result = resolveAnalysisResult(item.primaryCapture);
+        if (adFilter === "relevant") return result === "relevant";
+        if (adFilter === "not_relevant") return result === "not_relevant";
+        return result === null && item.primaryCapture?.analysis_status !== "failed";
+      });
+    }
+
+    if (adSort === "duration") {
+      cards = [...cards].sort((a, b) => {
+        const dA = a.ad?.ad_duration_seconds ?? a.primaryCapture?.ad_duration_seconds ?? 0;
+        const dB = b.ad?.ad_duration_seconds ?? b.primaryCapture?.ad_duration_seconds ?? 0;
+        return dB - dA;
+      });
+    }
+
+    return cards;
+  }, [adCards, adFilter, adSort]);
+
   const hasAds = adCards.length > 0;
-  const visibleAdCards = showAllAds ? adCards : adCards.slice(0, 4);
+  const visibleAdCards = showAllAds ? filteredAdCards : filteredAdCards.slice(0, 4);
   const postProcessingLabel = getPostProcessingLabel(
     session?.post_processing_status,
+    session?.status,
+    session?.watched_ads_count ?? 0,
     session?.post_processing_progress,
   );
   const adAnalysisSummary = useMemo(() => {
@@ -400,36 +815,47 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
       const nextDetail = await getEmulationDetail(sessionId);
       setDetail(nextDetail);
     } catch (err) {
-      setError(`Failed to ${action} session.`);
+      const actionLabel =
+        action === "stop"
+          ? "остановить"
+          : action === "retry"
+            ? "перезапустить"
+            : "продолжить";
+      setError(`Не удалось ${actionLabel} сессию.`);
     }
   }
 
   if (loading) {
-    return <Loader label="Loading session detail" />;
+    return <Loader label="Загрузка деталей сессии" />;
   }
 
-  if (error || !session) {
+  if (!session) {
     return (
       <EmptyState
-        title="Session unavailable"
-        description={error ?? "No detail returned."}
+        title="Сессия недоступна"
+        description={error ?? "Детали не были получены."}
       />
     );
   }
 
   return (
     <div className="space-y-6">
+      {error ? (
+        <Card className="border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          {error}
+        </Card>
+      ) : null}
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <Link to="/sessions" className="inline-flex items-center gap-1.5 text-sm text-[var(--brand)] transition hover:text-[var(--brand-strong)]">
             <ArrowLeft size={14} />
-            Sessions
+            Сессии
           </Link>
           <h2 className="mt-2 text-lg font-semibold text-[var(--ink)]">
-            Session {session.session_id.slice(0, 12)}
+            Сессия {session.session_id.slice(0, 12)}
           </h2>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <Badge tone={getStatusTone(session.status) as never}>{session.status}</Badge>
+            <Badge tone={getStatusTone(session.status) as never}>{formatSessionStatus(session.status)}</Badge>
             <span className="text-xs text-[var(--muted)]">
               {formatDate(session.queued_at)}
             </span>
@@ -441,48 +867,52 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
         <div className="flex flex-wrap gap-2">
           {session.status === "running" ? (
             <Button variant="danger" onClick={() => void handleAction("stop")}>
-              Stop
+              Остановить
             </Button>
           ) : null}
           {session.status === "failed" ? (
             <Button variant="secondary" onClick={() => void handleAction("retry")}>
-              Retry
+              Повторить
             </Button>
           ) : null}
           {session.status === "stopped" ? (
-            <Button onClick={() => void handleAction("resume")}>Resume remaining</Button>
+            <Button onClick={() => void handleAction("resume")}>Продолжить остаток</Button>
           ) : null}
         </div>
       </div>
 
       <div className="metric-grid">
         <Card>
-          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Requested</div>
+          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Запрошено</div>
           <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">{session.requested_duration_minutes}m</div>
-          <div className="mt-1 text-xs text-[var(--muted)]">Actual {formatMinutes(session.elapsed_minutes)}</div>
+          <div className="mt-1 text-xs text-[var(--muted)]">Фактически {formatMinutes(session.elapsed_minutes)}</div>
         </Card>
         <Card>
-          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Videos</div>
-          <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">{formatNumber(session.watched_videos_count)}</div>
-          <div className="mt-1 text-xs text-[var(--muted)]">{formatNumber(session.videos_watched)} completed</div>
-        </Card>
-        <Card>
-          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Ads</div>
-          <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">{formatNumber(session.watched_ads_count)}</div>
+          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Видео</div>
+          <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">{formatNumber(session.videos_watched)}</div>
           <div className="mt-1 text-xs text-[var(--muted)]">
-            {adAnalysisSummary.relevant > 0 || adAnalysisSummary.notRelevant > 0
-              ? `${adAnalysisSummary.relevant} relevant · ${adAnalysisSummary.notRelevant} not relevant`
-              : `${session.captures.video_captures} video captures`}
+            {formatNumber(session.watched_videos_count)} записей просмотра
           </div>
         </Card>
         <Card>
-          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Traffic</div>
+          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Реклама</div>
+          <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">{formatNumber(session.watched_ads_count)}</div>
+          <div className="mt-1 text-xs text-[var(--muted)]">
+            {session.watched_ads_count === 0
+              ? "Анализ рекламы не требуется"
+              : adAnalysisSummary.relevant > 0 || adAnalysisSummary.notRelevant > 0
+              ? `${adAnalysisSummary.relevant} релевантно · ${adAnalysisSummary.notRelevant} не релевантно`
+              : `${session.captures.video_captures} видеозаписей`}
+          </div>
+        </Card>
+        <Card>
+          <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">Трафик</div>
           <div className="mt-2 text-2xl font-semibold text-[var(--ink)]">{formatBytes(session.bytes_downloaded)}</div>
-          <div className="mt-1 text-xs text-[var(--muted)]">downloaded</div>
+          <div className="mt-1 text-xs text-[var(--muted)]">скачано</div>
         </Card>
       </div>
 
-      {liveStatus ? (
+      {showLiveRuntime && liveStatus ? (
         <div className="grid gap-4 xl:grid-cols-2">
           <Card className="p-5" glow>
             <div className="mb-3 flex items-center gap-2">
@@ -490,43 +920,43 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--accent)] opacity-75" />
                 <span className="inline-flex h-2 w-2 rounded-full bg-[var(--accent)]" />
               </span>
-              <span className="text-sm font-semibold text-[var(--ink)]">Live runtime</span>
+              <span className="text-sm font-semibold text-[var(--ink)]">Живой рантайм</span>
             </div>
             <div className="space-y-2 text-sm">
               <div className="flex justify-between gap-4">
-                <span className="text-[var(--muted)]">Profile</span>
+                <span className="text-[var(--muted)]">Профиль</span>
                 <span className="text-[var(--ink-secondary)]">{liveStatus.profile_id || "—"}</span>
               </div>
               <div className="flex justify-between gap-4">
-                <span className="text-[var(--muted)]">Elapsed</span>
+                <span className="text-[var(--muted)]">Прошло</span>
                 <span className="text-[var(--ink-secondary)]">{formatMinutes(liveStatus.elapsed_minutes)}</span>
               </div>
               <div className="flex justify-between gap-4">
-                <span className="text-[var(--muted)]">Topics searched</span>
+                <span className="text-[var(--muted)]">Искали темы</span>
                 <span className="text-[var(--ink-secondary)]">{liveStatus.topics_searched.join(", ") || "—"}</span>
               </div>
             </div>
           </Card>
           <Card className="p-5">
-            <div className="mb-3 text-sm font-semibold text-[var(--ink)]">Current watch</div>
+            <div className="mb-3 text-sm font-semibold text-[var(--ink)]">Текущий просмотр</div>
             {liveStatus.current_watch ? (
               <div className="space-y-2">
                 <div className="text-base font-semibold text-[var(--ink)]">
                   {liveStatus.current_watch.title}
                 </div>
                 <div className="text-sm text-[var(--muted)]">
-                  {liveStatus.current_watch.search_keyword || "no keyword"}
+                  {liveStatus.current_watch.search_keyword || "без ключевого запроса"}
                 </div>
                 <div className="text-sm text-[var(--muted)]">
-                  {liveStatus.current_watch.watched_seconds.toFixed(1)}s watched
+                  {liveStatus.current_watch.watched_seconds.toFixed(1)}с просмотрено
                   {liveStatus.current_watch.target_seconds
-                    ? ` / ${liveStatus.current_watch.target_seconds.toFixed(1)}s target`
+                    ? ` / ${liveStatus.current_watch.target_seconds.toFixed(1)}с цель`
                     : ""}
                 </div>
               </div>
             ) : (
               <div className="text-sm text-[var(--muted)]">
-                Session is active, but no current video is exposed yet.
+                Сессия активна, но текущее видео еще не отдано в статус.
               </div>
             )}
           </Card>
@@ -545,7 +975,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
             onClick={() => setActiveTab(tab)}
           >
             {tab === "overview" ? <LayoutPanelTop size={15} /> : <Megaphone size={15} />}
-            <span>{tab}</span>
+            <span>{tab === "overview" ? "Обзор" : "Реклама"}</span>
             {tab === "ads" ? (
               <span className="rounded-md bg-[var(--bg-soft)] px-1.5 py-0.5 text-[11px] font-semibold text-[var(--ink-secondary)]">
                 {adCards.length}
@@ -558,41 +988,59 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
       {activeTab === "overview" ? (
         <div className="grid gap-4 xl:grid-cols-2">
           <Card className="p-5">
-            <div className="mb-3 text-sm font-semibold text-[var(--ink)]">Topics</div>
-            <div className="flex flex-wrap gap-1.5">
-              {(session.topics_searched.length > 0
-                ? session.topics_searched
-                : session.requested_topics
-              ).map((topic) => (
-                <span
-                  key={topic}
-                  className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-2.5 py-1 text-xs text-[var(--ink-secondary)]"
-                >
-                  {topic}
-                </span>
-              ))}
+            <div className="mb-3 flex items-baseline justify-between gap-3">
+              <div className="text-sm font-semibold text-[var(--ink)]">
+                Темы
+              </div>
+              <div className="text-xs text-[var(--muted)]">
+                {session.topics_searched.length}/{session.requested_topics.length} покрыто
+              </div>
             </div>
+            {session.requested_topics.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {session.requested_topics.map((topic) => {
+                  const covered = session.topics_searched.some(
+                    (s) => s.toLowerCase() === topic.toLowerCase(),
+                  );
+                  return (
+                    <span
+                      key={topic}
+                      className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs ${
+                        covered
+                          ? "border-[var(--accent)]/20 bg-[var(--accent-soft)] text-[var(--accent)]"
+                          : "border-[var(--line)] bg-[var(--panel)] text-[var(--muted)]"
+                      }`}
+                    >
+                      {covered ? <Check size={11} strokeWidth={3} /> : <Clock size={11} />}
+                      {topic}
+                    </span>
+                  );
+                })}
+              </div>
+            ) : (
+              <span className="text-sm text-[var(--muted)]">—</span>
+            )}
           </Card>
           <Card className="p-5">
-            <div className="mb-3 text-sm font-semibold text-[var(--ink)]">Session metadata</div>
+            <div className="mb-3 text-sm font-semibold text-[var(--ink)]">Метаданные сессии</div>
             <div className="space-y-2 text-sm">
               <div className="flex justify-between gap-4">
-                <span className="text-[var(--muted)]">Queued</span>
+                <span className="text-[var(--muted)]">Поставлена в очередь</span>
                 <span className="text-[var(--ink-secondary)]">{formatDate(session.queued_at)}</span>
               </div>
               <div className="flex justify-between gap-4">
-                <span className="text-[var(--muted)]">Started</span>
+                <span className="text-[var(--muted)]">Запущена</span>
                 <span className="text-[var(--ink-secondary)]">{formatDate(session.started_at)}</span>
               </div>
               <div className="flex justify-between gap-4">
-                <span className="text-[var(--muted)]">Finished</span>
+                <span className="text-[var(--muted)]">Завершена</span>
                 <span className="text-[var(--ink-secondary)]">{formatDate(session.finished_at)}</span>
               </div>
             </div>
           </Card>
           <Card className="p-0 xl:col-span-2">
             <div className="border-b border-[var(--line)] px-5 py-4 text-sm font-semibold text-[var(--ink)]">
-              Watched videos
+              Просмотренные видео
             </div>
             {sessionVideos.length > 0 ? (
               <div className="divide-y divide-[var(--line)]">
@@ -602,13 +1050,13 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                       <div>
                         <div className="text-sm font-medium text-[var(--ink)]">{video.title}</div>
                         <div className="mt-0.5 text-xs text-[var(--muted)]">
-                          {video.search_keyword || "no search keyword"} ·{" "}
-                          {video.watched_seconds.toFixed(1)}s /{" "}
-                          {video.target_seconds.toFixed(1)}s
+                          {video.search_keyword || "без поискового запроса"} ·{" "}
+                          {video.watched_seconds.toFixed(1)}с /{" "}
+                          {video.target_seconds.toFixed(1)}с
                         </div>
                       </div>
                       <Badge tone={video.runtime ? "info" : video.completed ? "success" : "warning"}>
-                        {video.runtime ? "running" : video.completed ? "completed" : "partial"}
+                        {video.runtime ? "в процессе" : video.completed ? "завершено" : "частично"}
                       </Badge>
                     </div>
                   </div>
@@ -616,7 +1064,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
               </div>
             ) : (
               <div className="px-5 py-8 text-sm text-[var(--muted)]">
-                No watched videos were recorded for this session yet.
+                Для этой сессии пока нет записанных просмотров видео.
               </div>
             )}
           </Card>
@@ -625,19 +1073,65 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
 
       {activeTab === "ads" && hasAds ? (
         <div className="space-y-4">
-          <div className="flex flex-wrap gap-2">
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-              <span className="font-semibold">{adAnalysisSummary.relevant}</span> relevant
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="inline-flex rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]">
+              {(
+                [
+                  { key: "all", label: "Все", count: adCards.length },
+                  { key: "relevant", label: "Релевантные", count: adAnalysisSummary.relevant },
+                  { key: "not_relevant", label: "Не релевантные", count: adAnalysisSummary.notRelevant },
+                  ...(adAnalysisSummary.pending > 0
+                    ? [{ key: "pending", label: "Ожидают", count: adAnalysisSummary.pending }]
+                    : []),
+                ] as const
+              ).map((item) => (
+                <button
+                  key={item.key}
+                  className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
+                    adFilter === item.key
+                      ? "bg-[var(--panel)] text-[var(--brand)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
+                      : "text-[var(--muted)] hover:bg-[var(--panel)] hover:text-[var(--ink)]"
+                  }`}
+                  onClick={() => {
+                    setAdFilter(item.key as typeof adFilter);
+                    setShowAllAds(false);
+                  }}
+                >
+                  {item.label}
+                  <span className="rounded-md bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--ink-secondary)]">
+                    {item.count}
+                  </span>
+                </button>
+              ))}
             </div>
-            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
-              <span className="font-semibold">{adAnalysisSummary.notRelevant}</span> not relevant
+
+            <div className="inline-flex rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-1">
+              {(
+                [
+                  { key: "position", label: "Порядок" },
+                  { key: "duration", label: "Длительность" },
+                ] as const
+              ).map((item) => (
+                <button
+                  key={item.key}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-all ${
+                    adSort === item.key
+                      ? "bg-[var(--panel)] text-[var(--brand)] shadow-[0_1px_2px_rgba(0,0,0,0.06)]"
+                      : "text-[var(--muted)] hover:bg-[var(--panel)] hover:text-[var(--ink)]"
+                  }`}
+                  onClick={() => setAdSort(item.key)}
+                >
+                  {item.label}
+                </button>
+              ))}
             </div>
-            {adAnalysisSummary.pending > 0 ? (
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
-                <span className="font-semibold">{adAnalysisSummary.pending}</span> pending
-              </div>
-            ) : null}
           </div>
+
+          {filteredAdCards.length === 0 ? (
+            <Card className="px-5 py-8 text-center text-sm text-[var(--muted)]">
+              По выбранному фильтру рекламы не найдено.
+            </Card>
+          ) : null}
           {visibleAdCards.map((item) => {
             const analysisResult = resolveAnalysisResult(item.primaryCapture);
             const analysisReason = readAnalysisField(item.primaryCapture, "reason");
@@ -661,23 +1155,23 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                         item.primaryCapture?.headline_text ||
                         item.ad?.advertiser_domain ||
                         item.primaryCapture?.advertiser_domain ||
-                        "Untitled ad"}
+                        "Реклама без названия"}
                     </div>
                     <div className="mt-1 text-sm text-[var(--muted)]">
                       {item.ad?.display_url ||
                         item.primaryCapture?.display_url ||
                         item.ad?.advertiser_domain ||
                         item.primaryCapture?.advertiser_domain ||
-                        "unknown domain"}
+                        "неизвестный домен"}
                     </div>
                   </div>
                   <div className="flex flex-wrap justify-end gap-1.5">
                     {item.ad ? (
                       <Badge tone={item.ad.completed ? "success" : "warning"}>
-                        {item.ad.completed ? "completed" : "partial"}
+                        {item.ad.completed ? "завершено" : "частично"}
                       </Badge>
                     ) : null}
-                    {item.primaryCapture ? (
+                    {item.primaryCapture && !mediaHiddenByAnalysis ? (
                       <Badge
                         tone={
                           item.primaryCapture.video_status === "completed"
@@ -685,10 +1179,10 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                             : "warning"
                         }
                       >
-                        video {item.primaryCapture.video_status}
+                        видео: {formatCaptureStatus(item.primaryCapture.video_status)}
                       </Badge>
                     ) : null}
-                    {item.primaryCapture ? (
+                    {item.primaryCapture && !mediaHiddenByAnalysis ? (
                       <Badge
                         tone={
                           item.primaryCapture.landing_status === "completed"
@@ -696,7 +1190,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                             : "warning"
                         }
                       >
-                        landing {item.primaryCapture.landing_status}
+                        лендинг: {formatCaptureStatus(item.primaryCapture.landing_status)}
                       </Badge>
                     ) : null}
                     {analysisResult ? (
@@ -712,22 +1206,22 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
 
                 <div className="grid gap-2 px-5 py-4 text-xs text-[var(--muted)] sm:grid-cols-3">
                   <div className="rounded-lg bg-[var(--panel-soft)] px-3 py-2.5">
-                    <div className="font-medium text-[var(--ink-secondary)]">Watched</div>
+                    <div className="font-medium text-[var(--ink-secondary)]">Просмотрено</div>
                     <div className="mt-1 text-sm text-[var(--ink)]">
-                      {item.ad?.watched_seconds.toFixed(1) || "—"}s
+                      {item.ad?.watched_seconds.toFixed(1) || "—"}с
                     </div>
                   </div>
                   <div className="rounded-lg bg-[var(--panel-soft)] px-3 py-2.5">
-                    <div className="font-medium text-[var(--ink-secondary)]">CTA</div>
+                    <div className="font-medium text-[var(--ink-secondary)]">Кнопка</div>
                     <div className="mt-1 text-sm text-[var(--ink)]">{item.ad?.cta_text || "—"}</div>
                   </div>
                   <div className="rounded-lg bg-[var(--panel-soft)] px-3 py-2.5">
-                    <div className="font-medium text-[var(--ink-secondary)]">Duration</div>
+                    <div className="font-medium text-[var(--ink-secondary)]">Длительность</div>
                     <div className="mt-1 text-sm text-[var(--ink)]">
                       {(
                         item.ad?.ad_duration_seconds ??
                         item.primaryCapture?.ad_duration_seconds
-                      )?.toFixed(1) || "—"}s
+                      )?.toFixed(1) || "—"}с
                     </div>
                   </div>
                 </div>
@@ -741,7 +1235,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                     className="gap-1.5 px-3 py-2 text-xs"
                   >
                     {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                    {isExpanded ? "Hide details" : "Show details"}
+                    {isExpanded ? "Скрыть детали" : "Показать детали"}
                   </Button>
                 </div>
                 </div>
@@ -752,8 +1246,8 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                     {item.ad?.full_text ? (
                       <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
                         <div className="flex items-center gap-2">
-                          <span className="text-xs font-semibold text-[var(--ink)]">Ad text</span>
-                          <Badge tone="info">visible text</Badge>
+                          <span className="text-xs font-semibold text-[var(--ink)]">Текст рекламы</span>
+                          <Badge tone="info">видимый текст</Badge>
                         </div>
                         <div className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-[var(--ink-secondary)]">
                           {item.ad.full_text}
@@ -764,7 +1258,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                     {item.primaryCapture?.analysis_status ? (
                       <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-xs font-semibold text-[var(--ink)]">Ad analysis</span>
+                          <span className="text-xs font-semibold text-[var(--ink)]">Анализ рекламы</span>
                           <Badge
                             tone={
                               getAnalysisTone(
@@ -786,10 +1280,10 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                         ) : (
                           <div className="mt-2 text-[var(--muted)]">
                             {item.primaryCapture.analysis_status === "pending"
-                              ? "The ad is waiting for analysis."
+                              ? "Реклама ожидает анализа."
                               : item.primaryCapture.analysis_status === "failed"
-                                ? "The ad could not be analyzed."
-                                : "Analysis is available without an explanation block."}
+                                ? "Рекламу не удалось проанализировать."
+                                : "Анализ доступен без блока с объяснением."}
                           </div>
                         )}
                       </div>
@@ -798,178 +1292,16 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                     {item.captures.length > 0 && !mediaHiddenByAnalysis ? (
                       <div className="space-y-3 rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
                         <div className="text-xs font-semibold text-[var(--ink)]">
-                          Media preview
-                          {item.captures.length > 1 ? ` (${item.captures.length} segments)` : ""}
+                          Медиа-превью
+                          {item.captures.length > 1 ? ` (${item.captures.length} сегментов)` : ""}
                         </div>
                         {item.captures.map((capture, index) => (
-                          <div
+                          <CaptureMediaPreview
                             key={`${capture.ad_position}-${index}`}
-                            className="space-y-3 rounded-lg bg-[var(--bg-soft)] p-4"
-                          >
-                            {(() => {
-                              const videoUrl = buildMediaUrl(capture.video_file);
-                              const firstScreenshot = capture.screenshot_paths[0]?.file_path;
-                              const screenshotUrl = buildMediaUrl(firstScreenshot);
-                              const landingIndexUrl = capture.landing_dir
-                                ? buildMediaUrl(`${capture.landing_dir}/index.html`)
-                                : null;
-
-                              return (
-                                <>
-                            {item.captures.length > 1 ? (
-                              <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">
-                                Segment {index + 1}
-                              </div>
-                            ) : null}
-
-                            <div className="grid gap-3 lg:grid-cols-3">
-                              <div className="relative overflow-hidden rounded-lg bg-[var(--panel-soft)] p-4 min-h-36">
-                                <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(108,92,231,0.06),_transparent_55%)]" />
-                                <div className="relative flex h-full flex-col justify-between">
-                                  <div className="flex items-center justify-between">
-                                    <Badge tone={capture.video_status === "completed" ? "success" : "warning"}>
-                                      {capture.video_status === "completed" ? "video saved" : "video pending"}
-                                    </Badge>
-                                    <Film size={15} className="text-[var(--muted)]" />
-                                  </div>
-                                  {videoUrl ? (
-                                    <div className="py-3">
-                                      <video
-                                        key={videoUrl}
-                                        className="h-32 w-full rounded-lg bg-slate-900 object-cover"
-                                        controls
-                                        preload="metadata"
-                                        src={videoUrl}
-                                        onLoadedMetadata={(event) => {
-                                          try {
-                                            event.currentTarget.currentTime = 0;
-                                          } catch {
-                                            // Ignore browser seek restrictions
-                                          }
-                                        }}
-                                      />
-                                    </div>
-                                  ) : (
-                                    <div className="flex items-center justify-center py-4">
-                                      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[var(--brand-soft)]">
-                                        <PlayCircle size={28} className="text-[var(--brand)]" />
-                                      </div>
-                                    </div>
-                                  )}
-                                  <div>
-                                    <div className="text-xs font-semibold text-[var(--ink)]">Ad video</div>
-                                    <div className="mt-0.5 truncate text-xs text-[var(--muted)]">
-                                      {getBaseName(capture.video_file) || "video.webm"}
-                                    </div>
-                                    {videoUrl ? (
-                                      <a
-                                        href={videoUrl}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="mt-1.5 inline-flex text-xs font-medium text-[var(--brand)] hover:underline"
-                                      >
-                                        Open video
-                                      </a>
-                                    ) : null}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4 min-h-36">
-                                <div className="flex items-center justify-between">
-                                  <Badge tone={capture.screenshot_paths.length > 0 ? "info" : "neutral"}>
-                                    {capture.screenshot_paths.length} screenshots
-                                  </Badge>
-                                  <FileImage size={15} className="text-[var(--muted)]" />
-                                </div>
-                                <div className="mt-3">
-                                  {screenshotUrl ? (
-                                    <a href={screenshotUrl} target="_blank" rel="noreferrer">
-                                      <img
-                                        src={screenshotUrl}
-                                        alt="Ad screenshot preview"
-                                        className="h-24 w-full rounded-lg border border-[var(--line)] object-cover"
-                                      />
-                                    </a>
-                                  ) : (
-                                    <div className="flex items-end gap-2">
-                                      {[0, 1, 2].map((layer) => (
-                                        <div
-                                          key={layer}
-                                          className={`rounded-lg border border-[var(--line)] bg-[var(--bg-soft)] ${
-                                            layer === 0
-                                              ? "h-20 w-16"
-                                              : layer === 1
-                                                ? "h-16 w-12"
-                                                : "h-12 w-10"
-                                          }`}
-                                        />
-                                      ))}
-                                    </div>
-                                  )}
-                                </div>
-                                <div className="mt-3 text-xs font-semibold text-[var(--ink)]">
-                                  Screenshot timeline
-                                </div>
-                                <div className="mt-0.5 flex items-center justify-between gap-2">
-                                  <div className="text-xs text-[var(--muted)]">
-                                    Fallback frames from the ad.
-                                  </div>
-                                  {screenshotUrl ? (
-                                    <a
-                                      href={screenshotUrl}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="shrink-0 text-xs font-medium text-[var(--brand)] hover:underline"
-                                    >
-                                      Open
-                                    </a>
-                                  ) : null}
-                                </div>
-                              </div>
-
-                              <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4 min-h-36">
-                                <div className="flex items-center justify-between">
-                                  <Badge tone={capture.landing_status === "completed" ? "info" : "warning"}>
-                                    {capture.landing_status === "completed" ? "landing saved" : "landing pending"}
-                                  </Badge>
-                                  <Globe size={15} className="text-[var(--muted)]" />
-                                </div>
-                                <div className="mt-4 overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--bg-soft)]">
-                                  <div className="flex items-center gap-1.5 border-b border-[var(--line)] px-3 py-1.5">
-                                    <span className="h-2 w-2 rounded-full bg-[var(--danger)]" />
-                                    <span className="h-2 w-2 rounded-full bg-[var(--warning)]" />
-                                    <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
-                                  </div>
-                                  <div className="px-3 py-3">
-                                    <div className="flex items-center gap-2 text-xs font-semibold text-[var(--ink)]">
-                                      <FolderOpen size={13} />
-                                      {getLandingHost(capture.landing_url) || "landing page"}
-                                    </div>
-                                    <div className="mt-1 truncate text-xs text-[var(--muted)]">
-                                      {getBaseName(capture.landing_dir) || "landing/"}
-                                    </div>
-                                  </div>
-                                </div>
-                                <div className="mt-3 text-xs text-[var(--muted)]">
-                                  Saved HTML snapshot.
-                                </div>
-                                {landingIndexUrl ? (
-                                  <a
-                                    href={landingIndexUrl}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="mt-2 inline-flex text-xs font-medium text-[var(--brand)] hover:underline"
-                                  >
-                                    Open landing
-                                  </a>
-                                ) : null}
-                              </div>
-                            </div>
-                                </>
-                              );
-                            })()}
-                          </div>
+                            capture={capture}
+                            index={index}
+                            totalSegments={item.captures.length}
+                          />
                         ))}
                       </div>
                     ) : null}
@@ -980,14 +1312,14 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
               </Card>
             );
           })}
-          {adCards.length > 4 ? (
+          {filteredAdCards.length > 4 ? (
             <div className="flex justify-center">
               <Button
                 type="button"
                 variant="ghost"
                 onClick={() => setShowAllAds((prev) => !prev)}
               >
-                {showAllAds ? "Show fewer ads" : `Show all ads (${adCards.length})`}
+                {showAllAds ? "Показать меньше реклам" : `Показать все рекламы (${filteredAdCards.length})`}
               </Button>
             </div>
           ) : null}

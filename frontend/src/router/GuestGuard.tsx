@@ -7,7 +7,7 @@ export function GuestGuard({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
 
   if (loading) {
-    return <Loader label="Checking auth" />;
+    return <Loader label="Проверка авторизации" />;
   }
 
   if (user) {

@@ -7,7 +7,7 @@ export function AuthGuard({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
 
   if (loading) {
-    return <Loader label="Loading session" />;
+    return <Loader label="Загрузка сессии" />;
   }
 
   if (!user) {

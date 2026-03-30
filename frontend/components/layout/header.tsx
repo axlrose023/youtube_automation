@@ -6,8 +6,8 @@ import { NavLink, useLocation } from "react-router-dom";
 import { useAuth } from "@/lib/auth-context";
 
 const items = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/sessions", label: "Sessions", icon: PlayCircle },
+  { href: "/dashboard", label: "Дашборд", icon: LayoutDashboard },
+  { href: "/sessions", label: "Сессии", icon: PlayCircle },
 ];
 
 export function Header() {
@@ -16,7 +16,7 @@ export function Header() {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const finalItems = user?.is_admin
-    ? [...items, { href: "/users", label: "Users", icon: ShieldUser }]
+    ? [...items, { href: "/users", label: "Пользователи", icon: ShieldUser }]
     : items;
 
   return (
@@ -27,7 +27,7 @@ export function Header() {
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--brand)] text-white">
               <Tv2 size={16} />
             </div>
-            <span className="text-sm font-semibold text-[var(--ink)]">YouTube Ops</span>
+            <span className="text-sm font-semibold text-[var(--ink)]">YouTube Emulator</span>
           </div>
 
           <nav className="hidden items-center gap-1 md:flex">
@@ -63,7 +63,7 @@ export function Header() {
           <button
             onClick={logout}
             className="hidden h-8 w-8 items-center justify-center rounded-lg text-[var(--muted)] transition hover:bg-[var(--danger-soft)] hover:text-[var(--danger)] md:flex"
-            title="Logout"
+            title="Выйти"
           >
             <LogOut size={15} />
           </button>
@@ -113,7 +113,7 @@ export function Header() {
               className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm text-[var(--danger)] transition hover:bg-[var(--danger-soft)]"
             >
               <LogOut size={14} />
-              Logout
+              Выйти
             </button>
           </div>
         </div>
