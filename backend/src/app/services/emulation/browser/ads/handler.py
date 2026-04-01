@@ -33,6 +33,16 @@ from .snapshot import (
 
 logger = logging.getLogger(__name__)
 
+_GENERIC_MOBILE_OVERLAY_TOKENS = frozenset(
+    {
+        "tap to unmute",
+        "unmute",
+        "tap to play",
+        "play",
+        "pause",
+    }
+)
+
 
 class AdHandler:
     def __init__(
@@ -59,7 +69,43 @@ class AdHandler:
     async def check(self) -> bool:
         try:
             overlay = await self._page.query_selector(AD_OVERLAY_SELECTOR)
-            return overlay is not None and await overlay.is_visible()
+            if overlay is not None and await overlay.is_visible():
+                return True
+        except Exception:
+            return False
+
+        if not self._state.is_mobile_surface():
+            return False
+
+        try:
+            return bool(
+                await self._page.evaluate(
+                    """() => {
+                        const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                        const adPattern =
+                            /(sponsored|реклама|skip ad|skip ads|пропустить|visit advertiser|learn more|install|узнать больше|установить)/i;
+                        const playerRoot =
+                            document.querySelector('#movie_player')
+                            || document.querySelector('ytm-player')
+                            || document.querySelector('#player')
+                            || document.querySelector('.html5-video-player');
+                        const roots = [playerRoot, document.querySelector('ytm-watch-layout-renderer'), document.body]
+                            .filter(Boolean);
+                        for (const root of roots) {
+                            const text = clean(root.innerText || root.textContent || '');
+                            if (adPattern.test(text)) return true;
+                            const nodes = root.querySelectorAll('button, a, [aria-label], [class*=\"skip-ad\"], [class*=\"ad-skip\"]');
+                            for (const node of nodes) {
+                                const combined = clean(
+                                    `${node.getAttribute?.('aria-label') || ''} ${node.innerText || node.textContent || ''}`,
+                                );
+                                if (adPattern.test(combined)) return true;
+                            }
+                        }
+                        return false;
+                    }""",
+                )
+            )
         except Exception:
             return False
 
@@ -439,20 +485,31 @@ class AdHandler:
                         return out;
                     }};
 
-                    const mp = document.getElementById("movie_player");
-                    const rawLines = mp ? splitLines(mp.innerText || mp.textContent || "") : [];
+                    const playerRoot =
+                        document.getElementById("movie_player")
+                        || document.querySelector("ytm-player")
+                        || document.getElementById("player")
+                        || document.querySelector(".html5-video-player");
+                    const rawLines = playerRoot ? splitLines(playerRoot.innerText || playerRoot.textContent || "") : [];
                     const skipBtns = collectBtns("{AD_SKIP_SELECTOR}");
                     const skip = skipBtns[0] || null;
                     const video = document.querySelector("video");
+                    const adTextPattern =
+                        /(sponsored|реклама|skip ad|skip ads|пропустить|visit advertiser|learn more|install|узнать больше|установить)/i;
+                    const buttons = collectBtns("{AD_BUTTON_SELECTOR}");
+                    const mobileSignalVisible =
+                        rawLines.some((line) => adTextPattern.test(line))
+                        || skipBtns.some((btn) => adTextPattern.test(`${{btn.text || ""}} ${{btn.ariaLabel || ""}}`))
+                        || buttons.some((btn) => adTextPattern.test(`${{btn.text || ""}} ${{btn.ariaLabel || ""}}`));
 
                     return {{
-                        adShowing: !!document.querySelector(".ad-showing"),
+                        adShowing: !!document.querySelector(".ad-showing") || mobileSignalVisible,
                         currentTime: video ? Number(video.currentTime || 0) : null,
                         duration: video && Number.isFinite(video.duration) ? Number(video.duration) : null,
                         rawLines,
                         adInfoLines: collectLines("{AD_INFO_SELECTOR}"),
                         captionLines: collectLines("{AD_CAPTION_SELECTOR}"),
-                        buttons: collectBtns("{AD_BUTTON_SELECTOR}"),
+                        buttons,
                         links: collectLinks("{AD_BUTTON_SELECTOR}", "{AD_INFO_SELECTOR}"),
                         skipVisible: !!skip,
                         skipText: skip ? skip.text : null,
@@ -544,6 +601,18 @@ class AdHandler:
             )
 
     def _publish_record(self, rec: AdRecord) -> dict[str, object] | None:
+        if self._is_generic_mobile_overlay_record(rec):
+            if rec._capture_task:
+                self._pending_records.append(rec)
+            logger.info(
+                "Session %s: ignoring generic mobile overlay segment (capture=%s watched=%.1fs headline=%r)",
+                self._state.session_id,
+                rec.capture_id,
+                rec.watched_seconds or 0.0,
+                rec.headline_text,
+            )
+            return None
+
         if self._should_ignore_record(rec):
             if rec._capture_task:
                 self._pending_records.append(rec)
@@ -597,6 +666,53 @@ class AdHandler:
         # Ignore recorder noise: a sub-2s segment with no advertiser/text/landing
         # is not a meaningful ad record even if a tiny video chunk was flushed.
         return watched <= 2.0 and not has_text and not has_landing_signal
+
+    def _is_generic_mobile_overlay_record(self, rec: AdRecord) -> bool:
+        if not self._state.is_mobile_surface():
+            return False
+        if (
+            rec.sponsor_label
+            or rec.advertiser_domain
+            or rec.display_url
+            or rec.display_url_decoded
+            or rec.landing_urls
+            or rec.cta_text
+            or rec.cta_candidates
+            or rec.cta_href
+            or rec.my_ad_center_visible
+            or rec.skip_visible
+            or rec.skip_clicked
+        ):
+            return False
+
+        texts: list[str] = []
+        for value in (rec.headline_text, rec.description_text):
+            text = " ".join(str(value or "").split()).strip().lower()
+            if text:
+                texts.append(text)
+
+        for bucket in (rec.visible_lines, rec.caption_lines, rec.description_lines):
+            for item in bucket:
+                text = " ".join(str(item or "").split()).strip().lower()
+                if text:
+                    texts.append(text)
+
+        for sample in rec.text_samples:
+            if not isinstance(sample, dict):
+                continue
+            for key in ("visible_lines", "caption_lines"):
+                value = sample.get(key)
+                if not isinstance(value, list):
+                    continue
+                for item in value:
+                    text = " ".join(str(item or "").split()).strip().lower()
+                    if text:
+                        texts.append(text)
+
+        normalized = {text for text in texts if text}
+        if not normalized:
+            return False
+        return normalized.issubset(_GENERIC_MOBILE_OVERLAY_TOKENS)
 
     def _is_continuation_segment(
         self,

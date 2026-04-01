@@ -43,6 +43,10 @@ class EmulationWatchedVideo(BaseModel):
     search_keyword: str | None = None
     matched_topics: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
+    liked: bool = False
+    subscribed: bool = False
+    channel_key: str | None = None
+    channel_name: str | None = None
     recorded_at: float
 
 
@@ -139,6 +143,10 @@ class EmulationCurrentWatch(BaseModel):
     search_keyword: str | None = None
     matched_topics: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
+    liked: bool = False
+    subscribed: bool = False
+    channel_key: str | None = None
+    channel_name: str | None = None
 
 
 class EmulationPostProcessingProgress(BaseModel):

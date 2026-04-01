@@ -192,6 +192,12 @@ class ActionPicker:
             Action.GO_BACK: 2,
         }
 
+        # Surfing is the loosest task-mode action. While there are still uncovered
+        # topics, it is more likely to drift into generic long-form content than to
+        # help coverage, and near the session tail it increases timeout risk.
+        if unsearched or self._state.remaining_seconds() < 240:
+            weights[Action.SURF_VIDEO] = 0
+
         if unsearched and self._state.should_block_recommended_before_coverage():
             weights[Action.CLICK_RECOMMENDED] = 0
             weights[Action.WATCH_FOCUSED] = max(weights[Action.WATCH_FOCUSED] - 20, 10)

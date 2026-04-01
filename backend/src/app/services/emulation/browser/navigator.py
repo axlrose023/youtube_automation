@@ -10,13 +10,14 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 from ..config import IDLE_FATIGUE_THRESHOLD, IDLE_FATIGUED_RANGE, IDLE_NORMAL_RANGE
 from ..selectors import (
     CONSENT_SELECTORS,
-    RECOMMENDED_SELECTORS,
-    VIDEO_SELECTORS,
+    recommended_selectors,
+    video_selectors,
     YOUTUBE_URL,
 )
 from ..session.state import SessionState
 from .humanizer import Humanizer
 from .video_finder import VideoFinder
+from .youtube_surface import detect_surface_mode, youtube_home_url
 
 if TYPE_CHECKING:
     from .searcher import Searcher
@@ -44,13 +45,14 @@ class Navigator:
 
     async def open_youtube(self) -> None:
         await self._page.goto(YOUTUBE_URL, wait_until="domcontentloaded", timeout=30_000)
+        self._state.set_surface_mode(await detect_surface_mode(self._page))
         logger.info("Session %s: opened YouTube", self._state.session_id)
         self._state.on_video_page = False
         await self.dismiss_consent()
         await self._h.delay(1.0, 2.0)
 
     async def has_feed_content(self) -> bool:
-        for selector in VIDEO_SELECTORS:
+        for selector in video_selectors(is_mobile=self._state.is_mobile_surface()):
             try:
                 video_element = await self._page.query_selector(selector)
                 if video_element:
@@ -61,7 +63,12 @@ class Navigator:
 
     async def safe_go_home(self) -> None:
         try:
-            await self._page.goto(YOUTUBE_URL, wait_until="domcontentloaded", timeout=15_000)
+            target_url = youtube_home_url(
+                current_url=self._page.url,
+                preferred_mode=self._state.surface_mode.value,
+            )
+            await self._page.goto(target_url, wait_until="domcontentloaded", timeout=15_000)
+            self._state.set_surface_mode(await detect_surface_mode(self._page))
             self._state.on_video_page = False
             await self._h.delay(1.0, 3.0)
         except Exception:
@@ -78,6 +85,7 @@ class Navigator:
         try:
             await self._page.go_back(timeout=5000)
             await self._h.delay(1.0, 2.5)
+            self._state.set_surface_mode(await detect_surface_mode(self._page))
             if "youtube.com" not in self._page.url:
                 await self.safe_go_home()
             else:
@@ -108,7 +116,9 @@ class Navigator:
 
     async def click_any_video(self) -> bool:
         on_watch_page = "/watch" in self._page.url or self._state.on_video_page
-        selectors = RECOMMENDED_SELECTORS if on_watch_page else VIDEO_SELECTORS + RECOMMENDED_SELECTORS
+        recommended = recommended_selectors(is_mobile=self._state.is_mobile_surface())
+        video = video_selectors(is_mobile=self._state.is_mobile_surface())
+        selectors = recommended if on_watch_page else video + recommended
         clicked = await self._finder.find_and_click(
             selectors,
             limit=8,
@@ -119,8 +129,9 @@ class Navigator:
         return clicked
 
     async def click_recommended(self) -> bool:
+        selectors = recommended_selectors(is_mobile=self._state.is_mobile_surface())
         topical_click = await self._finder.find_and_click(
-            RECOMMENDED_SELECTORS,
+            selectors,
             limit=10,
             require_topic_match=bool(self._state.topics),
             preferred_topic=self._state.current_topic,
@@ -144,7 +155,7 @@ class Navigator:
             self._state.session_id,
         )
         return await self._finder.find_and_click(
-            RECOMMENDED_SELECTORS,
+            selectors,
             limit=8,
             require_topic_match=True,
             preferred_topic=None,

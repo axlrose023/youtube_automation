@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import random
 import re
-from urllib.parse import quote_plus
 from typing import TYPE_CHECKING
 
 from playwright.async_api import ElementHandle, Page
@@ -12,12 +11,13 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 from ..config import TOPIC_BALANCE_ROTATE_SEARCH_PROBABILITY
 from ..selectors import (
     SEARCH_BUTTON,
-    SEARCH_BUTTON_SELECTORS,
-    SEARCH_INPUT_SELECTORS,
-    VIDEO_SELECTORS,
+    search_button_selectors,
+    search_input_selectors,
+    video_selectors,
 )
 from ..session.state import SessionState
 from .humanizer import Humanizer
+from .youtube_surface import absolutize_youtube_href, detect_surface_mode, youtube_results_url
 
 if TYPE_CHECKING:
     from .navigator import Navigator
@@ -170,7 +170,19 @@ class Searcher:
         fallback_to_regular_search: bool = False,
         mark_topic_as_covered: str | None = None,
     ) -> None:
+        self._state.set_surface_mode(await detect_surface_mode(self._page))
         await self._nav.dismiss_consent()
+
+        if mark_topic_as_covered and mark_topic_as_covered not in self._state.searched_topics:
+            self._state.searched_topics.append(mark_topic_as_covered)
+
+        if self._state.is_mobile_surface():
+            await self._open_mobile_results_page(topic)
+            await self._scan_results()
+            self._state.on_video_page = False
+            self._state.surf_streak = 0
+            return
+
         search_input = await self._find_search_input()
         if not search_input:
             await self._nav.safe_go_home()
@@ -195,18 +207,61 @@ class Searcher:
 
         await self._submit_search()
         await self._ensure_search_results_page(topic)
-        await self._page.wait_for_load_state("domcontentloaded", timeout=10_000)
-        await self._h.delay(1.5, 3.0)
-        await self._scan_results()
 
-        if mark_topic_as_covered and mark_topic_as_covered not in self._state.searched_topics:
-            self._state.searched_topics.append(mark_topic_as_covered)
+        try:
+            await self._page.wait_for_load_state("domcontentloaded", timeout=10_000)
+        except PlaywrightTimeout:
+            if "/results" in (self._page.url or ""):
+                logger.warning(
+                    "Session %s: domcontentloaded timeout on results page, continuing with current results",
+                    self._state.session_id,
+                )
+            else:
+                raise
+
+        await self._h.delay(1.5, 3.0)
+
+        try:
+            await self._scan_results()
+        except PlaywrightTimeout:
+            if "/results" in (self._page.url or ""):
+                logger.warning(
+                    "Session %s: result scan timeout on results page, continuing with current results",
+                    self._state.session_id,
+                )
+            else:
+                raise
         self._state.on_video_page = False
         self._state.surf_streak = 0
 
+    async def _open_mobile_results_page(self, query: str) -> None:
+        direct_url = youtube_results_url(
+            query,
+            current_url=self._page.url,
+            preferred_mode=self._state.surface_mode.value,
+        )
+        logger.info(
+            "Session %s: mobile search -> direct results url %s",
+            self._state.session_id,
+            direct_url,
+        )
+        try:
+            await self._page.goto(direct_url, wait_until="domcontentloaded", timeout=12_000)
+        except PlaywrightTimeout:
+            if "/results" not in (self._page.url or ""):
+                raise
+            logger.warning(
+                "Session %s: mobile direct results goto timed out but page is already on results, continuing",
+                self._state.session_id,
+            )
+
+        self._state.set_surface_mode(await detect_surface_mode(self._page))
+        await self._h.delay(1.0, 2.0)
+
     async def _find_search_input(self, timeout: int = 6000) -> ElementHandle | None:
-        per_selector_timeout = max(timeout // len(SEARCH_INPUT_SELECTORS), 1000)
-        for selector in SEARCH_INPUT_SELECTORS:
+        selectors = search_input_selectors(is_mobile=self._state.is_mobile_surface())
+        per_selector_timeout = max(timeout // len(selectors), 1000)
+        for selector in selectors:
             try:
                 search_input_element = await self._page.wait_for_selector(selector, timeout=per_selector_timeout)
                 if search_input_element:
@@ -219,7 +274,8 @@ class Searcher:
         if random.random() < 0.6:
             await self._page.keyboard.press("Enter")
         else:
-            search_button = await self._page.query_selector(", ".join(SEARCH_BUTTON_SELECTORS))
+            selectors = search_button_selectors(is_mobile=self._state.is_mobile_surface())
+            search_button = await self._page.query_selector(", ".join(selectors))
             if not search_button:
                 search_button = await self._page.query_selector(SEARCH_BUTTON)
             if search_button:
@@ -234,15 +290,29 @@ class Searcher:
             pass
 
         if "/results" in (self._page.url or ""):
+            self._state.set_surface_mode(await detect_surface_mode(self._page))
             return
 
-        direct_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+        direct_url = youtube_results_url(
+            query,
+            current_url=self._page.url,
+            preferred_mode=self._state.surface_mode.value,
+        )
         logger.warning(
             "Session %s: search submit stayed on %s, falling back to direct results url",
             self._state.session_id,
             self._page.url or "<unknown>",
         )
-        await self._page.goto(direct_url, wait_until="domcontentloaded", timeout=10_000)
+        try:
+            await self._page.goto(direct_url, wait_until="domcontentloaded", timeout=10_000)
+        except PlaywrightTimeout:
+            if "/results" not in (self._page.url or ""):
+                raise
+            logger.warning(
+                "Session %s: direct results goto timed out but page is already on results, continuing",
+                self._state.session_id,
+            )
+        self._state.set_surface_mode(await detect_surface_mode(self._page))
         await self._h.delay(0.8, 1.6)
 
     async def _scan_results(self) -> None:
@@ -258,6 +328,14 @@ class Searcher:
             return
 
         hovered = 0
+        if self._state.is_mobile_surface():
+            if random.random() < 0.65:
+                await self._h.scroll("down", amount=random.randint(1, 2))
+                if random.random() < 0.35:
+                    await self._h.scroll("up", amount=1)
+            logger.info("Session %s: scanned search results before click (hovered=%d)", self._state.session_id, hovered)
+            return
+
         for candidate in random.sample(candidates, k=min(len(candidates), random.randint(1, 3))):
             try:
                 box = await candidate.bounding_box()
@@ -289,8 +367,9 @@ class Searcher:
         return any(hint in topics_blob for hint in _FINANCE_TOPIC_HINTS)
 
     async def _has_result_candidates(self) -> bool:
+        selectors = video_selectors(is_mobile=self._state.is_mobile_surface())
         for _ in range(6):
-            for selector in VIDEO_SELECTORS:
+            for selector in selectors:
                 try:
                     if await self._page.query_selector(selector):
                         return True
@@ -302,7 +381,7 @@ class Searcher:
     async def _collect_result_candidates(self, limit: int) -> list[ElementHandle]:
         candidates: list[ElementHandle] = []
         seen_hrefs: set[str] = set()
-        for selector in VIDEO_SELECTORS:
+        for selector in video_selectors(is_mobile=self._state.is_mobile_surface()):
             try:
                 elements = await self._page.query_selector_all(selector)
             except Exception:
@@ -315,7 +394,11 @@ class Searcher:
                     continue
                 if not href or "/watch" not in href:
                     continue
-                normalized_href = href if href.startswith("http") else f"https://www.youtube.com{href}"
+                normalized_href = absolutize_youtube_href(
+                    href,
+                    current_url=self._page.url,
+                    preferred_mode=self._state.surface_mode.value,
+                )
                 if normalized_href in seen_hrefs:
                     continue
                 seen_hrefs.add(normalized_href)

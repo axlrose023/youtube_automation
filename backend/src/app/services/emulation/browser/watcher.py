@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 from dataclasses import dataclass
 
 from playwright.async_api import Page
@@ -38,6 +39,7 @@ from ..config import (
 )
 from ..session.state import Mode, SessionState
 from .ads.handler import AdHandler
+from .engagement import EngagementController
 from .humanizer import Humanizer
 from .navigator import Navigator
 from .playback import PlaybackController
@@ -112,6 +114,7 @@ class VideoWatcher:
         self._ads = ads
         self._playback = playback
         self._duration = WatchDurationCalculator(state, playback)
+        self._engagement = EngagementController(page, state, humanizer)
 
     @staticmethod
     def _completed_watch(
@@ -186,6 +189,9 @@ class VideoWatcher:
             title=video_title,
             url=video_url,
         )
+        if not await self._ensure_mobile_player_ready(profile.action):
+            self._state.clear_current_watch()
+            return
         await self._ads.handle(patient=profile.patient_ads)
         await self._playback.ensure_playing(self._state.session_id)
 
@@ -225,6 +231,14 @@ class VideoWatcher:
         opened_url = self._page.url or ""
         if not self._state.video_id_from_url(opened_url):
             return False
+        if self._state.is_broken_video(opened_url):
+            logger.info(
+                "Session %s: %s — skipping continue_current for broken video %s",
+                self._state.session_id,
+                profile.action,
+                opened_url,
+            )
+            return False
 
         logger.info(
             "Session %s: %s — continue current video instead of opening a new one",
@@ -238,6 +252,9 @@ class VideoWatcher:
             title=video_title,
             url=opened_url,
         )
+        if not await self._ensure_mobile_player_ready(f"{profile.action}_continue"):
+            self._state.clear_current_watch()
+            return True
         await self._ads.handle(patient=profile.patient_ads)
         await self._playback.ensure_playing(self._state.session_id)
 
@@ -289,6 +306,9 @@ class VideoWatcher:
             title=video_title,
             url=video_url,
         )
+        if not await self._ensure_mobile_player_ready(profile.action):
+            self._state.clear_current_watch()
+            return
         await self._ads.handle(patient=False)
         await self._playback.ensure_playing(self._state.session_id)
 
@@ -315,12 +335,14 @@ class VideoWatcher:
         if random.random() < SPEED_CHANGE_PROBABILITY:
             speed = random.choice(SPEED_CHOICES)
             logger.info("Session %s: setting speed to %.2fx", self._state.session_id, speed)
-            await self._playback.set_speed(speed)
+            if not self._state.is_mobile_surface():
+                await self._playback.set_speed(speed)
 
         if random.random() < SEEK_FORWARD_PROBABILITY:
             seek = random.choice(SEEK_CHOICES)
             logger.info("Session %s: seeking forward %ds", self._state.session_id, seek)
-            await self._playback.seek_forward(seek)
+            if not self._state.is_mobile_surface():
+                await self._playback.seek_forward(seek)
 
         watch_s = await self._duration.decide(
             mode_a=profile.mode_a, fallback_min=profile.fallback_min, fallback_max=profile.fallback_max,
@@ -447,7 +469,11 @@ class VideoWatcher:
         clicked_title = self._state.last_clicked_video_title
 
         video_title = dom_title
-        if clicked_title and self._same_video(opened_url, self._state.last_clicked_video_url or ""):
+        if (
+            clicked_title
+            and self._same_video(opened_url, self._state.last_clicked_video_url or "")
+            and (not dom_title or dom_title.strip().lower() == "youtube")
+        ):
             video_title = clicked_title
         if not video_title or video_title.strip().lower() == "youtube":
             video_title = clicked_title
@@ -477,6 +503,8 @@ class VideoWatcher:
         micro_pauses = 0
         ad_checks = 0
         ad_skip_attempts = 0
+        mobile_player_error_count = 0
+        mobile_comments_glances = 0
         while elapsed < seconds:
             if self._state.stop_requested:
                 logger.info(
@@ -513,9 +541,33 @@ class VideoWatcher:
             if chunk <= 0:
                 break
             chunks += 1
+            before_snapshot = None
+            if self._state.is_mobile_surface():
+                before_snapshot = await self._playback.get_snapshot()
             actual_chunk = await self._delay_interruptible(chunk)
-            elapsed += actual_chunk
-            self._state.increment_current_watch(actual_chunk)
+            effective_chunk = actual_chunk
+            if self._state.is_mobile_surface():
+                effective_chunk, abort_watch, had_player_error = await self._resolve_mobile_chunk_progress(
+                    source_action=source_action,
+                    requested_chunk=chunk,
+                    elapsed_chunk=actual_chunk,
+                    before_snapshot=before_snapshot,
+                    player_error_count=mobile_player_error_count,
+                )
+                if had_player_error:
+                    mobile_player_error_count += 1
+                if abort_watch:
+                    self._state.mark_video_broken(self._page.url or self._state.last_clicked_video_url)
+                    logger.warning(
+                        "Session %s: %s aborting current mobile watch after repeated player errors",
+                        self._state.session_id,
+                        source_action,
+                    )
+                    break
+                if effective_chunk <= 0:
+                    continue
+            elapsed += effective_chunk
+            self._state.increment_current_watch(effective_chunk)
             if self._state.stop_requested:
                 logger.info(
                     "Session %s: stop requested after watch delay (source=%s, watched=%.1fs)",
@@ -574,7 +626,30 @@ class VideoWatcher:
                     )
                     break
 
+            await self._engagement.maybe_engage(
+                source_action=source_action,
+                default_target_seconds=seconds,
+            )
+
             roll = random.random()
+            if self._state.is_mobile_surface():
+                should_glance_comments = (
+                    mobile_comments_glances == 0
+                    and seconds >= 45
+                    and elapsed >= min(max(seconds * 0.3, 25.0), 60.0)
+                )
+                if should_glance_comments:
+                    if await self._glance_mobile_comments(source_action=source_action):
+                        mobile_comments_glances += 1
+                        continue
+                if roll < MICRO_SCROLL_PROBABILITY * 0.35 and mobile_comments_glances < 2:
+                    if not await self._glance_mobile_comments(source_action=source_action):
+                        logger.info("Session %s: %s micro — mobile light scroll", self._state.session_id, source_action)
+                        await self._h.scroll("down", amount=1)
+                    else:
+                        mobile_comments_glances += 1
+                continue
+
             if roll < MICRO_SCROLL_PROBABILITY:
                 micro_scrolls += 1
                 if comment_depth == 0:
@@ -631,6 +706,108 @@ class VideoWatcher:
         )
         return elapsed
 
+    async def _resolve_mobile_chunk_progress(
+        self,
+        *,
+        source_action: str,
+        requested_chunk: float,
+        elapsed_chunk: float,
+        before_snapshot,
+        player_error_count: int,
+    ) -> tuple[float, bool, bool]:
+        after_snapshot = await self._playback.get_snapshot()
+        if after_snapshot.error_visible:
+            if player_error_count >= 1:
+                logger.warning(
+                    "Session %s: %s repeated mobile player error on same watch (%s)",
+                    self._state.session_id,
+                    source_action,
+                    after_snapshot.error_text or "<unknown>",
+                )
+                return 0.0, True, True
+            logger.warning(
+                "Session %s: %s mobile player error detected (%s)",
+                self._state.session_id,
+                source_action,
+                after_snapshot.error_text or "<unknown>",
+            )
+            recovered = await self._playback.recover_player_error(
+                self._state.session_id,
+                current_url=self._page.url,
+            )
+            if not recovered:
+                logger.warning(
+                    "Session %s: %s aborting watch chunk after unrecovered mobile player error",
+                    self._state.session_id,
+                    source_action,
+                )
+                return 0.0, True, True
+            return 0.0, False, True
+
+        if before_snapshot is None:
+            return elapsed_chunk, False, False
+
+        if after_snapshot.paused and not after_snapshot.ad_showing:
+            logger.warning(
+                "Session %s: %s mobile playback paused unexpectedly; trying resume",
+                self._state.session_id,
+                source_action,
+            )
+            await self._playback.ensure_playing(self._state.session_id)
+            return 0.0, False, False
+
+        if (
+            before_snapshot.current_time is None
+            or after_snapshot.current_time is None
+            or after_snapshot.ad_showing
+        ):
+            return elapsed_chunk, False, False
+
+        media_progress = max(after_snapshot.current_time - before_snapshot.current_time, 0.0)
+        if media_progress < min(0.35, requested_chunk * 0.3):
+            logger.warning(
+                "Session %s: %s mobile playback stalled (media_progress=%.2fs, chunk=%.2fs, ready_state=%s)",
+                self._state.session_id,
+                source_action,
+                media_progress,
+                requested_chunk,
+                after_snapshot.ready_state,
+            )
+            await self._playback.ensure_playing(self._state.session_id)
+            return 0.0, False, False
+
+        return min(elapsed_chunk, media_progress), False, False
+
+    async def _ensure_mobile_player_ready(self, source_action: str) -> bool:
+        if not self._state.is_mobile_surface():
+            return True
+
+        snapshot = await self._playback.get_snapshot()
+        if not snapshot.error_visible:
+            return True
+
+        logger.warning(
+            "Session %s: %s mobile player entered watch with visible error (%s)",
+            self._state.session_id,
+            source_action,
+            snapshot.error_text or "<unknown>",
+        )
+        recovered = await self._playback.recover_player_error(
+            self._state.session_id,
+            current_url=self._page.url,
+        )
+        if recovered:
+            return True
+
+        logger.warning(
+            "Session %s: %s mobile player unrecoverable before watch, going back",
+            self._state.session_id,
+            source_action,
+        )
+        await self._nav.go_back()
+        self._state.on_video_page = False
+        return False
+
     async def _allow_terminal_ad_overflow(
         self,
         *,
@@ -665,6 +842,99 @@ class VideoWatcher:
         return True
 
     # ── Comment / scroll helpers ──────────────────────────────
+
+    async def _glance_mobile_comments(self, *, source_action: str) -> bool:
+        if not self._state.is_mobile_surface():
+            return False
+        if "/watch" not in (self._page.url or "") and not self._state.on_video_page:
+            return False
+
+        opened = await self._focus_mobile_comments_entry()
+        if not opened:
+            for _ in range(random.randint(2, 4)):
+                await self._h.scroll("down", amount=1)
+                await self._h.delay(0.3, 0.7)
+            opened = await self._focus_mobile_comments_entry()
+
+        if not opened:
+            logger.info(
+                "Session %s: %s micro — mobile comments fallback scroll without explicit entry point",
+                self._state.session_id,
+                source_action,
+            )
+
+        logger.info("Session %s: %s micro — mobile comments glance", self._state.session_id, source_action)
+        await self._h.delay(0.4, 0.9)
+
+        scrolls = random.randint(2, 4)
+        comment_depth = 0
+        comment_dwell_seconds = 0.0
+        for _ in range(scrolls):
+            comment_depth += 1
+            await self._h.scroll("down", amount=1)
+            delay = random.uniform(0.5, 1.0)
+            comment_dwell_seconds += delay
+            await self._h.delay(delay, delay)
+
+        dwell = random.uniform(2.4, 4.8)
+        comment_dwell_seconds += dwell
+        logger.info(
+            "Session %s: %s micro — reading mobile comments %.1fs",
+            self._state.session_id,
+            source_action,
+            dwell,
+        )
+        await self._h.delay(dwell, dwell)
+
+        await self._refocus_after_comment_glance(
+            source_action=source_action,
+            comment_depth=comment_depth,
+            comment_dwell_seconds=comment_dwell_seconds,
+        )
+        return True
+
+    async def _focus_mobile_comments_entry(self) -> bool:
+        try:
+            return bool(
+                await self._page.evaluate(
+                    """() => {
+                        const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                        const candidates = [
+                            ...document.querySelectorAll(
+                                'ytm-comment-section-renderer, '
+                                + 'ytm-comments-entry-point-header-renderer, '
+                                + 'button, [role=\"button\"], a'
+                            ),
+                        ];
+                        const wanted = /(^|\\b)(comments|комментарии)(\\b|$)/i;
+                        let target = null;
+                        for (const node of candidates) {
+                            const label = clean(node.getAttribute?.('aria-label'));
+                            const text = clean(node.innerText || node.textContent);
+                            if (wanted.test(label) || wanted.test(text)) {
+                                target = node;
+                                break;
+                            }
+                        }
+                        if (!target) {
+                            target = document.querySelector('ytm-comment-section-renderer');
+                        }
+                        if (!target) return false;
+                        target.scrollIntoView({ block: 'center', inline: 'nearest' });
+
+                        const nestedButton =
+                            target.matches?.('button, [role=\"button\"], a')
+                                ? target
+                                : target.querySelector?.('button, [role=\"button\"], a');
+                        if (nestedButton && typeof nestedButton.click === 'function') {
+                            nestedButton.click();
+                        }
+                        return true;
+                    }""",
+                )
+            )
+        except Exception:
+            return False
 
     def _should_refocus_after_comment_scroll(
         self,

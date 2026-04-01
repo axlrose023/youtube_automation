@@ -9,6 +9,7 @@ from ..session.state import SessionState
 class Humanizer:
     def __init__(self, page: Page, state: SessionState) -> None:
         self._page = page
+        self._state = state
         self._pace = state.personality.pace
 
     async def delay(self, min_s: float, max_s: float) -> None:
@@ -27,10 +28,20 @@ class Humanizer:
             delta = random.randint(200, 600)
             if direction == "up":
                 delta = -delta
-            await self._page.mouse.wheel(0, delta)
+            if self._state.is_mobile_surface():
+                await self._page.evaluate("(delta) => window.scrollBy(0, delta)", delta)
+            else:
+                await self._page.mouse.wheel(0, delta)
             await self.delay(0.3, 1.5)
 
     async def click(self, element: ElementHandle) -> None:
+        if self._state.is_mobile_surface():
+            try:
+                await element.click(timeout=2_500, no_wait_after=True)
+                return
+            except Exception:
+                pass
+
         box = await element.bounding_box()
         if not box:
             await element.click()
@@ -52,11 +63,22 @@ class Humanizer:
         await self._page.mouse.click(target_x, target_y)
 
     async def wiggle_mouse(self) -> None:
+        if self._state.is_mobile_surface():
+            return
         await self._page.mouse.move(
             random.randint(300, 900), random.randint(200, 600),
         )
 
     async def scan_previews(self, duration_s: float = 10.0) -> None:
+        if self._state.is_mobile_surface():
+            elapsed = 0.0
+            while elapsed < duration_s:
+                await self.scroll("down", amount=1)
+                wait = random.uniform(0.8, 2.0)
+                await self.delay(wait, wait)
+                elapsed += wait
+            return
+
         elapsed = 0.0
         while elapsed < duration_s:
             await self._page.mouse.move(

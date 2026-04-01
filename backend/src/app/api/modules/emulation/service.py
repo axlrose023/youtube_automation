@@ -199,6 +199,7 @@ class EmulationSessionService:
     ) -> tuple[dict | None, EmulationSessionHistory | None]:
         data = await self._session_store.get(session_id)
         if data is not None:
+            data = await self._reconcile_stale_stopping_session(session_id, data)
             status = data.get("status")
             if status not in (SessionStatus.FAILED, SessionStatus.STOPPED):
                 raise HTTPException(
@@ -227,6 +228,7 @@ class EmulationSessionService:
         if data is None:
             raise HTTPException(status_code=404, detail="Session not found")
 
+        data = await self._reconcile_stale_stopping_session(session_id, data)
         data = await self._reconcile_stale_running_session(session_id, data)
         return build_status_response(session_id, data)
 
@@ -303,6 +305,37 @@ class EmulationSessionService:
         live_payload["current_watch"] = None
         live_payload["error"] = error
         await self._history_service.mark_stale_failed(session_id, live_payload, error)
+        return live_payload
+
+    async def _reconcile_stale_stopping_session(
+        self,
+        session_id: str,
+        data: dict,
+    ) -> dict:
+        status = data.get("status")
+        if status not in {SessionStatus.RUNNING, SessionStatus.STOPPING}:
+            return data
+        if status == SessionStatus.RUNNING and not data.get("stop_requested"):
+            return data
+        if await self._session_store.is_run_lock_active(session_id):
+            return data
+
+        now_ts = datetime.datetime.now(datetime.UTC).timestamp()
+        await self._session_store.update(
+            session_id,
+            status=SessionStatus.STOPPED,
+            stop_requested=False,
+            finished_at=now_ts,
+            current_watch=None,
+            error="Stopped by user",
+        )
+        live_payload = await self._session_store.get(session_id) or {**data}
+        live_payload["status"] = SessionStatus.STOPPED
+        live_payload["stop_requested"] = False
+        live_payload["finished_at"] = now_ts
+        live_payload["current_watch"] = None
+        live_payload["error"] = "Stopped by user"
+        await self._history_service.mark_stopped(session_id, live_payload)
         return live_payload
 
     @staticmethod

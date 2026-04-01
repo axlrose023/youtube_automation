@@ -6,6 +6,11 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from ..session.state import SessionState
 from .humanizer import Humanizer
+from .youtube_surface import (
+    absolutize_youtube_href,
+    canonicalize_youtube_watch_url,
+    detect_surface_mode,
+)
 
 logger = logging.getLogger(__name__)
 _FINANCE_TOPIC_HINTS = (
@@ -241,9 +246,10 @@ class VideoFinder:
                 elements_with_video_href = 0
                 topic_matched_elements = 0
                 seen_filtered_elements = 0
+                extracted_title_preview: list[str] = []
                 for candidate_element in candidate_elements[:limit * 6]:
                     try:
-                        href = await candidate_element.get_attribute("href")
+                        href = await self._extract_candidate_href(candidate_element)
                         if not self._is_video_href(href):
                             continue
                         if not allow_shorts and "/shorts/" in (href or ""):
@@ -255,6 +261,8 @@ class VideoFinder:
                         elements_with_video_href += 1
 
                         title = await self._extract_element_title(candidate_element)
+                        if len(extracted_title_preview) < 5:
+                            extracted_title_preview.append((title or "<empty>")[:160])
                         if require_topic_match:
                             if not self._candidate_matches_topic(title, preferred_topic):
                                 continue
@@ -281,6 +289,19 @@ class VideoFinder:
                     len(clickable_elements),
                     len(href_only_elements),
                 )
+                if (
+                    self._state.is_mobile_surface()
+                    and require_topic_match
+                    and elements_with_video_href
+                    and topic_matched_elements == 0
+                    and extracted_title_preview
+                ):
+                    logger.info(
+                        "Session %s: selector '%s' mobile title preview -> %s",
+                        self._state.session_id,
+                        selector,
+                        " | ".join(extracted_title_preview),
+                    )
                 if seen_filtered_elements:
                     logger.info(
                         "Session %s: selector '%s' -> skipped_seen=%d",
@@ -316,14 +337,18 @@ class VideoFinder:
         return None
 
     async def _click_element(self, video_element: ElementHandle) -> bool:
+        source_element = video_element
+        video_element = await self._resolve_click_target(video_element)
         url_before = self._page.url
         previous_video_id = self._state.video_id_from_url(url_before)
-        href = await video_element.get_attribute("href")
-        title = await self._extract_element_title(video_element)
+        href = await self._extract_candidate_href(source_element)
+        title = await self._extract_element_title(source_element)
+        if not title:
+            title = await self._extract_element_title(video_element)
         fallback_url = ""
         target_video_id = None
         if href:
-            fallback_url = href if href.startswith("http") else f"https://www.youtube.com{href}"
+            fallback_url = self._to_absolute_url(href)
             target_video_id = self._state.video_id_from_url(fallback_url)
         self._state.last_clicked_video_title = title
         self._state.last_clicked_video_url = fallback_url or self._page.url
@@ -335,6 +360,14 @@ class VideoFinder:
         )
 
         await self._prepare_element_for_click(video_element)
+
+        if self._state.is_mobile_surface() and fallback_url:
+            logger.info(
+                "Session %s: mobile direct navigation to %s",
+                self._state.session_id,
+                href,
+            )
+            return await self._navigate_to_fallback(fallback_url)
 
         try:
             await self._h.click(video_element)
@@ -358,6 +391,7 @@ class VideoFinder:
         await self._h.delay(0.5, 1.0)
 
         current_url = self._page.url
+        self._state.set_surface_mode(await detect_surface_mode(self._page))
         current_video_id = self._state.video_id_from_url(current_url)
 
         if (
@@ -454,6 +488,7 @@ class VideoFinder:
         try:
             await self._page.goto(full_url, wait_until="domcontentloaded", timeout=10_000)
             await self._h.delay(0.5, 1.0)
+            self._state.set_surface_mode(await detect_surface_mode(self._page))
             self._state.on_video_page = True
             self._state.last_clicked_video_url = self._page.url
             self._state.mark_video_seen(self._page.url or full_url)
@@ -481,6 +516,48 @@ class VideoFinder:
         except Exception:
             pass
 
+        try:
+            container_text = await video_element.evaluate(
+                """(el) => {
+                    const container = el.closest(
+                        'ytm-video-with-context-renderer, '
+                        + 'ytm-rich-item-renderer, '
+                        + 'ytm-compact-video-renderer, '
+                        + 'ytd-video-renderer, '
+                        + 'ytd-rich-item-renderer, '
+                        + 'ytd-compact-video-renderer, '
+                        + 'yt-lockup-view-model'
+                    );
+                    if (!container) return '';
+
+                    const textCandidates = [
+                        container.querySelector('h3'),
+                        container.querySelector('.media-item-headline'),
+                        container.querySelector('#video-title'),
+                        container.querySelector('#video-title-link'),
+                        container.querySelector('[role=\"text\"][aria-label]'),
+                        container.querySelector('[aria-label]')
+                    ];
+
+                    for (const candidate of textCandidates) {
+                        if (!candidate) continue;
+                        const aria = (candidate.getAttribute('aria-label') || '').trim();
+                        if (aria) return aria;
+                        const text = (candidate.innerText || candidate.textContent || '').trim();
+                        if (text) return text;
+                    }
+
+                    const fallbackText = (container.innerText || container.textContent || '').trim();
+                    return fallbackText;
+                }"""
+            )
+            if container_text:
+                clean_container_text = " ".join(str(container_text).split())
+                if clean_container_text:
+                    return clean_container_text[:220]
+        except Exception:
+            pass
+
         return None
 
     async def reset_view(self, force: bool = False) -> None:
@@ -492,10 +569,11 @@ class VideoFinder:
         if not force and scroll_y < 900 and "/watch" not in self._page.url:
             return
 
-        try:
-            await self._page.keyboard.press("Home")
-        except Exception:
-            pass
+        if not self._state.is_mobile_surface():
+            try:
+                await self._page.keyboard.press("Home")
+            except Exception:
+                pass
 
         try:
             await self._page.evaluate("window.scrollTo(0, 0)")
@@ -521,13 +599,59 @@ class VideoFinder:
             return False
         return "/watch" in href or "/shorts/" in href
 
-    @staticmethod
-    def _to_absolute_url(href: str | None) -> str:
+    async def _extract_candidate_href(self, candidate_element: ElementHandle) -> str | None:
+        try:
+            href = await candidate_element.get_attribute("href")
+            if self._is_video_href(href):
+                return href
+        except Exception:
+            pass
+
+        try:
+            resolved_href = await candidate_element.evaluate(
+                """(el) => {
+                    const link = el.matches('a[href]')
+                        ? el
+                        : el.querySelector(\"a[href*='/watch?v='], a[href*='/watch'], a[href*='/shorts/']\");
+                    return link ? link.getAttribute('href') : null;
+                }"""
+            )
+            return str(resolved_href) if resolved_href else None
+        except Exception:
+            return None
+
+    async def _resolve_click_target(self, candidate_element: ElementHandle) -> ElementHandle:
+        try:
+            href = await candidate_element.get_attribute("href")
+            if self._is_video_href(href):
+                return candidate_element
+        except Exception:
+            pass
+
+        try:
+            link = await candidate_element.query_selector("a[href*='/watch?v='], a[href*='/watch'], a[href*='/shorts/']")
+            if link is not None:
+                return link
+        except Exception:
+            pass
+
+        return candidate_element
+
+    def _to_absolute_url(self, href: str | None) -> str:
         if not href:
             return ""
-        if href.startswith("http"):
-            return href
-        return f"https://www.youtube.com{href}"
+        absolute = absolutize_youtube_href(
+            href,
+            current_url=self._page.url,
+            preferred_mode=self._state.surface_mode.value,
+        )
+        if self._state.is_mobile_surface():
+            return canonicalize_youtube_watch_url(
+                absolute,
+                current_url=self._page.url,
+                preferred_mode=self._state.surface_mode.value,
+            )
+        return absolute
 
     def _candidate_matches_topic(self, title: str | None, preferred_topic: str | None) -> bool:
         if preferred_topic:

@@ -49,6 +49,11 @@ class Mode(StrEnum):
     B = "task"
 
 
+class SurfaceMode(StrEnum):
+    DESKTOP = "desktop"
+    MOBILE = "mobile"
+
+
 @dataclass
 class SessionState:
 
@@ -62,6 +67,9 @@ class SessionState:
     watched_videos: list[dict[str, object]] = field(default_factory=list)
     watched_ads: list[dict[str, object]] = field(default_factory=list)
     seen_video_ids: set[str] = field(default_factory=set)
+    broken_video_ids: set[str] = field(default_factory=set)
+    liked_video_ids: set[str] = field(default_factory=set)
+    subscribed_channel_keys: set[str] = field(default_factory=set)
 
     fatigue: float = 0.0
     on_video_page: bool = False
@@ -90,6 +98,7 @@ class SessionState:
     mode: Mode = field(init=False)
     initial_mode: Mode = field(init=False)
     mode_locked: bool = field(init=False, default=False)
+    surface_mode: SurfaceMode = field(init=False, default=SurfaceMode.DESKTOP)
     personality: SessionPersonality = field(init=False)
     topic_tokens: set[str] = field(init=False, default_factory=set)
 
@@ -110,11 +119,40 @@ class SessionState:
         elapsed = max(elapsed_monotonic, elapsed_wallclock)
         return max(total - elapsed, 0.0)
 
+    def set_surface_mode(self, mode: str | SurfaceMode | None) -> None:
+        if mode == SurfaceMode.MOBILE or mode == SurfaceMode.MOBILE.value:
+            self.surface_mode = SurfaceMode.MOBILE
+            return
+        self.surface_mode = SurfaceMode.DESKTOP
+
+    def is_mobile_surface(self) -> bool:
+        return self.surface_mode == SurfaceMode.MOBILE
+
     def unsearched_topics(self) -> list[str]:
-        return [topic for topic in self.topics if topic not in self.searched_topics]
+        return [topic for topic in self.topics if topic not in self.derived_search_topics()]
 
     def all_topics_covered(self) -> bool:
         return not self.unsearched_topics()
+
+    def derived_search_topics(self) -> list[str]:
+        ordered: list[str] = []
+
+        for topic in self.searched_topics:
+            clean_topic = (topic or "").strip()
+            if clean_topic and clean_topic not in ordered:
+                ordered.append(clean_topic)
+
+        for payload in self.watched_videos:
+            clean_topic = str(payload.get("search_keyword") or "").strip()
+            if clean_topic and clean_topic not in ordered:
+                ordered.append(clean_topic)
+
+        if self.current_watch is not None:
+            clean_topic = str(self.current_watch.get("search_keyword") or "").strip()
+            if clean_topic and clean_topic not in ordered:
+                ordered.append(clean_topic)
+
+        return ordered
 
     def topic_balance_enabled(self) -> bool:
         return len(self.topics) > 1 and self.duration_minutes >= TOPIC_BALANCE_MIN_DURATION_MINUTES
@@ -213,6 +251,33 @@ class SessionState:
         if vid:
             self.seen_video_ids.add(vid)
 
+    def is_broken_video(self, raw_url: str | None) -> bool:
+        vid = video_id_from_url(raw_url)
+        return bool(vid and vid in self.broken_video_ids)
+
+    def mark_video_broken(self, raw_url: str | None) -> None:
+        vid = video_id_from_url(raw_url)
+        if vid:
+            self.broken_video_ids.add(vid)
+
+    def has_liked_video(self, raw_url: str | None) -> bool:
+        vid = video_id_from_url(raw_url)
+        return bool(vid and vid in self.liked_video_ids)
+
+    def mark_video_liked(self, raw_url: str | None) -> None:
+        vid = video_id_from_url(raw_url)
+        if vid:
+            self.liked_video_ids.add(vid)
+
+    def has_subscribed_channel(self, channel_key: str | None) -> bool:
+        clean_key = (channel_key or "").strip().lower()
+        return bool(clean_key and clean_key in self.subscribed_channel_keys)
+
+    def mark_channel_subscribed(self, channel_key: str | None) -> None:
+        clean_key = (channel_key or "").strip().lower()
+        if clean_key:
+            self.subscribed_channel_keys.add(clean_key)
+
     # ── Video / Ad recording ─────────────────────────────────
 
     def add_watched_video(
@@ -225,6 +290,10 @@ class SessionState:
         target_seconds: float,
         completed: bool,
         merge_if_same_url: bool = False,
+        liked_override: bool | None = None,
+        subscribed_override: bool | None = None,
+        channel_key_override: str | None = None,
+        channel_name_override: str | None = None,
     ) -> None:
         clean_title = (title or "").strip() or "<unknown>"
         clean_url = (url or "").strip()
@@ -243,33 +312,76 @@ class SessionState:
         watched = round(max(watched_seconds, 0.0), 1)
         target = round(max(target_seconds, 0.0), 1)
         ratio = round(watched / target, 3) if target > 0 else None
+        current_watch = self.current_watch if isinstance(self.current_watch, dict) else None
+        current_url = str(current_watch.get("url") or "") if current_watch else ""
+        current_watch_matches = bool(current_watch and is_same_video_url(clean_url, current_url))
+        liked = bool(current_watch.get("liked")) if current_watch_matches else self.has_liked_video(clean_url)
+        subscribed = bool(current_watch.get("subscribed")) if current_watch_matches else False
+        channel_key = None
+        channel_name = None
+        if current_watch_matches:
+            raw_channel_key = current_watch.get("channel_key")
+            raw_channel_name = current_watch.get("channel_name")
+            if isinstance(raw_channel_key, str) and raw_channel_key.strip():
+                channel_key = raw_channel_key.strip().lower()
+            if isinstance(raw_channel_name, str) and raw_channel_name.strip():
+                channel_name = raw_channel_name.strip()
+        if liked_override is not None:
+            liked = liked_override
+        if subscribed_override is not None:
+            subscribed = subscribed_override
+        if isinstance(channel_key_override, str) and channel_key_override.strip():
+            channel_key = channel_key_override.strip().lower()
+        if isinstance(channel_name_override, str) and channel_name_override.strip():
+            channel_name = channel_name_override.strip()
 
         if merge_if_same_url and self.watched_videos:
             previous = self.watched_videos[-1]
             previous_url = str(previous.get("url") or "")
             if is_same_video_url(clean_url, previous_url):
-                self._merge_into_previous(previous, watched, target, completed, matched, keywords)
+                self._merge_into_previous(
+                    previous,
+                    watched,
+                    target,
+                    completed,
+                    matched,
+                    keywords,
+                    liked=liked,
+                    subscribed=subscribed,
+                    channel_key=channel_key,
+                    channel_name=channel_name,
+                )
                 self.mark_video_seen(clean_url)
                 self.refresh_video_counters()
                 return
 
-        self.watched_videos.append(
-            {
-                "position": len(self.watched_videos) + 1,
-                "action": action,
-                "title": clean_title,
-                "url": clean_url,
-                "watched_seconds": watched,
-                "target_seconds": target,
-                "watch_ratio": ratio,
-                "completed": completed,
-                "search_keyword": self.current_topic,
-                "matched_topics": matched,
-                "keywords": keywords,
-                "recorded_at": time.time(),
-            }
-        )
+        payload = {
+            "position": len(self.watched_videos) + 1,
+            "action": action,
+            "title": clean_title,
+            "url": clean_url,
+            "watched_seconds": watched,
+            "target_seconds": target,
+            "watch_ratio": ratio,
+            "completed": completed,
+            "search_keyword": self.current_topic,
+            "matched_topics": matched,
+            "keywords": keywords,
+            "recorded_at": time.time(),
+            "liked": liked,
+            "subscribed": subscribed,
+        }
+        if channel_key:
+            payload["channel_key"] = channel_key
+        if channel_name:
+            payload["channel_name"] = channel_name
+
+        self.watched_videos.append(payload)
         self.mark_video_seen(clean_url)
+        if liked:
+            self.mark_video_liked(clean_url)
+        if subscribed and channel_key:
+            self.mark_channel_subscribed(channel_key)
         self.refresh_video_counters()
 
     def _merge_into_previous(
@@ -280,6 +392,11 @@ class SessionState:
         completed: bool,
         matched: list[str],
         keywords: list[str],
+        *,
+        liked: bool,
+        subscribed: bool,
+        channel_key: str | None,
+        channel_name: str | None,
     ) -> None:
         prev_watched = float(previous.get("watched_seconds") or 0.0)
         prev_target = float(previous.get("target_seconds") or 0.0)
@@ -304,6 +421,12 @@ class SessionState:
             if kw not in existing_keywords:
                 existing_keywords.append(kw)
         previous["keywords"] = existing_keywords
+        previous["liked"] = bool(previous.get("liked")) or liked
+        previous["subscribed"] = bool(previous.get("subscribed")) or subscribed
+        if channel_key and not previous.get("channel_key"):
+            previous["channel_key"] = channel_key
+        if channel_name and not previous.get("channel_name"):
+            previous["channel_name"] = channel_name
 
     def add_watched_ad(self, record: dict[str, object]) -> dict[str, object]:
         ad_record = dict(record)
@@ -359,6 +482,11 @@ class SessionState:
             "search_keyword": self.current_topic,
             "matched_topics": matched,
             "keywords": keywords,
+            "liked": self.has_liked_video(clean_url),
+            "subscribed": False,
+            "engagement_like_attempts": 0,
+            "engagement_subscribe_attempts": 0,
+            "subscribe_allowed": None,
         }
 
     def increment_current_watch(self, delta_seconds: float) -> None:
@@ -408,6 +536,10 @@ class SessionState:
             target_seconds=target_seconds,
             completed=completed,
             merge_if_same_url=merge_if_same_url,
+            liked_override=bool(current.get("liked")),
+            subscribed_override=bool(current.get("subscribed")),
+            channel_key_override=str(current.get("channel_key") or "").strip() or None,
+            channel_name_override=str(current.get("channel_name") or "").strip() or None,
         )
         return True
 
@@ -479,7 +611,13 @@ class SessionState:
 
         for video in self.watched_videos:
             if isinstance(video, dict):
-                self.mark_video_seen(video.get("url"))
+                video_url = video.get("url")
+                self.mark_video_seen(video_url)
+                if bool(video.get("liked")):
+                    self.mark_video_liked(video_url)
+                raw_channel_key = video.get("channel_key")
+                if bool(video.get("subscribed")) and isinstance(raw_channel_key, str) and raw_channel_key.strip():
+                    self.mark_channel_subscribed(raw_channel_key)
 
     def _topic_bucket_from_payload(self, payload: dict[str, object] | None) -> str | None:
         if not isinstance(payload, dict):

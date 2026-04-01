@@ -41,7 +41,7 @@ def build_runtime(
 ) -> EmulationRuntime:
     humanizer = Humanizer(page, state)
     ads = AdHandler(page, humanizer, state, capture=capture, on_capture_ready=on_capture_ready)
-    playback = PlaybackController(page, humanizer)
+    playback = PlaybackController(page, humanizer, state)
     finder = VideoFinder(page, state, humanizer)
 
     navigator = Navigator(page, state, humanizer, finder)
