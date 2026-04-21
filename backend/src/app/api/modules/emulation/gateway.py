@@ -6,10 +6,12 @@ from collections import Counter
 from dataclasses import dataclass
 
 from sqlalchemy import Text, and_, cast, delete, exists, func, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from .models import (
+    ANALYSIS_TERMINAL_STATUSES,
     AdCapture,
     AdCaptureScreenshot,
     AnalysisStatus,
@@ -42,6 +44,88 @@ class EmulationHistoryQuery:
     started_to: datetime.datetime | None = None
     finished_from: datetime.datetime | None = None
     finished_to: datetime.datetime | None = None
+
+
+def _capture_timestamp(value: datetime.datetime | None) -> datetime.datetime:
+    if isinstance(value, datetime.datetime):
+        return value
+    return datetime.datetime.min.replace(tzinfo=datetime.UTC)
+
+
+def _capture_completeness(capture: AdCapture) -> int:
+    score = 0
+    for value in (
+        capture.advertiser_domain,
+        capture.cta_href,
+        capture.display_url,
+        capture.headline_text,
+        capture.landing_url,
+        capture.landing_dir,
+        capture.video_src_url,
+        capture.video_file,
+    ):
+        if value not in (None, "", [], {}):
+            score += 1
+    if capture.screenshots:
+        score += len(capture.screenshots)
+    return score
+
+
+def _capture_priority(capture: AdCapture) -> tuple[int, int, datetime.datetime, datetime.datetime, str]:
+    analysis_status = str(capture.analysis_status or "").lower()
+    analysis_rank = 1 if analysis_status in ANALYSIS_TERMINAL_STATUSES else 0
+    completeness = 0 if analysis_rank else _capture_completeness(capture)
+    return (
+        analysis_rank,
+        completeness,
+        _capture_timestamp(capture.updated_at),
+        _capture_timestamp(capture.created_at),
+        str(capture.id),
+    )
+
+
+def collapse_capture_rows(captures: list[AdCapture]) -> list[AdCapture]:
+    best_by_position: dict[int, AdCapture] = {}
+    passthrough: list[AdCapture] = []
+    for capture in captures:
+        ad_position = capture.ad_position
+        if not isinstance(ad_position, int) or ad_position <= 0:
+            passthrough.append(capture)
+            continue
+
+        current = best_by_position.get(ad_position)
+        if current is None or _capture_priority(capture) > _capture_priority(current):
+            best_by_position[ad_position] = capture
+
+    collapsed = passthrough + list(best_by_position.values())
+    return sorted(
+        collapsed,
+        key=lambda item: (
+            item.ad_position if isinstance(item.ad_position, int) else 0,
+            _capture_timestamp(item.created_at),
+            str(item.id),
+        ),
+    )
+
+
+def collect_duplicate_capture_ids(captures: list[AdCapture]) -> list[uuid.UUID]:
+    duplicate_ids: list[uuid.UUID] = []
+    grouped: dict[int, list[AdCapture]] = {}
+    for capture in captures:
+        ad_position = capture.ad_position
+        if not isinstance(ad_position, int) or ad_position <= 0:
+            continue
+        grouped.setdefault(ad_position, []).append(capture)
+
+    for rows in grouped.values():
+        if len(rows) <= 1:
+            continue
+        canonical = max(rows, key=_capture_priority)
+        for row in rows:
+            if row.id != canonical.id:
+                duplicate_ids.append(row.id)
+
+    return duplicate_ids
 
 
 class EmulationHistoryGateway:
@@ -179,7 +263,7 @@ class EmulationHistoryGateway:
             .order_by(AdCapture.ad_position.asc(), AdCapture.created_at.asc())
         )
         result = await self.session.execute(stmt)
-        return list(result.scalars().all())
+        return collapse_capture_rows(list(result.scalars().all()))
 
     async def get_ad_captures_by_sessions(
         self, session_ids: list[str]
@@ -201,7 +285,10 @@ class EmulationHistoryGateway:
         captures_by_session: dict[str, list[AdCapture]] = {}
         for capture in result.scalars().all():
             captures_by_session.setdefault(capture.session_id, []).append(capture)
-        return captures_by_session
+        return {
+            session_id: collapse_capture_rows(captures)
+            for session_id, captures in captures_by_session.items()
+        }
 
     async def delete_session(self, session_id: str) -> bool:
         payload = await self.get_by_session_id(session_id)
@@ -390,11 +477,47 @@ class AdCaptureGateway:
         await self.session.flush()
         return capture
 
+    async def get_or_create(
+        self,
+        session_id: str,
+        ad_position: int,
+    ) -> AdCapture:
+        insert_stmt = (
+            insert(AdCapture)
+            .values(session_id=session_id, ad_position=ad_position)
+            .on_conflict_do_nothing(
+                index_elements=[AdCapture.session_id, AdCapture.ad_position],
+            )
+            .returning(AdCapture.id)
+        )
+        inserted_id = (await self.session.execute(insert_stmt)).scalar_one_or_none()
+        if inserted_id is not None:
+            capture = await self.session.get(AdCapture, inserted_id)
+            if capture is not None:
+                return capture
+
+        stmt = (
+            select(AdCapture)
+            .options(selectinload(AdCapture.screenshots))
+            .where(
+                AdCapture.session_id == session_id,
+                AdCapture.ad_position == ad_position,
+            )
+            .order_by(AdCapture.created_at.asc(), AdCapture.updated_at.asc())
+        )
+        result = await self.session.execute(stmt)
+        capture = next(iter(collapse_capture_rows(list(result.scalars().all()))), None)
+        if capture is None:
+            raise RuntimeError(
+                f"Failed to get or create ad capture for session={session_id} position={ad_position}",
+            )
+        return capture
+
     async def add_screenshot(self, screenshot: AdCaptureScreenshot) -> None:
         self.session.add(screenshot)
         await self.session.flush()
 
-    async def get_by_session(self, session_id: str) -> list[AdCapture]:
+    async def get_raw_by_session(self, session_id: str) -> list[AdCapture]:
         stmt = (
             select(AdCapture)
             .options(selectinload(AdCapture.screenshots))
@@ -403,6 +526,40 @@ class AdCaptureGateway:
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
+
+    async def get_by_session(self, session_id: str) -> list[AdCapture]:
+        return collapse_capture_rows(await self.get_raw_by_session(session_id))
+
+    async def set_screenshots(
+        self,
+        capture: AdCapture,
+        screenshots: list[AdCaptureScreenshot],
+    ) -> None:
+        await self.session.execute(
+            delete(AdCaptureScreenshot).where(
+                AdCaptureScreenshot.capture_id == capture.id,
+            ),
+        )
+        for screenshot in screenshots:
+            self.session.add(screenshot)
+        await self.session.flush()
+
+    async def delete_missing_positions(
+        self,
+        session_id: str,
+        positions: set[int],
+    ) -> None:
+        stmt = delete(AdCapture).where(AdCapture.session_id == session_id)
+        if positions:
+            stmt = stmt.where(~AdCapture.ad_position.in_(positions))
+        await self.session.execute(stmt)
+        await self.session.flush()
+
+    async def delete_by_ids(self, capture_ids: list[uuid.UUID]) -> None:
+        if not capture_ids:
+            return
+        await self.session.execute(delete(AdCapture).where(AdCapture.id.in_(capture_ids)))
+        await self.session.flush()
 
     async def update_landing_status(
         self, capture_id: uuid.UUID, status: str, landing_dir: str | None = None,

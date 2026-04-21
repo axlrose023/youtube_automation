@@ -70,22 +70,27 @@ def _merge_live_capture_analysis(
         if existing_capture.get("analysis_summary") is not None:
             merged_capture["analysis_summary"] = existing_capture.get("analysis_summary")
 
-        if str(existing_status or "").lower() == AnalysisStatus.NOT_RELEVANT:
-            merged_capture["video_file"] = None
-            merged_capture["landing_url"] = None
-            merged_capture["landing_dir"] = None
-            merged_capture["screenshot_paths"] = []
-        else:
-            for key in ("video_file", "landing_url", "landing_dir", "screenshot_paths"):
-                if merged_capture.get(key) in (None, []):
-                    fallback = existing_capture.get(key)
-                    if fallback not in (None, []):
-                        merged_capture[key] = fallback
+        for key in ("video_file", "landing_url", "landing_dir", "screenshot_paths"):
+            if merged_capture.get(key) in (None, []):
+                fallback = existing_capture.get(key)
+                if fallback not in (None, []):
+                    merged_capture[key] = fallback
 
         ad["capture"] = merged_capture
         merged_ads.append(ad)
 
     return merged_ads
+
+
+def merge_live_watched_ads(
+    *,
+    current_ads: list[dict[str, object]],
+    next_ads: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    return _merge_live_capture_analysis(
+        current_ads=current_ads,
+        next_ads=next_ads,
+    )
 
 if TYPE_CHECKING:
     from .state import SessionState

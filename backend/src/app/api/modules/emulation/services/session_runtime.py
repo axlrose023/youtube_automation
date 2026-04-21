@@ -13,6 +13,7 @@ from ..models import EmulationSessionHistory, PostProcessingStatus, SessionStatu
 from ..schema import EmulationSessionStatus
 from ..utils import (
     calculate_session_elapsed_minutes,
+    normalize_media_reference,
     normalized_ads_count,
     normalized_videos_count,
     normalize_screenshot_paths,
@@ -40,6 +41,8 @@ def _normalize_live_ad_capture(value: object) -> dict[str, object] | None:
         return None
 
     normalized = dict(value)
+    normalized["video_file"] = normalize_media_reference(value.get("video_file"))
+    normalized["landing_dir"] = normalize_media_reference(value.get("landing_dir"))
     normalized["screenshot_paths"] = normalize_screenshot_paths(
         value.get("screenshot_paths"),
     )

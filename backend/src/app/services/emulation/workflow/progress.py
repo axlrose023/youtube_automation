@@ -7,7 +7,7 @@ from app.database.engine import SessionFactory
 from app.database.uow import UnitOfWork
 from app.services.emulation.persistence import EmulationPersistenceService
 from app.services.emulation.session.store import EmulationSessionStore
-from app.tiq import ANALYSIS_QUEUE_NAME, broker
+from app.tiq import analysis_dispatch_broker
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +69,9 @@ async def queue_ad_analysis(
         from taskiq.kicker import AsyncKicker
 
         await AsyncKicker(
-            broker=broker,
+            broker=analysis_dispatch_broker,
             task_name="ad_analysis_task",
-            labels={"queue_name": ANALYSIS_QUEUE_NAME},
+            labels={},
         ).kiq(session_id)
     except Exception:
         logger.exception("Session %s: failed to queue ad analysis task", session_id)

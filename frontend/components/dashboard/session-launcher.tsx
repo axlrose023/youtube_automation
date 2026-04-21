@@ -1,52 +1,56 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Rocket, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
-import { startEmulation } from "@/lib/api";
+import { getProxies, startEmulation } from "@/lib/api";
+import type { Proxy } from "@/types/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
 
 export function SessionLauncher() {
   const [duration, setDuration] = useState("30");
   const [topics, setTopics] = useState([""]);
-  const [profileId, setProfileId] = useState("");
+  const [proxyId, setProxyId] = useState("");
+  const [proxies, setProxies] = useState<Proxy[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
 
+  useEffect(() => {
+    void getProxies(true)
+      .then((data) => {
+        setProxies(data.items);
+        if (data.items.length > 0 && !proxyId) {
+          setProxyId(data.items[0].id);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
   function normalizeTopics(next: string[]) {
     const normalized = [...next];
-
     while (
-      normalized.length > 1
-      && !normalized[normalized.length - 1]?.trim()
-      && !normalized[normalized.length - 2]?.trim()
+      normalized.length > 1 &&
+      !normalized[normalized.length - 1]?.trim() &&
+      !normalized[normalized.length - 2]?.trim()
     ) {
       normalized.pop();
     }
-
-    if (normalized.length === 0) {
-      return [""];
-    }
-
-    if (normalized.every((item) => item.trim())) {
-      normalized.push("");
-    }
-
+    if (normalized.length === 0) return [""];
+    if (normalized.every((item) => item.trim())) normalized.push("");
     return normalized;
   }
 
   function updateTopic(index: number, value: string) {
     setTopics((prev) =>
-      normalizeTopics(
-        prev.map((item, itemIndex) => (itemIndex === index ? value : item)),
-      ),
+      normalizeTopics(prev.map((item, i) => (i === index ? value : item))),
     );
   }
 
   function removeTopic(index: number) {
-    setTopics((prev) => normalizeTopics(prev.filter((_, itemIndex) => itemIndex !== index)));
+    setTopics((prev) => normalizeTopics(prev.filter((_, i) => i !== index)));
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -55,14 +59,7 @@ export function SessionLauncher() {
     setLoading(true);
 
     try {
-      const payloadTopics = topics.map((item) => item.trim()).filter(Boolean);
-
-      const normalizedProfileId = profileId.trim();
-      if (!normalizedProfileId) {
-        setError("Нужен идентификатор профиля AdsPower.");
-        setLoading(false);
-        return;
-      }
+      const payloadTopics = topics.map((t) => t.trim()).filter(Boolean);
       if (!duration.trim()) {
         setError("Нужно указать длительность.");
         setLoading(false);
@@ -73,15 +70,22 @@ export function SessionLauncher() {
         setLoading(false);
         return;
       }
+      if (!proxyId) {
+        setError("Выбери прокси.");
+        setLoading(false);
+        return;
+      }
 
       const response = await startEmulation({
         duration_minutes: Number(duration),
         topics: payloadTopics,
-        profile_id: normalizedProfileId,
+        runner: "android",
+        proxy_id: proxyId,
+        headless: true,
       });
       navigate(`/sessions/${response.session_id}`);
-    } catch (err) {
-      setError("Не удалось запустить эмуляцию. Проверь API и логи, затем попробуй снова.");
+    } catch {
+      setError("Не удалось запустить эмуляцию. Проверь API и логи.");
     } finally {
       setLoading(false);
     }
@@ -102,16 +106,23 @@ export function SessionLauncher() {
             min={1}
             max={480}
             value={duration}
-            onChange={(event) => setDuration(event.target.value)}
+            onChange={(e) => setDuration(e.target.value)}
             required
           />
-          <Input
-            label="ID профиля AdsPower"
-            placeholder="Обязательно"
-            value={profileId}
-            onChange={(event) => setProfileId(event.target.value)}
-            required
-          />
+          <Select
+            label="Прокси"
+            value={proxyId}
+            onChange={(e) => setProxyId(e.target.value)}
+          >
+            {proxies.length === 0 && (
+              <option value="">Нет доступных прокси</option>
+            )}
+            {proxies.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label} ({p.scheme}://{p.host}:{p.port})
+              </option>
+            ))}
+          </Select>
         </div>
 
         <div className="space-y-2">
@@ -126,10 +137,11 @@ export function SessionLauncher() {
                   className="flex-1"
                   placeholder={`Тема ${index + 1}`}
                   value={topic}
-                  onChange={(event) => updateTopic(index, event.target.value)}
+                  onChange={(e) => updateTopic(index, e.target.value)}
                   required={index === 0}
                 />
-                {topics.length > 1 && !(index === topics.length - 1 && !topic.trim()) ? (
+                {topics.length > 1 &&
+                  !(index === topics.length - 1 && !topic.trim()) ? (
                   <button
                     type="button"
                     onClick={() => removeTopic(index)}

@@ -5,7 +5,7 @@ import uuid
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import UUID, BigInteger, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import UUID, BigInteger, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -19,6 +19,8 @@ class VideoStatus(StrEnum):
     SKIPPED = "skipped"
     NO_SRC = "no_src"
     FALLBACK_SCREENSHOTS = "fallback_screenshots"
+    PARTIAL = "partial"
+    DELETED_NOT_RELEVANT = "deleted_not_relevant"
 
 
 class LandingStatus(StrEnum):
@@ -72,6 +74,13 @@ ANALYSIS_TERMINAL_STATUSES = frozenset(
 
 class AdCapture(Base, UUID7IDMixin, DateTimeMixin):
     __tablename__ = "ad_captures"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "ad_position",
+            name="uq_ad_captures_session_id_ad_position",
+        ),
+    )
 
     session_id: Mapped[str] = mapped_column(String(64), index=True)
     ad_position: Mapped[int] = mapped_column(Integer)

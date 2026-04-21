@@ -64,11 +64,29 @@ class EmulationSessionService:
     async def start_emulation(self, request: StartEmulationRequest) -> StartEmulationResponse:
         session_id = str(uuid.uuid4())
         profile_id = normalize_profile_id(request.profile_id)
+        runner_kind = (request.runner or "desktop").lower()
+
+        proxy_url: str | None = None
+        if runner_kind == "android":
+            if request.proxy_id is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="proxy_id is required for android runner",
+                )
+            proxy_url = await self._resolve_proxy_url(request.proxy_id)
+            if proxy_url is None:
+                raise HTTPException(status_code=404, detail="Proxy not found")
+
         await self._session_store.create(
             session_id,
             request.topics,
             request.duration_minutes,
             profile_id=profile_id,
+        )
+        await self._session_store.update(
+            session_id,
+            runner_kind=runner_kind,
+            proxy_id=str(request.proxy_id) if request.proxy_id else None,
         )
         await self._history_service.register_queued_session(
             session_id=session_id,
@@ -77,18 +95,31 @@ class EmulationSessionService:
         )
 
         try:
-            from app.tiq import EMULATION_QUEUE_NAME, broker
+            from app.tiq import ANDROID_EMULATION_QUEUE_NAME, EMULATION_QUEUE_NAME, broker
 
-            await AsyncKicker(
-                broker=broker,
-                task_name="emulation_task",
-                labels={"queue_name": EMULATION_QUEUE_NAME},
-            ).kiq(
-                session_id,
-                request.duration_minutes,
-                request.topics,
-                profile_id=profile_id,
-            )
+            if runner_kind == "android":
+                await AsyncKicker(
+                    broker=broker,
+                    task_name="android_emulation_task",
+                    labels={"queue_name": ANDROID_EMULATION_QUEUE_NAME},
+                ).kiq(
+                    session_id,
+                    request.duration_minutes,
+                    request.topics,
+                    proxy_url=proxy_url,
+                    headless=request.headless,
+                )
+            else:
+                await AsyncKicker(
+                    broker=broker,
+                    task_name="emulation_task",
+                    labels={"queue_name": EMULATION_QUEUE_NAME},
+                ).kiq(
+                    session_id,
+                    request.duration_minutes,
+                    request.topics,
+                    profile_id=profile_id,
+                )
         except Exception as exc:
             await self._session_store.update(
                 session_id,
@@ -100,6 +131,12 @@ class EmulationSessionService:
             raise HTTPException(status_code=500, detail="Failed to queue emulation task") from exc
 
         return StartEmulationResponse(session_id=session_id, status=SessionStatus.QUEUED)
+
+    async def _resolve_proxy_url(self, proxy_id: uuid.UUID) -> str | None:
+        proxy = await self._history_service.uow.proxies.get_by_id(proxy_id)
+        if proxy is None:
+            return None
+        return proxy.to_url()
 
     async def stop_session(self, session_id: str) -> StopEmulationResponse:
         data = await self._session_store.get(session_id)
@@ -142,17 +179,23 @@ class EmulationSessionService:
             topics = data.get("topics", [])
             duration_minutes = data.get("duration_minutes", 60)
             profile_id = normalize_profile_id(data.get("profile_id"))
+            runner_kind = data.get("runner_kind", "desktop")
+            proxy_id_str = data.get("proxy_id")
         else:
             assert history is not None
             topics = history.requested_topics or []
             duration_minutes = history.requested_duration_minutes
             profile_id = None
+            runner_kind = "desktop"
+            proxy_id_str = None
 
         return await self.start_emulation(
             StartEmulationRequest(
                 duration_minutes=duration_minutes,
                 topics=topics,
                 profile_id=profile_id,
+                runner=runner_kind,
+                proxy_id=proxy_id_str,
             )
         )
 
@@ -165,6 +208,8 @@ class EmulationSessionService:
             profile_id = normalize_profile_id(data.get("profile_id"))
             elapsed_minutes = elapsed_minutes_from_live_payload(data)
             resume_seed = build_resume_seed_from_live_payload(data)
+            runner_kind = data.get("runner_kind", "desktop")
+            proxy_id_str = data.get("proxy_id")
         else:
             assert history is not None
             topics = history.requested_topics or []
@@ -172,6 +217,8 @@ class EmulationSessionService:
             profile_id = None
             elapsed_minutes = elapsed_minutes_from_history(history)
             resume_seed = build_resume_seed_from_history(history)
+            runner_kind = "desktop"
+            proxy_id_str = None
 
         remaining_minutes = self._calculate_remaining_minutes(
             requested_duration_minutes=duration_minutes,
@@ -183,6 +230,8 @@ class EmulationSessionService:
                 duration_minutes=remaining_minutes,
                 topics=topics,
                 profile_id=profile_id,
+                runner=runner_kind,
+                proxy_id=proxy_id_str,
             )
         )
 
@@ -398,8 +447,9 @@ class EmulationSessionService:
 
 
 class EmulationHistoryService:
-    def __init__(self, uow: UnitOfWork) -> None:
+    def __init__(self, uow: UnitOfWork, session_store: EmulationSessionStore) -> None:
         self.uow = uow
+        self._session_store = session_store
 
     async def register_queued_session(
         self,
@@ -569,6 +619,23 @@ class EmulationHistoryService:
                 for sid, captures in raw_captures.items()
             }
 
+        live_payloads: dict[str, dict] = {}
+        active_session_ids = [
+            row.session.session_id
+            for row in rows
+            if row.session.status in {SessionStatus.QUEUED, SessionStatus.RUNNING}
+        ]
+        if active_session_ids:
+            live_results = await asyncio.gather(
+                *(self._session_store.get(session_id) for session_id in active_session_ids),
+                return_exceptions=True,
+            )
+            live_payloads = {
+                session_id: result
+                for session_id, result in zip(active_session_ids, live_results, strict=False)
+                if isinstance(result, dict)
+            }
+
         items: list[EmulationHistoryItem] = []
         for row in rows:
             ad_captures = captures_by_session.get(row.session.session_id)
@@ -586,6 +653,7 @@ class EmulationHistoryService:
                     include_details=params.include_details,
                     include_raw_ads=params.include_raw_ads,
                     ad_captures=ad_captures,
+                    live_payload=live_payloads.get(row.session.session_id),
                 )
             )
 
@@ -657,6 +725,11 @@ class EmulationHistoryService:
             fallback_video_captures=0,
             fallback_screenshot_fallbacks=0,
         )
+        live_payload = None
+        if payload.status in {SessionStatus.QUEUED, SessionStatus.RUNNING}:
+            live_result = await self._session_store.get(session_id)
+            if isinstance(live_result, dict):
+                live_payload = live_result
         return EmulationHistoryDetailResponse(
             **self._map_history_item(
                 payload,
@@ -664,6 +737,7 @@ class EmulationHistoryService:
                 include_details=True,
                 include_raw_ads=include_raw_ads,
                 ad_captures=captures if include_captures else None,
+                live_payload=live_payload,
             ).model_dump()
         )
 
@@ -674,6 +748,7 @@ class EmulationHistoryService:
         include_details: bool,
         include_raw_ads: bool,
         ad_captures: list[EmulationAdCaptureHistory] | None,
+        live_payload: dict[str, object] | None = None,
     ) -> EmulationHistoryItem:
         watched_videos = payload.watched_videos if include_details else None
         watched_ads_analytics = payload.watched_ads_analytics if include_details else None
@@ -694,7 +769,7 @@ class EmulationHistoryService:
             ad_captures=ad_captures,
         )
 
-        return EmulationHistoryItem(
+        item = EmulationHistoryItem(
             session_id=payload.session_id,
             status=payload.status,
             post_processing_status=post_processing_status,
@@ -719,4 +794,28 @@ class EmulationHistoryService:
             error=payload.error,
             captures=capture_summary,
             ad_captures=ad_captures,
+        )
+        if not live_payload:
+            return item
+
+        live_status = build_status_response(str(payload.session_id), live_payload)
+        return item.model_copy(
+            update={
+                "status": live_status.status,
+                "post_processing_status": live_status.post_processing_status,
+                "post_processing_progress": live_status.post_processing_progress,
+                "elapsed_minutes": live_status.elapsed_minutes,
+                "mode": live_status.mode,
+                "fatigue": live_status.fatigue,
+                "bytes_downloaded": live_status.bytes_downloaded,
+                "total_duration_seconds": live_status.total_duration_seconds,
+                "videos_watched": live_status.videos_watched,
+                "watched_videos_count": live_status.watched_videos_count,
+                "watched_ads_count": live_status.watched_ads_count,
+                "topics_searched": live_status.topics_searched,
+                "watched_videos": live_status.watched_videos if include_details else item.watched_videos,
+                "watched_ads": live_status.watched_ads if (include_details and include_raw_ads) else item.watched_ads,
+                "watched_ads_analytics": live_status.watched_ads_analytics if include_details else item.watched_ads_analytics,
+                "error": live_status.error,
+            }
         )

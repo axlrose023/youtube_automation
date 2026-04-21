@@ -15,6 +15,10 @@ setup_logging(config.env)
 
 DEFAULT_QUEUE_NAME = "taskiq"
 EMULATION_QUEUE_NAME = os.getenv("TASKIQ_EMULATION_QUEUE_NAME", "taskiq_emulation")
+ANDROID_EMULATION_QUEUE_NAME = os.getenv(
+    "TASKIQ_EMULATION_ANDROID_QUEUE_NAME",
+    EMULATION_QUEUE_NAME,
+)
 ANALYSIS_QUEUE_NAME = os.getenv("TASKIQ_ANALYSIS_QUEUE_NAME", "taskiq_analysis")
 WORKER_QUEUE_NAME = os.getenv("TASKIQ_QUEUE_NAME", DEFAULT_QUEUE_NAME)
 DYNAMIC_SCHEDULE_PREFIX = os.getenv("TASKIQ_DYNAMIC_SCHEDULE_PREFIX", "taskiq_dynamic_schedule")
@@ -28,6 +32,14 @@ broker = ListQueueBroker(
     queue_name=WORKER_QUEUE_NAME,
 )
 broker.with_result_backend(redis_async_result)
+
+# Dedicated broker for dispatching analysis tasks — always writes to the
+# analysis queue regardless of which queue this process's worker listens on.
+analysis_dispatch_broker = ListQueueBroker(
+    url=config.redis_url,
+    queue_name=ANALYSIS_QUEUE_NAME,
+)
+analysis_dispatch_broker.with_result_backend(redis_async_result)
 
 dynamic_schedule_source = ListRedisScheduleSource(
     url=config.redis_url,

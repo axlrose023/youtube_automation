@@ -27,6 +27,9 @@ export interface StartEmulationRequest {
   duration_minutes: number;
   topics: string[];
   profile_id?: string | null;
+  runner?: "desktop" | "android";
+  proxy_id?: string | null;
+  headless?: boolean | null;
 }
 
 export interface StartEmulationResponse {
@@ -207,6 +210,39 @@ export interface EmulationStatusBatchResponse {
 export interface DashboardSummaryItem {
   label: string;
   value: number;
+}
+
+export interface Proxy {
+  id: string;
+  label: string;
+  scheme: string;
+  host: string;
+  port: number;
+  username?: string | null;
+  password?: string | null;
+  country_code?: string | null;
+  notes?: string | null;
+  is_active: boolean;
+  url: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProxyListResponse {
+  items: Proxy[];
+  total: number;
+}
+
+export interface ProxyCreate {
+  label: string;
+  scheme?: string;
+  host: string;
+  port: number;
+  username?: string | null;
+  password?: string | null;
+  country_code?: string | null;
+  notes?: string | null;
+  is_active?: boolean;
 }
 
 export interface EmulationDashboardSummary {

@@ -181,3 +181,10 @@ cython_debug/
 backend/artifacts/
 backend/test_gemini.py
 backend/Fraud Checker API Response (1).json
+.DS_Store
+._*
+deploy/backend.env
+deploy/android.env
+deploy/*.pem
+deploy/*.key
+deploy/*.crt

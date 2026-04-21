@@ -43,9 +43,8 @@ class AdAnalysisService:
             [
                 c
                 for c in captures
-                if c.video_status == VideoStatus.COMPLETED
-                and c.analysis_status == AnalysisStatus.PENDING
-                and c.video_file
+                if c.analysis_status == AnalysisStatus.PENDING
+                and self._is_capture_analyzable(c)
             ]
         )
 
@@ -57,7 +56,7 @@ class AdAnalysisService:
         analyzable = [
             c
             for c in captures
-            if c.video_status == VideoStatus.COMPLETED
+            if self._is_capture_analyzable(c)
         ]
         total = len(analyzable)
         if total == 0:
@@ -100,15 +99,14 @@ class AdAnalysisService:
                 except (json.JSONDecodeError, TypeError):
                     analysis_summary = None
 
-            hide_media = str(capture.analysis_status or "").lower() == AnalysisStatus.NOT_RELEVANT
             updates[ad_position] = {
                 "video_src_url": capture.video_src_url,
                 "video_status": str(capture.video_status),
-                "video_file": None if hide_media else capture.video_file,
-                "landing_url": None if hide_media else capture.landing_url,
+                "video_file": capture.video_file,
+                "landing_url": capture.landing_url,
                 "landing_status": str(capture.landing_status),
-                "landing_dir": None if hide_media else capture.landing_dir,
-                "screenshot_paths": [] if hide_media else [
+                "landing_dir": capture.landing_dir,
+                "screenshot_paths": [
                     {"offset_ms": screenshot.offset_ms, "file_path": screenshot.file_path}
                     for screenshot in sorted(capture.screenshots, key=lambda item: item.offset_ms)
                 ],
@@ -124,9 +122,8 @@ class AdAnalysisService:
         captures = await self._uow.ad_captures.get_by_session(session_id)
         pending = [
             c for c in captures
-            if c.video_status == VideoStatus.COMPLETED
-            and c.analysis_status == AnalysisStatus.PENDING
-            and c.video_file
+            if c.analysis_status == AnalysisStatus.PENDING
+            and self._is_capture_analyzable(c)
         ]
         if not pending:
             return None, 0, 0
@@ -161,7 +158,14 @@ class AdAnalysisService:
     async def _analyze_one(
         self, session_id: str, capture: AdCapture, video_refcounts: Counter[str],
     ) -> str | None:
-        video_path = self._base_path / capture.video_file
+        if not self._requires_video_analysis(capture):
+            return await self._analyze_from_text(
+                session_id=session_id,
+                capture=capture,
+                video_refcounts=video_refcounts,
+            )
+
+        video_path = self._base_path / str(capture.video_file)
         prepared_video = None
         try:
             if not video_path.exists():
@@ -194,7 +198,7 @@ class AdAnalysisService:
                     video_refcounts=video_refcounts,
                 )
 
-            raw = await self._gemini.generate_from_video(prepared_video.path, _ANALYSIS_PROMPT)
+            raw = await self._gemini.generate_from_video(prepared_video.path, ANALYSIS_PROMPT)
             return await self._apply_analysis_result(
                 session_id=session_id,
                 capture=capture,
@@ -305,7 +309,7 @@ class AdAnalysisService:
                 capture.id,
                 data.get("reason", ""),
             )
-            return self._resolve_cleanup_dir(capture.video_file, video_refcounts)
+            return None
 
         await self._uow.ad_captures.update_analysis(
             capture.id,
@@ -321,8 +325,10 @@ class AdAnalysisService:
         return None
 
     def _resolve_cleanup_dir(
-        self, video_file: str, video_refcounts: Counter[str],
+        self, video_file: str | None, video_refcounts: Counter[str],
     ) -> str | None:
+        if not video_file:
+            return None
         if video_refcounts.get(video_file, 0) > 1:
             logger.info("Skipping cleanup — %s is shared by %d captures", video_file, video_refcounts[video_file])
             return None
@@ -332,3 +338,17 @@ class AdAnalysisService:
             return str(capture_dir.relative_to(self._base_path))
         except ValueError:
             return str(capture_dir)
+
+    @staticmethod
+    def _requires_video_analysis(capture: AdCapture) -> bool:
+        return (
+            capture.video_status == VideoStatus.COMPLETED
+            and bool(capture.video_file)
+        )
+
+    @staticmethod
+    def _has_text_analysis_input(capture: AdCapture) -> bool:
+        return build_text_prompt(capture) is not None
+
+    def _is_capture_analyzable(self, capture: AdCapture) -> bool:
+        return self._requires_video_analysis(capture) or self._has_text_analysis_input(capture)

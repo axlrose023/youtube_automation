@@ -1,0 +1,20 @@
+[Unit]
+Description=YouTube Automation Android Worker
+After=network-online.target docker.service yta-appium.service
+Wants=network-online.target yta-appium.service
+ConditionPathExists=/opt/youtube_automation/deploy/android.env
+ConditionPathExists=/opt/youtube_automation/backend/.venv/bin/taskiq
+PartOf=yta-android.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/youtube_automation/backend
+EnvironmentFile=/opt/youtube_automation/deploy/android.env
+Environment=PYTHONPATH=/opt/youtube_automation/backend/src
+Environment=PATH=/opt/youtube_automation/backend/.venv/bin:/usr/local/bin:/usr/bin:/bin:/opt/android-sdk/emulator:/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/latest/bin
+ExecStart=/opt/youtube_automation/backend/.venv/bin/taskiq worker app.tiq:broker -w 1 app.tasks
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=yta-android.target

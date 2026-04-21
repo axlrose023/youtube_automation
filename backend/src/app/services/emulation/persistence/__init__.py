@@ -17,11 +17,13 @@ class EmulationPersistenceService:
         session_id: str,
         watched_ads: list[dict],
         from_index: int = 0,
+        prune_missing: bool = False,
     ) -> None:
         await self._captures.persist_ad_captures(
             session_id=session_id,
             watched_ads=watched_ads,
             from_index=from_index,
+            prune_missing=prune_missing,
         )
 
     async def persist_history(self, **kwargs) -> None:

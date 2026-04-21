@@ -27,6 +27,25 @@ from .schema import (
 )
 
 
+def _relative_storage_alias(path: Path, storage_base: Path) -> Path | None:
+    """Map host-side absolute artifact paths onto the container storage root."""
+    storage_name = storage_base.name
+    if not storage_name:
+        return None
+
+    parts = path.parts
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] != storage_name:
+            continue
+        suffix = parts[index + 1 :]
+        if not suffix:
+            continue
+        candidate = Path(*suffix)
+        if candidate.parts:
+            return candidate
+    return None
+
+
 def calculate_session_elapsed_minutes(data: dict[str, object]) -> float | None:
     started_at = data.get("started_at")
     if not isinstance(started_at, int | float):
@@ -39,19 +58,62 @@ def calculate_session_elapsed_minutes(data: dict[str, object]) -> float | None:
     return round((time.time() - started_at) / 60, 1)
 
 
-def resolve_media_path(media_path: str) -> Path:
-    base_path = get_config().storage.ad_captures_path.resolve()
-    candidate = (base_path / media_path).resolve()
+def normalize_media_reference(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
 
+    candidate = value.strip()
+    if not candidate:
+        return None
+
+    normalized = candidate.replace("\\", "/")
+    path = Path(normalized)
+    if not path.is_absolute():
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+        return normalized
+
+    config = get_config()
+    storage_base = config.storage.base_path.resolve()
     try:
-        candidate.relative_to(base_path)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail="Media file not found") from exc
+        relative = path.resolve().relative_to(storage_base)
+    except ValueError:
+        alias_relative = _relative_storage_alias(path.resolve(), storage_base)
+        if alias_relative is not None:
+            return alias_relative.as_posix()
+        return normalized
+    return relative.as_posix()
 
-    if not candidate.exists() or not candidate.is_file():
-        raise HTTPException(status_code=404, detail="Media file not found")
 
-    return candidate
+def resolve_media_path(media_path: str) -> Path:
+    config = get_config()
+    storage_base = config.storage.base_path.resolve()
+    normalized_media_path = normalize_media_reference(media_path) or media_path
+
+    # Try both the ad_captures subdir and the general storage root so that
+    # Android artifacts (stored under artifacts/) and desktop captures
+    # (stored under artifacts/ad_captures/) are both reachable.
+    for base in (config.storage.ad_captures_path.resolve(), storage_base):
+        candidate = (base / normalized_media_path).resolve()
+        try:
+            candidate.relative_to(base)
+        except ValueError:
+            continue
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    # Android screenshot paths may be absolute — allow serving if they fall
+    # within the storage root.
+    absolute = Path(media_path).resolve()
+    try:
+        absolute.relative_to(storage_base)
+    except ValueError:
+        pass
+    else:
+        if absolute.exists() and absolute.is_file():
+            return absolute
+
+    raise HTTPException(status_code=404, detail="Media file not found")
 
 
 def calculate_history_elapsed_minutes(payload: EmulationSessionHistory) -> float | None:
@@ -161,10 +223,13 @@ def normalize_screenshot_paths(
 
         if not isinstance(offset_ms, int | float) or not isinstance(file_path, str):
             continue
+        normalized_file_path = normalize_media_reference(file_path)
+        if normalized_file_path is None:
+            continue
         normalized.append(
             {
                 "offset_ms": int(offset_ms),
-                "file_path": file_path,
+                "file_path": normalized_file_path,
             },
         )
     return normalized
@@ -184,6 +249,8 @@ def normalize_watched_ads_payload(
         capture = item.get("capture")
         if isinstance(capture, dict):
             capture_payload = dict(capture)
+            capture_payload["video_file"] = normalize_media_reference(capture.get("video_file"))
+            capture_payload["landing_dir"] = normalize_media_reference(capture.get("landing_dir"))
             capture_payload["screenshot_paths"] = normalize_screenshot_paths(
                 capture.get("screenshot_paths"),
             )
@@ -193,14 +260,13 @@ def normalize_watched_ads_payload(
 
 
 def map_ad_capture(capture: AdCapture) -> EmulationAdCaptureHistory:
-    analysis_status = capture.analysis_status
-    hide_media = str(analysis_status) == AnalysisStatus.NOT_RELEVANT
     screenshot_paths = [
-        EmulationAdCaptureScreenshotPath(offset_ms=s.offset_ms, file_path=s.file_path)
+        EmulationAdCaptureScreenshotPath(
+            offset_ms=s.offset_ms,
+            file_path=normalize_media_reference(s.file_path) or s.file_path,
+        )
         for s in sorted(capture.screenshots, key=lambda x: x.offset_ms)
     ]
-    if hide_media:
-        screenshot_paths = []
     return EmulationAdCaptureHistory(
         ad_position=capture.ad_position,
         advertiser_domain=capture.advertiser_domain,
@@ -208,13 +274,13 @@ def map_ad_capture(capture: AdCapture) -> EmulationAdCaptureHistory:
         display_url=capture.display_url,
         headline_text=capture.headline_text,
         ad_duration_seconds=capture.ad_duration_seconds,
-        landing_url=None if hide_media else capture.landing_url,
-        landing_dir=None if hide_media else capture.landing_dir,
+        landing_url=capture.landing_url,
+        landing_dir=normalize_media_reference(capture.landing_dir),
         landing_status=capture.landing_status,
         video_src_url=capture.video_src_url,
-        video_file=None if hide_media else capture.video_file,
+        video_file=normalize_media_reference(capture.video_file),
         video_status=capture.video_status,
-        analysis_status=analysis_status,
+        analysis_status=capture.analysis_status,
         analysis_summary=_parse_analysis_summary(capture.analysis_summary),
         screenshot_paths=screenshot_paths,
     )

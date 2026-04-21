@@ -22,3 +22,10 @@ try:
     __all__ += ["ad_analysis_task"]
 except ModuleNotFoundError:
     pass
+
+try:
+    from .android_emulation import android_emulation_task
+
+    __all__ += ["android_emulation_task"]
+except ModuleNotFoundError:
+    pass

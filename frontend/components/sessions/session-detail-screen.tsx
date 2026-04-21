@@ -186,12 +186,15 @@ function buildMediaPath(value: string | null | undefined) {
   if (!value) {
     return null;
   }
-  const encoded = value
+  const normalized = value.replace(/\\/g, "/").replace(/^\.\//, "");
+  const isAbsolute = normalized.startsWith("/");
+  const encoded = normalized
     .split("/")
     .filter(Boolean)
     .map((segment) => encodeURIComponent(segment))
     .join("/");
-  return `/emulation/media/${encoded}`;
+  const prefix = isAbsolute ? "/" : "";
+  return `/emulation/media/${prefix}${encoded}`;
 }
 
 async function downloadProtectedMedia(
@@ -279,6 +282,100 @@ function buildLiveCapture(ad: EmulationWatchedAd | null): EmulationAdCapture | n
     analysis_status: capture.analysis_status ?? "pending",
     analysis_summary: capture.analysis_summary ?? null,
     screenshot_paths: capture.screenshot_paths ?? [],
+  };
+}
+
+function pickFirstString(
+  ...values: Array<string | null | undefined>
+): string | null {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function pickFirstNumber(
+  ...values: Array<number | null | undefined>
+): number | null {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function isTerminalAnalysisStatus(status: string | null | undefined) {
+  return (
+    status === "completed" ||
+    status === "not_relevant" ||
+    status === "failed" ||
+    status === "skipped"
+  );
+}
+
+function mergeCapture(
+  preferred: EmulationAdCapture | null,
+  fallback: EmulationAdCapture | null,
+): EmulationAdCapture | null {
+  if (!preferred) {
+    return fallback;
+  }
+  if (!fallback) {
+    return preferred;
+  }
+
+  const videoFile = pickFirstString(preferred.video_file, fallback.video_file);
+  const landingDir = pickFirstString(preferred.landing_dir, fallback.landing_dir);
+  const preferredHasTerminalAnalysis =
+    preferred.analysis_summary != null || isTerminalAnalysisStatus(preferred.analysis_status);
+  const fallbackHasTerminalAnalysis =
+    fallback.analysis_summary != null || isTerminalAnalysisStatus(fallback.analysis_status);
+
+  return {
+    ...fallback,
+    ...preferred,
+    advertiser_domain: pickFirstString(
+      preferred.advertiser_domain,
+      fallback.advertiser_domain,
+    ),
+    cta_href: pickFirstString(preferred.cta_href, fallback.cta_href),
+    display_url: pickFirstString(preferred.display_url, fallback.display_url),
+    headline_text: pickFirstString(preferred.headline_text, fallback.headline_text),
+    ad_duration_seconds: pickFirstNumber(
+      preferred.ad_duration_seconds,
+      fallback.ad_duration_seconds,
+    ),
+    landing_url: pickFirstString(preferred.landing_url, fallback.landing_url),
+    landing_dir: landingDir,
+    landing_status:
+      (landingDir === preferred.landing_dir
+        ? preferred.landing_status
+        : landingDir === fallback.landing_dir
+          ? fallback.landing_status
+          : pickFirstString(preferred.landing_status, fallback.landing_status)) ?? "pending",
+    video_src_url: pickFirstString(preferred.video_src_url, fallback.video_src_url),
+    video_file: videoFile,
+    video_status:
+      (videoFile === preferred.video_file
+        ? preferred.video_status
+        : videoFile === fallback.video_file
+          ? fallback.video_status
+          : pickFirstString(preferred.video_status, fallback.video_status)) ?? "pending",
+    analysis_status:
+      (preferredHasTerminalAnalysis
+        ? preferred.analysis_status
+        : fallbackHasTerminalAnalysis
+          ? fallback.analysis_status
+          : pickFirstString(preferred.analysis_status, fallback.analysis_status)) ?? null,
+    analysis_summary:
+      preferred.analysis_summary ?? fallback.analysis_summary ?? null,
+    screenshot_paths:
+      preferred.screenshot_paths.length > 0
+        ? preferred.screenshot_paths
+        : fallback.screenshot_paths,
   };
 }
 
@@ -692,11 +789,16 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
         const ad = ads.find((item) => item.position === position) ?? null;
         const persistedCaptures = captures.filter((item) => item.ad_position === position);
         const liveCapture = buildLiveCapture(ad);
-        const adCaptures = persistedCaptures.length > 0
-          ? persistedCaptures
-          : liveCapture
-            ? [liveCapture]
-            : [];
+        const mergedPrimaryCapture = mergeCapture(liveCapture, persistedCaptures[0] ?? null);
+        const adCaptures =
+          persistedCaptures.length > 0
+            ? [
+                mergedPrimaryCapture ?? persistedCaptures[0],
+                ...persistedCaptures.slice(1),
+              ]
+            : mergedPrimaryCapture
+              ? [mergedPrimaryCapture]
+              : [];
 
         return {
           position,
@@ -948,9 +1050,9 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                   {liveStatus.current_watch.search_keyword || "без ключевого запроса"}
                 </div>
                 <div className="text-sm text-[var(--muted)]">
-                  {liveStatus.current_watch.watched_seconds.toFixed(1)}с просмотрено
+                  {liveStatus.current_watch.watched_seconds.toFixed(1)}с факт
                   {liveStatus.current_watch.target_seconds
-                    ? ` / ${liveStatus.current_watch.target_seconds.toFixed(1)}с цель`
+                    ? ` / ${liveStatus.current_watch.target_seconds.toFixed(1)}с план`
                     : ""}
                 </div>
               </div>
@@ -1051,8 +1153,8 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                         <div className="text-sm font-medium text-[var(--ink)]">{video.title}</div>
                         <div className="mt-0.5 text-xs text-[var(--muted)]">
                           {video.search_keyword || "без поискового запроса"} ·{" "}
-                          {video.watched_seconds.toFixed(1)}с /{" "}
-                          {video.target_seconds.toFixed(1)}с
+                          {video.watched_seconds.toFixed(1)}с факт /{" "}
+                          {video.target_seconds.toFixed(1)}с план
                         </div>
                       </div>
                       <Badge tone={video.runtime ? "info" : video.completed ? "success" : "warning"}>
@@ -1158,10 +1260,10 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                         "Реклама без названия"}
                     </div>
                     <div className="mt-1 text-sm text-[var(--muted)]">
-                      {item.ad?.display_url ||
-                        item.primaryCapture?.display_url ||
-                        item.ad?.advertiser_domain ||
+                      {item.ad?.advertiser_domain ||
                         item.primaryCapture?.advertiser_domain ||
+                        getLandingHost(item.ad?.display_url) ||
+                        getLandingHost(item.primaryCapture?.display_url) ||
                         "неизвестный домен"}
                     </div>
                   </div>

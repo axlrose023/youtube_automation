@@ -9,7 +9,16 @@ logger = logging.getLogger(__name__)
 
 _UPLOAD_POLL_INTERVAL_S = 0.5
 _UPLOAD_TIMEOUT_S = 60
-_GENERATE_TIMEOUT_S = 30
+_GENERATE_TIMEOUT_S = 120
+
+
+def _guess_video_mime_type(video_path: Path) -> str:
+    suffix = video_path.suffix.casefold()
+    if suffix == ".mp4":
+        return "video/mp4"
+    if suffix == ".mov":
+        return "video/quicktime"
+    return "video/webm"
 
 
 class GeminiClient:
@@ -19,7 +28,9 @@ class GeminiClient:
 
     async def generate_from_video(self, video_path: Path, prompt: str) -> str:
         uploaded = await asyncio.to_thread(
-            genai.upload_file, str(video_path), mime_type="video/webm",
+            genai.upload_file,
+            str(video_path),
+            mime_type=_guess_video_mime_type(video_path),
         )
         try:
             await self._wait_for_processing(uploaded)

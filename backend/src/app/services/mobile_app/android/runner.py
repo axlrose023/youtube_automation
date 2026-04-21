@@ -1,0 +1,5583 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+import contextlib
+import json
+import logging
+import math
+import re
+import subprocess
+from dataclasses import asdict, replace
+from datetime import UTC, datetime
+from pathlib import Path
+import random
+import time
+
+logger = logging.getLogger(__name__)
+
+from app.services.emulation.config import (
+    COVERAGE_CAP_BUDGET_FRACTION,
+    COVERAGE_CAP_DEFAULT,
+    COVERAGE_CAP_MIN_S,
+    COVERAGE_SEARCH_OVERHEAD_S,
+    REALISM_MIN_WATCH_AFTER_COVERAGE_S,
+    REALISM_MIN_WATCH_S,
+    REALISM_MIN_WATCH_TRIGGER_REMAINING_S,
+    REALISM_MULTI_TOPIC_BUDGET_FRACTION,
+    REALISM_MULTI_TOPIC_MAX_WATCH_S,
+    REALISM_MULTI_TOPIC_MIN_WATCH_S,
+    TOPIC_BALANCE_POST_COVERAGE_CAP_S,
+    WATCH_LONG_FALLBACK,
+)
+from app.api.modules.emulation.models import VideoStatus
+from app.services.mobile_app.models import (
+    AndroidProbeResult,
+    AndroidProbeSurfaceSnapshot,
+    AndroidSessionRunResult,
+    AndroidSessionTopicResult,
+)
+from app.settings import Config
+
+from .analysis import AndroidAdAnalysisCoordinator, _build_ad_video_focus_window
+from .landing_scraper import AndroidLandingPageScraper
+from .result_payloads import build_topic_watched_video_payload
+from .runtime import build_android_probe_runtime
+from .avd_manager import AndroidEmulatorLaunchOptions
+from .errors import AndroidUiError
+from .proxy_bridge import AndroidHttpProxyBridge, AndroidHttpProxyBridgeHandle
+from .screenrecord import AndroidScreenRecorder
+from .tooling import build_android_runtime_env, require_tool_path
+from ..profiles.adspower_client import AdsPowerProfileClient
+from .youtube.ads import AndroidYouTubeAdInteractor
+from .youtube.ad_record import _parse_debug_watch_metadata, build_watched_ad_record
+from .youtube.engagement import AndroidYouTubeEngagementController
+from .youtube.navigator import AndroidYouTubeNavigator
+from .youtube.watcher import AndroidYouTubeWatcher
+
+
+class AndroidYouTubeProbeRunner:
+    def __init__(self, config: Config) -> None:
+        self._config = config
+        self._runtime = build_android_probe_runtime(config.android_app)
+        self._adspower_client = AdsPowerProfileClient(config.adspower)
+        self._proxy_bridge = AndroidHttpProxyBridge()
+
+    async def _prepare_emulator_proxy(
+        self,
+        *,
+        proxy_url: str | None,
+        adspower_profile_id: str | None,
+    ) -> tuple[str | None, str | None, list[str], AndroidHttpProxyBridgeHandle | None]:
+        """Returns (emulator_proxy_url, host_proxy_url, notes, bridge_handle).
+
+        - emulator_proxy_url: HTTP proxy URL the Android emulator should use (via 10.0.2.2).
+        - host_proxy_url: HTTP proxy URL for processes on the host (Playwright) — same upstream.
+        """
+        notes: list[str] = []
+        resolved_proxy_url = (proxy_url or "").strip() or None
+        if resolved_proxy_url is None and adspower_profile_id:
+            proxy = await self._adspower_client.fetch_proxy(adspower_profile_id)
+            if proxy is None:
+                notes.append(f"proxy:none:{adspower_profile_id}")
+                return None, None, notes, None
+            resolved_proxy_url = proxy.upstream_url
+            notes.append(
+                f"proxy:adspower:{adspower_profile_id}:{proxy.proxy_type}:{proxy.country_code or 'unknown'}"
+            )
+        if resolved_proxy_url is None:
+            return None, None, notes, None
+
+        normalized_proxy = resolved_proxy_url.casefold()
+        if normalized_proxy.startswith("http://") or normalized_proxy.startswith("https://"):
+            # If the proxy is on 0.0.0.0 or 127.0.0.1 (host loopback), remap to 10.0.2.2
+            # so the Android emulator can reach it (emulator's alias for the host machine).
+            emulator_proxy_url = (
+                resolved_proxy_url
+                .replace("//0.0.0.0:", "//10.0.2.2:")
+                .replace("//127.0.0.1:", "//10.0.2.2:")
+                .replace("//localhost:", "//10.0.2.2:")
+            )
+            # Host-side form: the original URL (host loopback) is fine for Playwright.
+            host_proxy_url = (
+                resolved_proxy_url
+                .replace("//0.0.0.0:", "//127.0.0.1:")
+                .replace("//localhost:", "//127.0.0.1:")
+            )
+            notes.append(f"proxy:http:{emulator_proxy_url}")
+            return emulator_proxy_url, host_proxy_url, notes, None
+
+        bridge_handle = await self._proxy_bridge.start(resolved_proxy_url)
+        notes.append(
+            f"proxy:bridge:{resolved_proxy_url.split('://', 1)[0]}->{bridge_handle.emulator_proxy_url}"
+        )
+        return bridge_handle.emulator_proxy_url, bridge_handle.host_proxy_url, notes, bridge_handle
+
+    async def run(
+        self,
+        *,
+        topic: str,
+        avd_name: str | None = None,
+        proxy_url: str | None = None,
+        adspower_profile_id: str | None = None,
+        headless: bool | None = None,
+    ) -> AndroidProbeResult:
+        resolved_avd_name = avd_name or self._config.android_app.default_avd_name
+        snapshot_name = (
+            self._config.android_app.runtime_snapshot_name
+            if self._config.android_app.emulator_use_snapshots
+            else None
+        )
+        device = None
+        session = None
+        proxy_bridge_handle = None
+        ad_analysis = AndroidAdAnalysisCoordinator(self._config.gemini, self._config.storage)
+        proxy_notes: list[str] = []
+        emulator_http_proxy = None
+        host_http_proxy = None
+        landing_scraper: AndroidLandingPageScraper | None = None
+        try:
+            (
+                emulator_http_proxy,
+                host_http_proxy,
+                proxy_notes,
+                proxy_bridge_handle,
+            ) = await self._prepare_emulator_proxy(
+                proxy_url=proxy_url,
+                adspower_profile_id=adspower_profile_id,
+            )
+            landing_scraper = AndroidLandingPageScraper(
+                self._config.storage,
+                proxy_url=host_http_proxy,
+            )
+            await landing_scraper.start()
+            device = await self._runtime.avd_manager.ensure_device(
+                avd_name=resolved_avd_name,
+                launch=AndroidEmulatorLaunchOptions(
+                    headless=(
+                        self._config.android_app.emulator_headless
+                        if headless is None
+                        else headless
+                    ),
+                    gpu_mode=self._config.android_app.emulator_gpu_mode,
+                    accel_mode=self._config.android_app.emulator_accel_mode,
+                    http_proxy=emulator_http_proxy,
+                    load_snapshot=self._config.android_app.emulator_use_snapshots,
+                    save_snapshot=False,
+                    snapshot_name=snapshot_name,
+                    force_snapshot_load=bool(snapshot_name),
+                    skip_adb_auth=self._config.android_app.emulator_skip_adb_auth,
+                    force_stop_running=self._config.android_app.emulator_force_restart_before_run,
+                ),
+            )
+            session = await self._runtime.appium_provider.create_youtube_session(
+                adb_serial=device.adb_serial,
+                avd_name=device.avd_name,
+            )
+            navigator = AndroidYouTubeNavigator(
+                session.driver,
+                self._config.android_app,
+                adb_serial=device.adb_serial,
+            )
+            await navigator.ensure_app_ready()
+            home = AndroidProbeSurfaceSnapshot(*await navigator.describe_surface())
+
+            await navigator.submit_search(topic)
+            await navigator.wait_for_results(topic)
+            results = AndroidProbeSurfaceSnapshot(*await navigator.describe_surface())
+
+            opened_title = await navigator.open_first_result(topic)
+            watch = None
+            watch_samples = []
+            watch_verified = False
+            watch_ad_detected = False
+            watch_debug_screen_path = None
+            watch_debug_page_source_path = None
+            ad_cta_clicked = False
+            ad_cta_label = None
+            ad_cta_destination_package = None
+            ad_cta_destination_activity = None
+            ad_cta_returned_to_youtube = False
+            ad_cta_debug_screen_path = None
+            ad_cta_debug_page_source_path = None
+            watched_ads = []
+            liked = False
+            already_liked = False
+            subscribed = False
+            already_subscribed = False
+            comments_glanced = False
+            runtime_notes: list[str] = [*proxy_notes]
+            if opened_title:
+                watch = AndroidProbeSurfaceSnapshot(*await navigator.describe_surface())
+                watcher = AndroidYouTubeWatcher(
+                    session.driver,
+                    self._config.android_app,
+                    adb_serial=device.adb_serial,
+                )
+                recorder = None
+                recording_handle = None
+                recorded_video_path = None
+                _probe_samples_ended_monotonic = time.monotonic()
+                try:
+                    if self._config.android_app.probe_screenrecord_enabled:
+                        recorder = AndroidScreenRecorder(
+                            adb_serial=device.adb_serial,
+                            artifacts_dir=(
+                                self._config.storage.base_path
+                                / self._config.android_app.probe_screenrecord_artifacts_subdir
+                            ),
+                            bitrate=self._config.android_app.probe_screenrecord_bitrate,
+                        )
+                        recording_handle = await recorder.start(
+                            artifact_prefix=self._build_safe_artifact_prefix(topic),
+                        )
+                    watch_result = await watcher.watch_current(
+                        watch_seconds=self._config.android_app.probe_watch_seconds
+                    )
+                    watch_result, watch_extension_note = await self._extend_ad_watch_if_needed(
+                        watcher=watcher,
+                        watch_result=watch_result,
+                    )
+                    _probe_samples_ended_monotonic = time.monotonic()
+                    if watch_extension_note is not None:
+                        runtime_notes.append(watch_extension_note)
+                finally:
+                    # Recorder is stopped after probe_cta (below) to capture the full ad.
+                    # Here we only stop if no ad was detected (cleanup path).
+                    pass
+                watch_samples = watch_result.samples
+                watch_verified = watch_result.verified
+                watch_ad_detected = any(sample.ad_detected for sample in watch_samples)
+                if not watch_ad_detected:
+                    # No ad — stop and discard recording now
+                    if recorder is not None and recording_handle is not None:
+                        with contextlib.suppress(Exception):
+                            await recorder.stop(recording_handle, keep_local=False)
+                        recorder = None
+                        recording_handle = None
+                if not watch_ad_detected and recorded_video_path:
+                    recorded_video_abs = self._config.storage.base_path / recorded_video_path
+                    recorded_video_abs.unlink(missing_ok=True)
+                    recorded_video_path = None
+                if (
+                    self._config.android_app.session_engagement_enabled
+                    and self._can_attempt_engagement(watch_result.samples)
+                ):
+                    runtime_notes.extend(
+                        await self._prepare_for_engagement(
+                            watcher=watcher,
+                        )
+                    )
+                    engagement_result = await self._run_engagement_safe(
+                        driver=session.driver,
+                        adb_serial=device.adb_serial,
+                        topic=topic,
+                        opened_title=opened_title,
+                        notes=runtime_notes,
+                        note_prefix="engagement_failed",
+                    )
+                    if engagement_result is not None:
+                        liked = engagement_result.liked
+                        already_liked = engagement_result.already_liked
+                        subscribed = engagement_result.subscribed
+                        already_subscribed = engagement_result.already_subscribed
+                        comments_glanced = engagement_result.comments_glanced
+                        runtime_notes.extend(
+                            await self._stabilize_playback_after_engagement(
+                                watcher=watcher,
+                            )
+                        )
+                        if not comments_glanced and watch_debug_screen_path is None:
+                            watch_debug_screen_path, watch_debug_page_source_path = (
+                                self._write_watch_debug_artifacts(
+                                    driver=session.driver,
+                                    topic=topic,
+                                )
+                            )
+                    elif watch_debug_screen_path is None:
+                        watch_debug_screen_path, watch_debug_page_source_path = (
+                            self._write_watch_debug_artifacts(
+                                driver=session.driver,
+                                topic=topic,
+                            )
+                        )
+                else:
+                    reason = (
+                        "disabled_for_probe_stability"
+                        if not self._config.android_app.session_engagement_enabled
+                        else self._engagement_gate_reason(watch_result.samples)
+                    )
+                    runtime_notes.append(f"pre_ad_engagement_skipped:{reason}")
+                if watch_ad_detected or any(sample.error_messages for sample in watch_samples):
+                    watch_debug_screen_path, watch_debug_page_source_path = (
+                        self._write_watch_debug_artifacts(
+                            driver=session.driver,
+                            topic=topic,
+                            adb_serial=device.adb_serial,
+                            page_source_override=getattr(
+                                watch_result,
+                                "ad_debug_page_source",
+                                None,
+                            ),
+                        )
+                    )
+                if watch_ad_detected:
+                    try:
+                        built_ad = None
+                        ad_interactor = AndroidYouTubeAdInteractor(
+                            session.driver,
+                            self._config.android_app,
+                            adb_serial=device.adb_serial,
+                        )
+                        _probe_cta_started_at = time.monotonic()
+                        ad_cta_result = await ad_interactor.probe_cta(
+                            artifact_dir=(
+                                self._config.storage.base_path
+                                / self._config.android_app.artifacts_subdir
+                            ),
+                            artifact_prefix=self._build_safe_artifact_prefix(topic),
+                        )
+                        # Full elapsed from last sample to here: debug artifact writes + CTA probe.
+                        # The ad continues playing the whole time; subtract all of it from remaining.
+                        _probe_cta_elapsed = time.monotonic() - _probe_samples_ended_monotonic
+                        if recorder is not None and recording_handle is not None:
+                            (
+                                recorded_video_path,
+                                recorded_video_duration_seconds,
+                            ) = await self._finalize_recording_after_cta(
+                                label="probe",
+                                recorder=recorder,
+                                recording_handle=recording_handle,
+                                samples=watch_samples,
+                                debug_page_source_path=watch_debug_page_source_path,
+                                clicked=ad_cta_result.clicked,
+                                returned_to_youtube=ad_cta_result.returned_to_youtube,
+                                elapsed_since_samples=_probe_cta_elapsed,
+                            )
+                            recorder = None
+                            recording_handle = None
+                        ad_cta_clicked = ad_cta_result.clicked
+                        ad_cta_label = ad_cta_result.label
+                        ad_cta_destination_package = ad_cta_result.destination_package
+                        ad_cta_destination_activity = ad_cta_result.destination_activity
+                        ad_cta_returned_to_youtube = ad_cta_result.returned_to_youtube
+                        ad_cta_debug_screen_path = ad_cta_result.debug_screen_path
+                        ad_cta_debug_page_source_path = ad_cta_result.debug_page_source_path
+                        built_ad = build_watched_ad_record(
+                            watch_samples=watch_samples,
+                            watch_debug_screen_path=watch_debug_screen_path,
+                            watch_debug_page_source_path=watch_debug_page_source_path,
+                            ad_cta_result=ad_cta_result,
+                            recorded_video_path=recorded_video_path,
+                            recorded_video_duration_seconds=recorded_video_duration_seconds,
+                        )
+                        if built_ad is not None:
+                            await self._focus_captured_ad_video_if_needed(built_ad)
+                            ad_analysis.submit(built_ad)
+                            landing_scraper.submit(built_ad)
+                            watched_ads.append(built_ad)
+                            await _notify_ad_captured()
+                        if ad_cta_result.returned_to_youtube:
+                            try:
+                                post_ad_watch, post_ad_notes = await self._resume_after_ad_return(
+                                    watcher=watcher,
+                                    built_ad=built_ad,
+                                )
+                                runtime_notes.extend(post_ad_notes)
+                            except Exception as exc:
+                                runtime_notes.append(f"post_ad_watch_failed:{type(exc).__name__}")
+                                post_ad_watch = None
+                            if (
+                                self._config.android_app.session_engagement_enabled
+                                and post_ad_watch is not None
+                                and self._can_attempt_engagement(post_ad_watch.samples)
+                            ):
+                                runtime_notes.extend(
+                                    await self._prepare_for_engagement(
+                                        watcher=watcher,
+                                    )
+                                )
+                                engagement_result = await self._run_engagement_safe(
+                                    driver=session.driver,
+                                    adb_serial=device.adb_serial,
+                                    topic=topic,
+                                    opened_title=opened_title,
+                                    notes=runtime_notes,
+                                    note_prefix="post_ad_engagement_failed",
+                                )
+                                if engagement_result is not None:
+                                    liked = engagement_result.liked
+                                    already_liked = engagement_result.already_liked
+                                    subscribed = engagement_result.subscribed
+                                    already_subscribed = engagement_result.already_subscribed
+                                    comments_glanced = engagement_result.comments_glanced
+                                    runtime_notes.extend(
+                                        await self._stabilize_playback_after_engagement(
+                                            watcher=watcher,
+                                        )
+                                    )
+                            else:
+                                reason = (
+                                    "disabled_for_probe_stability"
+                                    if not self._config.android_app.session_engagement_enabled
+                                    else self._engagement_gate_reason(
+                                        post_ad_watch.samples if post_ad_watch is not None else None
+                                    )
+                                )
+                                runtime_notes.append(f"post_ad_engagement_skipped:{reason}")
+                    except Exception as exc:
+                        runtime_notes.append(f"ad_flow_failed:{type(exc).__name__}:{exc}")
+                        if watch_debug_screen_path is None:
+                            watch_debug_screen_path, watch_debug_page_source_path = (
+                                self._write_watch_debug_artifacts(
+                                    driver=session.driver,
+                                    topic=topic,
+                                )
+                            )
+
+            await ad_analysis.drain(timeout_seconds=90.0)
+            self._cleanup_irrelevant_ad_videos(watched_ads)
+            ad_analysis_done = self._count_ad_analysis_done(watched_ads)
+            ad_analysis_terminal = self._count_ad_analysis_terminal(watched_ads)
+            artifact_path = self._write_artifact(
+                avd_name=device.avd_name,
+                adb_serial=device.adb_serial,
+                topic=topic,
+                opened_title=opened_title,
+                home=home,
+                results=results,
+                watch=watch,
+                appium_server_url=session.server_url,
+                reused_running_device=device.reused_running_device,
+                started_local_appium=session.started_local_server,
+                watch_verified=watch_verified,
+                watch_ad_detected=watch_ad_detected,
+                watch_samples=watch_samples,
+                watch_debug_screen_path=watch_debug_screen_path,
+                watch_debug_page_source_path=watch_debug_page_source_path,
+                ad_cta_clicked=ad_cta_clicked,
+                ad_cta_label=ad_cta_label,
+                ad_cta_destination_package=ad_cta_destination_package,
+                ad_cta_destination_activity=ad_cta_destination_activity,
+                ad_cta_returned_to_youtube=ad_cta_returned_to_youtube,
+                ad_cta_debug_screen_path=ad_cta_debug_screen_path,
+                ad_cta_debug_page_source_path=ad_cta_debug_page_source_path,
+                watched_ads=watched_ads,
+                ad_analysis_done=ad_analysis_done,
+                ad_analysis_terminal=ad_analysis_terminal,
+                liked=liked,
+                already_liked=already_liked,
+                subscribed=subscribed,
+                already_subscribed=already_subscribed,
+                comments_glanced=comments_glanced,
+                notes=(
+                    [
+                        *( [f"snapshot:{snapshot_name}"] if snapshot_name else [] ),
+                        f"watch_seconds:{self._config.android_app.probe_watch_seconds}",
+                        f"watch_verified:{str(watch_verified).lower()}",
+                        f"watch_ad_detected:{str(watch_ad_detected).lower()}",
+                        f"ad_cta_clicked:{str(ad_cta_clicked).lower()}",
+                        *runtime_notes,
+                    ]
+                ),
+            )
+
+            return AndroidProbeResult(
+                avd_name=device.avd_name,
+                adb_serial=device.adb_serial,
+                topic=topic,
+                opened_title=opened_title,
+                home=home,
+                results=results,
+                watch=watch,
+                artifact_path=artifact_path,
+                appium_server_url=session.server_url,
+                reused_running_device=device.reused_running_device,
+                started_local_appium=session.started_local_server,
+                watch_verified=watch_verified,
+                watch_ad_detected=watch_ad_detected,
+                watch_samples=watch_samples,
+                watch_debug_screen_path=watch_debug_screen_path,
+                watch_debug_page_source_path=watch_debug_page_source_path,
+                ad_cta_clicked=ad_cta_clicked,
+                ad_cta_label=ad_cta_label,
+                ad_cta_destination_package=ad_cta_destination_package,
+                ad_cta_destination_activity=ad_cta_destination_activity,
+                ad_cta_returned_to_youtube=ad_cta_returned_to_youtube,
+                ad_cta_debug_screen_path=ad_cta_debug_screen_path,
+                ad_cta_debug_page_source_path=ad_cta_debug_page_source_path,
+                watched_ads=watched_ads,
+                ad_analysis_done=ad_analysis_done,
+                ad_analysis_terminal=ad_analysis_terminal,
+                liked=liked,
+                already_liked=already_liked,
+                subscribed=subscribed,
+                already_subscribed=already_subscribed,
+                comments_glanced=comments_glanced,
+                notes=(
+                    [
+                        *( [f"snapshot:{snapshot_name}"] if snapshot_name else [] ),
+                        f"watch_seconds:{self._config.android_app.probe_watch_seconds}",
+                        f"watch_verified:{str(watch_verified).lower()}",
+                        f"watch_ad_detected:{str(watch_ad_detected).lower()}",
+                        f"ad_cta_clicked:{str(ad_cta_clicked).lower()}",
+                        *runtime_notes,
+                    ]
+                ),
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                await ad_analysis.drain(timeout_seconds=5.0)
+            if landing_scraper is not None:
+                with contextlib.suppress(Exception):
+                    await landing_scraper.drain(timeout_seconds=60.0)
+                with contextlib.suppress(Exception):
+                    await landing_scraper.stop()
+            with contextlib.suppress(Exception):
+                self._backfill_advertiser_from_landing_scrape(watched_ads)
+            with contextlib.suppress(Exception):
+                self._dedupe_watched_ads(watched_ads)
+            try:
+                if session is not None:
+                    print("[android-probe] teardown:close_session:start", flush=True)
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(
+                            self._runtime.appium_provider.close_session(session),
+                            timeout=30,
+                        )
+                    print("[android-probe] teardown:close_session:done", flush=True)
+            finally:
+                if (
+                    device is not None
+                    and self._config.android_app.emulator_stop_after_run
+                ):
+                    try:
+                        print(
+                            f"[android-probe] teardown:stop_device:start serial={device.adb_serial}",
+                            flush=True,
+                        )
+                        await asyncio.wait_for(
+                            self._runtime.avd_manager.stop_device(
+                                device.adb_serial,
+                                avd_name=device.avd_name,
+                            ),
+                            timeout=30,
+                        )
+                        print("[android-probe] teardown:stop_device:done", flush=True)
+                    except Exception:
+                        with contextlib.suppress(Exception):
+                            print(
+                                f"[android-probe] teardown:force_cleanup:start serial={device.adb_serial}",
+                                flush=True,
+                            )
+                            await self._runtime.avd_manager.force_cleanup_device(
+                                adb_serial=device.adb_serial,
+                                avd_name=device.avd_name,
+                            )
+                            print("[android-probe] teardown:force_cleanup:done", flush=True)
+                    else:
+                        with contextlib.suppress(Exception):
+                            print(
+                                f"[android-probe] teardown:force_cleanup:post_stop serial={device.adb_serial}",
+                                flush=True,
+                            )
+                            await self._runtime.avd_manager.force_cleanup_device(
+                                adb_serial=device.adb_serial,
+                                avd_name=device.avd_name,
+                            )
+                            print("[android-probe] teardown:force_cleanup:post_stop_done", flush=True)
+                if proxy_bridge_handle is not None:
+                    with contextlib.suppress(Exception):
+                        await self._proxy_bridge.stop(proxy_bridge_handle)
+
+    def _write_artifact(
+        self,
+        *,
+        avd_name: str,
+        adb_serial: str,
+        topic: str,
+        opened_title: str | None,
+        home: AndroidProbeSurfaceSnapshot,
+        results: AndroidProbeSurfaceSnapshot,
+        watch: AndroidProbeSurfaceSnapshot | None,
+        appium_server_url: str,
+        reused_running_device: bool,
+        started_local_appium: bool,
+        watch_verified: bool,
+        watch_ad_detected: bool,
+        watch_samples: list[object],
+        watch_debug_screen_path: Path | None,
+        watch_debug_page_source_path: Path | None,
+        ad_cta_clicked: bool,
+        ad_cta_label: str | None,
+        ad_cta_destination_package: str | None,
+        ad_cta_destination_activity: str | None,
+        ad_cta_returned_to_youtube: bool,
+        ad_cta_debug_screen_path: Path | None,
+        ad_cta_debug_page_source_path: Path | None,
+        watched_ads: list[dict[str, object]],
+        ad_analysis_done: int,
+        ad_analysis_terminal: int,
+        liked: bool,
+        already_liked: bool,
+        subscribed: bool,
+        already_subscribed: bool,
+        comments_glanced: bool,
+        notes: list[str],
+    ) -> Path:
+        base_dir = (
+            self._config.storage.base_path
+            / self._config.android_app.artifacts_subdir
+        )
+        base_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        artifact_path = base_dir / f"probe_{timestamp}.json"
+        payload = {
+            "avd_name": avd_name,
+            "adb_serial": adb_serial,
+            "topic": topic,
+            "opened_title": opened_title,
+            "home": asdict(home),
+            "results": asdict(results),
+            "watch": asdict(watch) if watch is not None else None,
+            "appium_server_url": appium_server_url,
+            "reused_running_device": reused_running_device,
+            "started_local_appium": started_local_appium,
+            "watch_verified": watch_verified,
+            "watch_ad_detected": watch_ad_detected,
+            "watch_samples": [asdict(sample) for sample in watch_samples],
+            "watch_debug_screen_path": (
+                str(watch_debug_screen_path) if watch_debug_screen_path is not None else None
+            ),
+            "watch_debug_page_source_path": (
+                str(watch_debug_page_source_path)
+                if watch_debug_page_source_path is not None
+                else None
+            ),
+            "ad_cta_clicked": ad_cta_clicked,
+            "ad_cta_label": ad_cta_label,
+            "ad_cta_destination_package": ad_cta_destination_package,
+            "ad_cta_destination_activity": ad_cta_destination_activity,
+            "ad_cta_returned_to_youtube": ad_cta_returned_to_youtube,
+            "ad_cta_debug_screen_path": (
+                str(ad_cta_debug_screen_path) if ad_cta_debug_screen_path is not None else None
+            ),
+            "ad_cta_debug_page_source_path": (
+                str(ad_cta_debug_page_source_path)
+                if ad_cta_debug_page_source_path is not None
+                else None
+            ),
+            "watched_ads": watched_ads,
+            "ad_analysis_done": ad_analysis_done,
+            "ad_analysis_terminal": ad_analysis_terminal,
+            "liked": liked,
+            "already_liked": already_liked,
+            "subscribed": subscribed,
+            "already_subscribed": already_subscribed,
+            "comments_glanced": comments_glanced,
+            "notes": notes,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        }
+        artifact_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return artifact_path
+
+    @staticmethod
+    def _count_ad_analysis_done(watched_ads: list[dict[str, object]]) -> int:
+        return sum(
+            1
+            for item in watched_ads
+            if isinstance(item, dict)
+            and isinstance(item.get("capture"), dict)
+            and str(item["capture"].get("analysis_status") or "") != ""
+        )
+
+    @staticmethod
+    def _count_ad_analysis_terminal(watched_ads: list[dict[str, object]]) -> int:
+        return sum(
+            1
+            for item in watched_ads
+            if isinstance(item, dict)
+            and isinstance(item.get("capture"), dict)
+            and str(item["capture"].get("analysis_status") or "") in {
+                "completed",
+                "not_relevant",
+                "skipped",
+                "failed",
+            }
+        )
+
+    @staticmethod
+    def _build_safe_artifact_prefix(topic: str) -> str:
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        safe_topic = "".join(ch if ch.isalnum() else "_" for ch in topic).strip("_") or "topic"
+        return f"watch_debug_{timestamp}_{safe_topic}"
+
+    def _write_watch_debug_artifacts(
+        self,
+        *,
+        driver: object,
+        topic: str,
+        adb_serial: str | None = None,
+        page_source_override: str | None = None,
+    ) -> tuple[Path | None, Path | None]:
+        base_dir = (
+            self._config.storage.base_path
+            / self._config.android_app.artifacts_subdir
+        )
+        base_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        safe_topic = "".join(ch if ch.isalnum() else "_" for ch in topic).strip("_") or "topic"
+
+        screen_path = base_dir / f"watch_debug_{timestamp}_{safe_topic}.png"
+        xml_path = base_dir / f"watch_debug_{timestamp}_{safe_topic}.xml"
+
+        written_screen = None
+        written_xml = None
+
+        try:
+            driver.save_screenshot(str(screen_path))  # type: ignore[attr-defined]
+            written_screen = screen_path
+        except Exception:
+            written_screen = None
+        if written_screen is None and adb_serial:
+            try:
+                adb_bin = require_tool_path("adb")
+                result = subprocess.run(
+                    [
+                        adb_bin,
+                        "-s",
+                        adb_serial,
+                        "exec-out",
+                        "screencap",
+                        "-p",
+                    ],
+                    capture_output=True,
+                    check=False,
+                    timeout=12,
+                )
+                if result.returncode == 0 and result.stdout:
+                    screen_path.write_bytes(result.stdout)
+                    written_screen = screen_path
+            except Exception:
+                written_screen = None
+
+        page_source = page_source_override
+        if page_source is None:
+            try:
+                page_source = driver.page_source  # type: ignore[attr-defined]
+            except Exception:
+                page_source = None
+        if page_source:
+            try:
+                xml_path.write_text(page_source, encoding="utf-8")
+                written_xml = xml_path
+            except Exception:
+                written_xml = None
+        if written_xml is None and adb_serial:
+            try:
+                adb_bin = require_tool_path("adb")
+                dump_path = "/sdcard/codex_runner_debug_dump.xml"
+                dump_result = subprocess.run(
+                    [
+                        adb_bin,
+                        "-s",
+                        adb_serial,
+                        "shell",
+                        "uiautomator",
+                        "dump",
+                        dump_path,
+                    ],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                    timeout=20,
+                )
+                if dump_result.returncode == 0:
+                    cat_result = subprocess.run(
+                        [
+                            adb_bin,
+                            "-s",
+                            adb_serial,
+                            "shell",
+                            "cat",
+                            dump_path,
+                        ],
+                        capture_output=True,
+                        check=False,
+                        text=True,
+                        timeout=12,
+                    )
+                    if cat_result.returncode == 0 and cat_result.stdout:
+                        xml_path.write_text(cat_result.stdout, encoding="utf-8")
+                        written_xml = xml_path
+            except Exception:
+                written_xml = None
+
+        return written_screen, written_xml
+
+    def _append_stage_debug_artifacts(
+        self,
+        *,
+        driver: object | None,
+        topic_notes: list[str],
+        topic: str,
+        stage_label: str,
+        adb_serial: str | None = None,
+    ) -> None:
+        if driver is None:
+            return
+        debug_screen_path, debug_page_source_path = self._write_watch_debug_artifacts(
+            driver=driver,
+            topic=f"{topic}_{stage_label}",
+            adb_serial=adb_serial,
+        )
+        if debug_screen_path is not None:
+            topic_notes.append(f"{stage_label}_debug:{debug_screen_path}")
+        if debug_page_source_path is not None:
+            topic_notes.append(f"{stage_label}_debug_xml:{debug_page_source_path}")
+
+    async def _stop_recording_handle(
+        self,
+        *,
+        recorder: AndroidScreenRecorder | None,
+        recording_handle: object | None,
+    ) -> str | None:
+        if recorder is None or recording_handle is None:
+            return None
+        local_video = await recorder.stop(
+            recording_handle,
+            keep_local=True,
+        )
+        if local_video is None:
+            return None
+        try:
+            return str(local_video.relative_to(self._config.storage.base_path))
+        except ValueError:
+            return str(local_video)
+
+    async def _start_recording_handle(
+        self,
+        *,
+        label: str,
+        topic: str,
+        adb_serial: str,
+        round_index: int | None = None,
+    ) -> tuple[AndroidScreenRecorder, object]:
+        recorder = AndroidScreenRecorder(
+            adb_serial=adb_serial,
+            artifacts_dir=(
+                self._config.storage.base_path
+                / self._config.android_app.probe_screenrecord_artifacts_subdir
+            ),
+            bitrate=self._config.android_app.probe_screenrecord_bitrate,
+        )
+        recording_handle = await recorder.start(
+            artifact_prefix=self._build_safe_artifact_prefix(topic),
+        )
+        if round_index is None:
+            logger.info(
+                "recorder[%s]: started topic=%s path=%s",
+                label,
+                topic,
+                getattr(recording_handle, "local_path", None),
+            )
+        else:
+            logger.info(
+                "recorder[%s]: started round=%s topic=%s path=%s",
+                label,
+                round_index,
+                topic,
+                getattr(recording_handle, "local_path", None),
+            )
+        return recorder, recording_handle
+
+    def _probe_recorded_video_duration(self, recorded_video_path: str | None) -> float | None:
+        if not recorded_video_path:
+            return None
+        video_path = self._config.storage.base_path / recorded_video_path
+        if not video_path.exists():
+            return None
+        ffprobe_bin = require_tool_path("ffprobe")
+        completed = subprocess.run(
+            [
+                ffprobe_bin,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=nk=1:nw=1",
+                str(video_path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=build_android_runtime_env(),
+        )
+        if completed.returncode != 0:
+            return None
+        try:
+            duration = float((completed.stdout or "").strip())
+        except ValueError:
+            return None
+        if duration <= 0:
+            return None
+        return duration
+
+    async def _extend_ad_watch_if_needed(
+        self,
+        *,
+        watcher: AndroidYouTubeWatcher,
+        watch_result: object,
+    ) -> tuple[object, str | None]:
+        samples = list(getattr(watch_result, "samples", []) or [])
+        if not samples or not any(getattr(sample, "ad_detected", False) for sample in samples):
+            return watch_result, None
+
+        # Keep enough footage for analysis, but avoid drifting into the next ad
+        # in a pod before we probe the CTA for the current creative.
+        desired_ad_window_seconds = max(
+            5.0,
+            min(8.0, float(self._config.android_app.probe_watch_seconds)),
+        )
+        observed_ad_window_seconds = self._observed_ad_window_seconds(samples)
+        extra_seconds = max(0.0, desired_ad_window_seconds - observed_ad_window_seconds)
+        remaining_current_ad_seconds = self._remaining_current_ad_seconds(samples)
+        if remaining_current_ad_seconds is not None:
+            extra_seconds = min(
+                extra_seconds,
+                max(0.0, remaining_current_ad_seconds - 1.0),
+            )
+        extra_seconds = max(0, int(math.ceil(extra_seconds)))
+        if extra_seconds <= 0:
+            return watch_result, None
+
+        extra_result = await watcher.watch_current(watch_seconds=extra_seconds)
+        merged_samples = self._merge_watch_samples(samples, getattr(extra_result, "samples", []))
+        return (
+            replace(
+                watch_result,
+                verified=bool(
+                    getattr(watch_result, "verified", False)
+                    or getattr(extra_result, "verified", False)
+                ),
+                samples=merged_samples,
+                ad_debug_page_source=self._preferred_ad_debug_page_source(
+                    extra_result,
+                    watch_result,
+                ),
+            ),
+            f"ad_watch_extended:{extra_seconds}",
+        )
+
+    async def _settle_post_ad_watch_if_needed(
+        self,
+        *,
+        watcher: AndroidYouTubeWatcher,
+        watch_seconds: int | None = None,
+        max_cycles: int = 3,
+    ) -> tuple[object, list[str]]:
+        notes: list[str] = []
+        settle_seconds = watch_seconds or self._config.android_app.probe_post_ad_watch_seconds
+        merged_result = await watcher.watch_current(
+            watch_seconds=settle_seconds
+        )
+        for cycle in range(1, max_cycles):
+            merged_samples = list(getattr(merged_result, "samples", []) or [])
+            if not merged_samples or not any(
+                self._sample_has_active_ad_ui(sample) for sample in merged_samples
+            ):
+                break
+            extra_result = await watcher.watch_current(
+                watch_seconds=settle_seconds
+            )
+            merged_result = replace(
+                merged_result,
+                verified=bool(
+                    getattr(merged_result, "verified", False)
+                    or getattr(extra_result, "verified", False)
+                ),
+                samples=self._merge_watch_samples(
+                    merged_samples,
+                    list(getattr(extra_result, "samples", []) or []),
+                ),
+                ad_debug_page_source=self._preferred_ad_debug_page_source(
+                    extra_result,
+                    merged_result,
+                ),
+            )
+            notes.append(
+                f"post_ad_watch_extended:{settle_seconds}:cycle{cycle}"
+            )
+        return merged_result, notes
+
+    async def _resume_after_ad_return(
+        self,
+        *,
+        watcher: AndroidYouTubeWatcher,
+        built_ad: object | None,
+    ) -> tuple[object | None, list[str]]:
+        notes: list[str] = []
+        if await watcher.restore_primary_watch_surface():
+            notes.append("post_ad_surface:restored")
+        # Check for a second ad in the pod — do NOT skip it, let midroll loop handle it.
+        pre_skip_result = await watcher.watch_current(watch_seconds=4)
+        pre_skip_samples = list(getattr(pre_skip_result, "samples", []) or [])
+        if any(getattr(s, "ad_detected", False) for s in pre_skip_samples):
+            # A new ad is playing — return it so the caller (midroll loop) can catch it.
+            notes.append("post_ad_residual_detected:returning_for_midroll")
+            return pre_skip_result, notes
+
+        quick_settle_seconds = max(
+            4,
+            min(6, self._config.android_app.probe_post_ad_watch_seconds),
+        )
+        quick_result, quick_notes = await self._settle_post_ad_watch_if_needed(
+            watcher=watcher,
+            watch_seconds=quick_settle_seconds,
+            max_cycles=1,
+        )
+        notes.extend(quick_notes)
+
+        quick_samples = list(getattr(quick_result, "samples", []) or [])
+        quick_has_active_ad = any(
+            self._sample_has_active_ad_ui(sample) for sample in quick_samples
+        )
+        if not quick_samples or not quick_has_active_ad:
+            if await watcher.ensure_playing():
+                notes.append("post_ad_playback:resume_requested")
+            else:
+                notes.append("post_ad_playback:resume_missed")
+            if await watcher.restore_primary_watch_surface():
+                notes.append("post_ad_surface:restored_after_quick")
+            return quick_result, notes
+
+        if self._should_skip_post_ad_settle(built_ad):
+            notes.append("post_ad_watch_limited:ad_completed_after_return")
+            if await watcher.restore_primary_watch_surface():
+                notes.append("post_ad_surface:restored_limited")
+            return quick_result, notes
+
+        extended_result, extended_notes = await self._settle_post_ad_watch_if_needed(
+            watcher=watcher,
+        )
+        if quick_samples:
+            extended_result = replace(
+                extended_result,
+                verified=bool(
+                    getattr(quick_result, "verified", False)
+                    or getattr(extended_result, "verified", False)
+                ),
+                samples=self._merge_watch_samples(
+                    quick_samples,
+                    list(getattr(extended_result, "samples", []) or []),
+                ),
+                ad_debug_page_source=self._preferred_ad_debug_page_source(
+                    extended_result,
+                    quick_result,
+                ),
+            )
+        notes.extend(extended_notes)
+        if await watcher.restore_primary_watch_surface():
+            notes.append("post_ad_surface:restored_after_extended")
+        return extended_result, notes
+
+    async def _probe_unaccepted_watch_surface_for_ad(
+        self,
+        *,
+        driver: object | None,
+        navigator: AndroidYouTubeNavigator | None,
+        watcher: AndroidYouTubeWatcher | None,
+        adb_serial: str | None,
+        topic: str,
+        stage_label: str,
+        topic_notes: list[str],
+        ad_analysis: AndroidAdAnalysisCoordinator,
+        landing_scraper: AndroidLandingPageScraper,
+        watched_ads: list[dict[str, object]],
+        topic_watched_ads: list[dict[str, object]],
+        notify_ad_captured: Callable[[], Awaitable[None]] | None = None,
+    ) -> bool:
+        if driver is None or navigator is None or watcher is None or adb_serial is None:
+            return False
+        topic_notes.append(f"{stage_label}:probe_started")
+        try:
+            if not await navigator.has_watch_activity():
+                topic_notes.append(f"{stage_label}:no_watch_activity")
+                return False
+        except Exception:
+            topic_notes.append(f"{stage_label}:watch_activity_probe_failed")
+            return False
+
+        probe_watch_seconds = max(4, min(8, self._config.android_app.probe_watch_seconds))
+        recorder = None
+        recording_handle = None
+        recorded_video_path = None
+        recorded_video_duration_seconds = None
+        probe_result = None
+        probe_error: Exception | None = None
+        _stage_samples_ended_monotonic = time.monotonic()
+        try:
+            if self._config.android_app.probe_screenrecord_enabled:
+                recorder = AndroidScreenRecorder(
+                    adb_serial=adb_serial,
+                    artifacts_dir=(
+                        self._config.storage.base_path
+                        / self._config.android_app.probe_screenrecord_artifacts_subdir
+                    ),
+                    bitrate=self._config.android_app.probe_screenrecord_bitrate,
+                )
+                recording_handle = await recorder.start(
+                    artifact_prefix=self._build_safe_artifact_prefix(f"{topic}_{stage_label}"),
+                )
+            try:
+                probe_result = await watcher.watch_current(
+                    watch_seconds=probe_watch_seconds,
+                    timeout_grace_seconds=12.0,
+                    timeout_floor_seconds=18.0,
+                )
+                probe_result, probe_extension_note = await self._extend_ad_watch_if_needed(
+                    watcher=watcher,
+                    watch_result=probe_result,
+                )
+                _stage_samples_ended_monotonic = time.monotonic()
+                if probe_extension_note is not None:
+                    topic_notes.append(f"{stage_label}:{probe_extension_note}")
+            except Exception as exc:
+                probe_error = exc
+        finally:
+            if probe_error is not None and recorder is not None and recording_handle is not None:
+                # Error path: stop and discard recording immediately
+                with contextlib.suppress(Exception):
+                    await recorder.stop(recording_handle, keep_local=False)
+                recorder = None
+                recording_handle = None
+
+        if probe_error is not None:
+            topic_notes.append(f"{stage_label}:probe_error:{type(probe_error).__name__}")
+            return False
+
+        if probe_result is None:
+            topic_notes.append(f"{stage_label}:probe_failed")
+            if recorder is not None and recording_handle is not None:
+                with contextlib.suppress(Exception):
+                    await recorder.stop(recording_handle, keep_local=False)
+            return False
+
+        probe_samples = list(getattr(probe_result, "samples", []) or [])
+        probe_ad_detected = any(sample.ad_detected for sample in probe_samples)
+        if not probe_ad_detected:
+            topic_notes.append(f"{stage_label}:no_ad")
+            if recorder is not None and recording_handle is not None:
+                with contextlib.suppress(Exception):
+                    await recorder.stop(recording_handle, keep_local=False)
+            return False
+
+        topic_notes.append(f"{stage_label}:ad_detected")
+        watch_debug_screen_path, watch_debug_page_source_path = self._write_watch_debug_artifacts(
+            driver=driver,
+            topic=f"{topic}_{stage_label}",
+            adb_serial=adb_serial,
+            page_source_override=getattr(probe_result, "ad_debug_page_source", None),
+        )
+        if watch_debug_screen_path is not None:
+            topic_notes.append(f"{stage_label}_debug:{watch_debug_screen_path}")
+        if watch_debug_page_source_path is not None:
+            topic_notes.append(f"{stage_label}_debug_xml:{watch_debug_page_source_path}")
+
+        ad_cta_result = None
+        try:
+            ad_interactor = AndroidYouTubeAdInteractor(
+                driver,
+                self._config.android_app,
+                adb_serial=adb_serial,
+            )
+            ad_cta_result = await ad_interactor.probe_cta(
+                artifact_dir=(
+                    self._config.storage.base_path
+                    / self._config.android_app.artifacts_subdir
+                ),
+                artifact_prefix=self._build_safe_artifact_prefix(f"{topic}_{stage_label}"),
+            )
+            topic_notes.append(
+                f"{stage_label}_ad_cta_returned:{str(ad_cta_result.returned_to_youtube).lower()}"
+            )
+        except Exception as exc:
+            topic_notes.append(f"{stage_label}_ad_cta_probe_failed:{type(exc).__name__}:{exc}")
+        # Full elapsed from last sample: debug artifact writes + CTA probe.
+        _stage_cta_elapsed = time.monotonic() - _stage_samples_ended_monotonic
+
+        # Stop recording after CTA probe — subtract elapsed CTA probe time from remaining
+        # since ad progressed during that window.
+        if recorder is not None and recording_handle is not None:
+            (
+                recorded_video_path,
+                recorded_video_duration_seconds,
+            ) = await self._finalize_recording_after_cta(
+                label=stage_label,
+                recorder=recorder,
+                recording_handle=recording_handle,
+                samples=probe_samples,
+                debug_page_source_path=watch_debug_page_source_path,
+                clicked=ad_cta_result.clicked if ad_cta_result is not None else None,
+                returned_to_youtube=(
+                    ad_cta_result.returned_to_youtube
+                    if ad_cta_result is not None
+                    else None
+                ),
+                elapsed_since_samples=_stage_cta_elapsed,
+            )
+
+        built_ad = build_watched_ad_record(
+            watch_samples=probe_samples,
+            watch_debug_screen_path=watch_debug_screen_path,
+            watch_debug_page_source_path=watch_debug_page_source_path,
+            ad_cta_result=ad_cta_result,
+            recorded_video_path=recorded_video_path,
+            recorded_video_duration_seconds=recorded_video_duration_seconds,
+        )
+        if built_ad is None:
+            return False
+
+        await self._focus_captured_ad_video_if_needed(built_ad)
+        ad_analysis.submit(built_ad)
+        landing_scraper.submit(built_ad)
+        topic_watched_ads.append(built_ad)
+        watched_ads.append(built_ad)
+        if notify_ad_captured is not None:
+            await notify_ad_captured()
+        topic_notes.append(f"{stage_label}:ad_done")
+
+        if ad_cta_result is not None and ad_cta_result.returned_to_youtube:
+            with contextlib.suppress(Exception):
+                await watcher.restore_primary_watch_surface()
+            with contextlib.suppress(Exception):
+                await watcher.dismiss_residual_ad_if_present()
+            with contextlib.suppress(Exception):
+                await watcher.ensure_playing()
+        else:
+            with contextlib.suppress(Exception):
+                current_package, _ = await navigator.current_package_activity()
+                if current_package != self._config.android_app.youtube_package:
+                    await navigator.ensure_app_ready()
+                    topic_notes.append(f"{stage_label}:youtube_reacquired")
+
+        return True
+
+    def _merge_watch_samples(self, base_samples: list[object], extra_samples: list[object]) -> list[object]:
+        if not base_samples:
+            return list(extra_samples)
+        if not extra_samples:
+            return list(base_samples)
+        offset_base = self._observed_watch_seconds(base_samples)
+        interval = max(1, self._config.android_app.probe_watch_sample_interval_seconds)
+        shifted_extra = [
+            replace(
+                sample,
+                offset_seconds=getattr(sample, "offset_seconds", 0) + offset_base + interval,
+            )
+            for sample in extra_samples
+        ]
+        return [*base_samples, *shifted_extra]
+
+    @staticmethod
+    def _result_has_ad_samples(result: object | None) -> bool:
+        if result is None:
+            return False
+        return any(
+            getattr(sample, "ad_detected", False)
+            for sample in list(getattr(result, "samples", []) or [])
+        )
+
+    async def _advance_main_watch_iteration(
+        self,
+        *,
+        watcher: AndroidYouTubeWatcher,
+        watch_result: object,
+        target_watch_seconds: float,
+        pending_midroll_result: object | None,
+        pending_midroll_samples_ended_monotonic: float | None,
+    ) -> tuple[object, str | None, object | None, float | None]:
+        if pending_midroll_result is not None:
+            return (
+                watch_result,
+                "main_watch_ad_detected:pending_residual",
+                pending_midroll_result,
+                pending_midroll_samples_ended_monotonic or time.monotonic(),
+            )
+        next_result, note, extension_result = await self._continue_main_watch_if_needed(
+            watcher=watcher,
+            watch_result=watch_result,
+            target_watch_seconds=target_watch_seconds,
+        )
+        return next_result, note, extension_result, time.monotonic()
+
+    @staticmethod
+    def _preferred_ad_debug_page_source(*results: object) -> str | None:
+        for result in results:
+            candidate = getattr(result, "ad_debug_page_source", None)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+        return None
+
+    async def _trim_recording_tail_to_ad(
+        self,
+        *,
+        built_ad: dict[str, object] | None,
+        ad_sample_count: int,
+        extension_samples: list[object] | None = None,
+    ) -> None:
+        """Trim the recording to contain only the current ad. The recorder
+        runs for the whole watch chunk, so without trimming the clip mixes
+        the regular video, pod transitions, and neighbouring ads."""
+        if not isinstance(built_ad, dict):
+            return
+        capture = built_ad.get("capture")
+        if not isinstance(capture, dict):
+            return
+        video_file = capture.get("video_file")
+        if not isinstance(video_file, str) or not video_file.strip():
+            return
+        rec_dur = self._coerce_float(capture.get("recorded_video_duration_seconds"))
+        if rec_dur is None or rec_dur <= 0:
+            return
+        watched = self._coerce_float(built_ad.get("watched_seconds")) or 0.0
+        ad_seconds = max(float(ad_sample_count), watched)
+        if ad_seconds <= 0:
+            return
+        interval = max(1, self._config.android_app.probe_watch_sample_interval_seconds)
+        head_skip = 0.0
+        if extension_samples:
+            for idx, sample in enumerate(extension_samples):
+                if getattr(sample, "ad_detected", False):
+                    head_skip = max(0.0, (idx - 1) * interval)
+                    break
+        ad_span = ad_seconds + 1.5
+        remainder_after_ad = rec_dur - head_skip - ad_span
+        logger.info(
+            "trim_recording: rec_dur=%.1fs head_skip=%.1fs ad_span=%.1fs remainder=%.1fs",
+            rec_dur, head_skip, ad_span, remainder_after_ad,
+        )
+        if head_skip < 0.5 and remainder_after_ad < 1.0:
+            return
+        start_seconds = min(max(0.0, head_skip), max(0.0, rec_dur - ad_span))
+        source_path = self._config.storage.base_path / video_file
+        if not source_path.exists():
+            return
+        trimmed_path = source_path.with_name(f"{source_path.stem}_adonly{source_path.suffix}")
+        import asyncio as _asyncio
+        try:
+            proc = await _asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-y",
+                "-ss", f"{start_seconds:.2f}",
+                "-i", str(source_path),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(trimmed_path),
+                stdout=_asyncio.subprocess.DEVNULL,
+                stderr=_asyncio.subprocess.DEVNULL,
+            )
+            await _asyncio.wait_for(proc.wait(), timeout=30)
+        except Exception:
+            trimmed_path.unlink(missing_ok=True)
+            return
+        if proc.returncode != 0 or not trimmed_path.exists() or trimmed_path.stat().st_size == 0:
+            trimmed_path.unlink(missing_ok=True)
+            return
+        with contextlib.suppress(Exception):
+            source_path.unlink(missing_ok=True)
+        try:
+            trimmed_rel = str(trimmed_path.relative_to(self._config.storage.base_path))
+        except ValueError:
+            trimmed_rel = str(trimmed_path)
+        new_dur = self._probe_recorded_video_duration(trimmed_rel)
+        capture["video_file"] = trimmed_rel
+        built_ad["video_file"] = trimmed_rel
+        if new_dur is not None:
+            capture["recorded_video_duration_seconds"] = new_dur
+            built_ad["recorded_video_duration_seconds"] = new_dur
+        # After trimming, ad now starts ~2s into the clip.
+        built_ad["first_ad_offset_seconds"] = min(2.0, new_dur or 2.0)
+
+    async def _focus_captured_ad_video_if_needed(
+        self,
+        built_ad: dict[str, object] | None,
+    ) -> None:
+        if not isinstance(built_ad, dict):
+            return
+        capture = built_ad.get("capture")
+        if not isinstance(capture, dict):
+            return
+        video_file = capture.get("video_file")
+        if not isinstance(video_file, str) or not video_file.strip():
+            return
+
+        first_ad_off = self._coerce_float(built_ad.get("first_ad_offset_seconds"))
+        watched_sec = self._coerce_float(built_ad.get("watched_seconds"))
+        ad_dur = self._coerce_float(built_ad.get("ad_duration_seconds"))
+        rec_dur = self._coerce_float(capture.get("recorded_video_duration_seconds"))
+        logger.info(
+            "focus_window: first_ad_offset=%.1fs watched=%.1fs ad_duration=%.1fs recorded=%.1fs",
+            first_ad_off or 0, watched_sec or 0, ad_dur or 0, rec_dur or 0,
+        )
+        focus_window = _build_ad_video_focus_window(
+            first_ad_offset_seconds=first_ad_off,
+            watched_seconds=watched_sec,
+            ad_duration_seconds=ad_dur,
+            recorded_video_duration_seconds=rec_dur,
+        )
+        if focus_window is None:
+            logger.info("focus_window: skipped (window is None)")
+            return
+
+        source_path = self._config.storage.base_path / video_file
+        if not source_path.exists():
+            return
+
+        start_seconds, max_duration_seconds = focus_window
+        logger.info(
+            "focus_window: preserving source capture video=%s start=%.1fs window=%.1fs; "
+            "analysis will apply focused trimming lazily",
+            video_file,
+            start_seconds,
+            max_duration_seconds,
+        )
+
+    @staticmethod
+    def _bump_watched_seconds_from_rec_dur(
+        built_ad: dict[str, object],
+        rec_dur: float,
+    ) -> None:
+        """If rec_dur is a better estimate of watched time than what build_watched_ad_record
+        computed (e.g. because rec_dur was None at build time), update watched_seconds."""
+        ad_dur = None
+        raw_ad_dur = built_ad.get("ad_duration_seconds")
+        if isinstance(raw_ad_dur, (int, float)):
+            ad_dur = float(raw_ad_dur)
+        current_watched = built_ad.get("watched_seconds")
+        if not isinstance(current_watched, (int, float)):
+            current_watched = 0.0
+        # Accept rec_dur as watched only when it doesn't overshoot the known ad duration.
+        if ad_dur is not None and rec_dur > ad_dur + 5.0:
+            return
+        if rec_dur > float(current_watched):
+            built_ad["watched_seconds"] = rec_dur
+
+    @staticmethod
+    def _coerce_float(value: object) -> float | None:
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    @staticmethod
+    def _observed_watch_seconds(samples: list[object]) -> int:
+        return max((int(getattr(sample, "offset_seconds", 0)) for sample in samples), default=0)
+
+    def _observed_ad_window_seconds(self, samples: list[object]) -> float:
+        ad_offsets = [
+            float(getattr(sample, "offset_seconds"))
+            for sample in samples
+            if getattr(sample, "ad_detected", False)
+            and isinstance(getattr(sample, "offset_seconds", None), (int, float))
+        ]
+        if not ad_offsets:
+            return 0.0
+        interval = max(1, self._config.android_app.probe_watch_sample_interval_seconds)
+        return max(float(interval), (max(ad_offsets) - min(ad_offsets)) + float(interval))
+
+    @staticmethod
+    def _remaining_current_ad_seconds(samples: list[object]) -> float | None:
+        for sample in reversed(samples):
+            if not getattr(sample, "ad_detected", False):
+                continue
+            progress_seconds = getattr(sample, "ad_progress_seconds", None)
+            duration_seconds = getattr(sample, "ad_duration_seconds", None)
+            if not isinstance(progress_seconds, (int, float)):
+                continue
+            if not isinstance(duration_seconds, (int, float)):
+                continue
+            remaining_seconds = float(duration_seconds) - float(progress_seconds)
+            if remaining_seconds >= 0.0:
+                return remaining_seconds
+        return None
+
+    @staticmethod
+    def _sample_debug_summary(
+        samples: list[object],
+        *,
+        max_items: int = 6,
+    ) -> str:
+        if not samples:
+            return "[]"
+        rendered: list[str] = []
+        for sample in samples[-max_items:]:
+            offset = getattr(sample, "offset_seconds", None)
+            ad_detected = bool(getattr(sample, "ad_detected", False))
+            progress = getattr(sample, "ad_progress_seconds", None)
+            duration = getattr(sample, "ad_duration_seconds", None)
+            skip = bool(getattr(sample, "skip_available", False))
+            seekbar = "seek" if getattr(sample, "ad_seekbar_description", None) else "noseek"
+            sponsor = "s" if getattr(sample, "ad_sponsor_label", None) else "-"
+            display = "u" if getattr(sample, "ad_display_url", None) else "-"
+            cta = "c" if getattr(sample, "ad_cta_text", None) else "-"
+            rendered.append(
+                f"{offset}:{'ad' if ad_detected else 'noad'}:{progress}/{duration}:"
+                f"skip={int(skip)}:{seekbar}:{sponsor}{display}{cta}"
+            )
+        return "[" + ", ".join(rendered) + "]"
+
+    @staticmethod
+    def _recording_runtime_seconds(
+        recording_handle: object | None,
+    ) -> float | None:
+        started_monotonic = getattr(recording_handle, "started_monotonic", None)
+        if not isinstance(started_monotonic, (int, float)):
+            return None
+        return max(0.0, time.monotonic() - float(started_monotonic))
+
+    @staticmethod
+    def _remaining_current_ad_seconds_from_debug_xml(
+        debug_page_source_path: Path | None,
+    ) -> tuple[float | None, float | None, float | None]:
+        if debug_page_source_path is None:
+            return None, None, None
+        metadata = _parse_debug_watch_metadata(debug_page_source_path)
+        progress_seconds = metadata.get("ad_progress_seconds")
+        duration_seconds = metadata.get("ad_duration_seconds")
+        if not isinstance(progress_seconds, (int, float)):
+            return None, None, duration_seconds if isinstance(duration_seconds, (int, float)) else None
+        if not isinstance(duration_seconds, (int, float)):
+            return None, float(progress_seconds), None
+        remaining_seconds = float(duration_seconds) - float(progress_seconds)
+        if remaining_seconds < 0.0:
+            return None, float(progress_seconds), float(duration_seconds)
+        return remaining_seconds, float(progress_seconds), float(duration_seconds)
+
+    def _estimate_remaining_current_ad_seconds(
+        self,
+        samples: list[object],
+        *,
+        debug_page_source_path: Path | None = None,
+    ) -> tuple[float | None, str, float | None, float | None]:
+        sample_remaining = self._remaining_current_ad_seconds(samples)
+        if sample_remaining is not None:
+            return sample_remaining, "samples", None, None
+        debug_remaining, debug_progress, debug_duration = (
+            self._remaining_current_ad_seconds_from_debug_xml(debug_page_source_path)
+        )
+        if debug_remaining is not None:
+            return debug_remaining, "debug_xml", debug_progress, debug_duration
+        return None, "none", debug_progress, debug_duration
+
+    @staticmethod
+    def _sample_has_explicit_ad_timing(sample: object) -> bool:
+        if not getattr(sample, "ad_detected", False):
+            return False
+        return isinstance(getattr(sample, "ad_progress_seconds", None), (int, float)) or isinstance(
+            getattr(sample, "ad_duration_seconds", None),
+            (int, float),
+        )
+
+    def _recorder_wait_cap_seconds(
+        self,
+        *,
+        clicked: bool | None,
+        remaining_source: str,
+        debug_duration: float | None,
+        samples: list[object],
+    ) -> float:
+        base_cap = 55.0 if not clicked else 45.0
+        if remaining_source != "debug_xml":
+            return base_cap
+        if any(self._sample_has_explicit_ad_timing(sample) for sample in samples):
+            return base_cap
+        if not isinstance(debug_duration, (int, float)) or float(debug_duration) > 120.0:
+            return min(base_cap, 12.0 if clicked else 18.0)
+        if float(debug_duration) > 60.0:
+            return min(base_cap, 18.0 if clicked else 24.0)
+        return min(base_cap, 24.0 if clicked else 30.0)
+
+    def _log_recorder_decision(
+        self,
+        *,
+        label: str,
+        decision: str,
+        samples: list[object],
+        recording_handle: object | None,
+        debug_page_source_path: Path | None = None,
+    ) -> None:
+        runtime_seconds = self._recording_runtime_seconds(recording_handle)
+        remaining_seconds, remaining_source, debug_progress, debug_duration = (
+            self._estimate_remaining_current_ad_seconds(
+                samples,
+                debug_page_source_path=debug_page_source_path,
+            )
+        )
+        logger.info(
+            "recorder[%s]: %s runtime=%s remaining=%s source=%s "
+            "debug_progress=%s debug_duration=%s samples=%s",
+            label,
+            decision,
+            f"{runtime_seconds:.1f}s" if runtime_seconds is not None else "n/a",
+            f"{remaining_seconds:.1f}s" if remaining_seconds is not None else None,
+            remaining_source,
+            debug_progress,
+            debug_duration,
+            self._sample_debug_summary(samples),
+        )
+
+    async def _finalize_recording_after_cta(
+        self,
+        *,
+        label: str,
+        recorder: AndroidScreenRecorder,
+        recording_handle: object,
+        samples: list[object],
+        debug_page_source_path: Path | None = None,
+        clicked: bool | None = None,
+        returned_to_youtube: bool | None = None,
+        elapsed_since_samples: float = 0.0,
+    ) -> tuple[str | None, float | None]:
+        self._log_recorder_decision(
+            label=label,
+            decision="pre_stop_after_cta",
+            samples=samples,
+            recording_handle=recording_handle,
+            debug_page_source_path=debug_page_source_path,
+        )
+        (
+            remaining_seconds,
+            remaining_source,
+            debug_progress,
+            debug_duration,
+        ) = self._estimate_remaining_current_ad_seconds(
+            samples,
+            debug_page_source_path=debug_page_source_path,
+        )
+        # For "samples" source: progress was last known at end-of-samples, so subtract
+        # elapsed_since_samples to get current remaining.
+        # For "debug_xml" source: debug_progress was captured during the CTA probe, which
+        # already happened inside elapsed_since_samples window — so remaining = duration -
+        # debug_progress is already close to current. Don't subtract elapsed again.
+        if remaining_seconds is not None and remaining_source == "samples" and elapsed_since_samples > 0.0:
+            remaining_seconds = max(0.0, remaining_seconds - elapsed_since_samples)
+        if remaining_seconds is not None and remaining_seconds > 1.0:
+            cap_seconds = self._recorder_wait_cap_seconds(
+                clicked=clicked,
+                remaining_source=remaining_source,
+                debug_duration=debug_duration,
+                samples=samples,
+            )
+            sleep_seconds = min(remaining_seconds, cap_seconds)
+            logger.info(
+                "recorder[%s]: waiting %.1fs for ad to finish "
+                "(clicked=%s, returned=%s, remaining=%.1fs, cap=%.1fs, "
+                "elapsed_since_samples=%.1fs, source=%s, debug_progress=%s, debug_duration=%s)",
+                label,
+                sleep_seconds,
+                clicked,
+                returned_to_youtube,
+                remaining_seconds,
+                cap_seconds,
+                elapsed_since_samples,
+                remaining_source,
+                debug_progress,
+                debug_duration,
+            )
+            await asyncio.sleep(sleep_seconds)
+        else:
+            logger.info(
+                "recorder[%s]: no remaining ad time "
+                "(clicked=%s, returned=%s, remaining=%s, source=%s, "
+                "debug_progress=%s, debug_duration=%s)",
+                label,
+                clicked,
+                returned_to_youtube,
+                remaining_seconds,
+                remaining_source,
+                debug_progress,
+                debug_duration,
+            )
+
+        recorded_video_path = await self._stop_recording_handle(
+            recorder=recorder,
+            recording_handle=recording_handle,
+        )
+        recorded_video_duration_seconds = self._probe_recorded_video_duration(
+            recorded_video_path
+        )
+        print(
+            f"[android-session] recorder[{label}]: stop_done path={recorded_video_path} "
+            f"rec_dur={recorded_video_duration_seconds}",
+            flush=True,
+        )
+        last_ad_duration = next(
+            (
+                getattr(sample, "ad_duration_seconds", None)
+                for sample in reversed(samples)
+                if isinstance(getattr(sample, "ad_duration_seconds", None), (int, float))
+            ),
+            None,
+        )
+        logger.info(
+            "recorder[%s]: stopped, recorded_duration=%.1fs path=%s ad_duration=%s",
+            label,
+            recorded_video_duration_seconds or 0.0,
+            recorded_video_path,
+            last_ad_duration,
+        )
+        return recorded_video_path, recorded_video_duration_seconds
+
+    def _dedupe_watched_ads(
+        self, watched_ads: list[dict[str, object]],
+    ) -> None:
+        """Collapse duplicate creatives across the whole session.
+
+        YouTube frequently replays the same ad across topic runs; our per-topic
+        dedup inside the midroll loop doesn't catch those. We identify the same
+        creative by the aclk 'ai' query param (which encodes creative+campaign)
+        or by a normalized display_url host+path. Duplicates are removed from
+        watched_ads in place, keeping the first occurrence."""
+        from urllib.parse import urlsplit, parse_qs
+        _REDIRECT_HOSTS = {
+            "googleadservices.com", "www.googleadservices.com",
+            "google.com", "www.google.com",
+            "doubleclick.net", "www.doubleclick.net", "googleads.g.doubleclick.net",
+        }
+        def _creative_key(ad: dict[str, object]) -> str | None:
+            if not isinstance(ad, dict):
+                return None
+            display_url = ad.get("display_url")
+            if isinstance(display_url, str) and display_url.strip():
+                try:
+                    parts = urlsplit(display_url.strip() if "://" in display_url else f"https://{display_url}")
+                    host = (parts.netloc or "").lower()
+                    if host.startswith("www."):
+                        host = host[4:]
+                    path = parts.path or ""
+                    if host and host not in _REDIRECT_HOSTS:
+                        return f"url:{host}{path}"
+                except Exception:
+                    pass
+            for url_key in ("landing_url", "display_url"):
+                url = ad.get(url_key)
+                if not isinstance(url, str) or not url.strip():
+                    continue
+                try:
+                    parts = urlsplit(url.strip())
+                    q = parse_qs(parts.query)
+                    ai = (q.get("ai") or [""])[0]
+                    if ai:
+                        return f"ai:{ai}"
+                except Exception:
+                    pass
+            return None
+        seen: dict[str, int] = {}
+        to_remove: list[int] = []
+        for idx, ad in enumerate(watched_ads):
+            key = _creative_key(ad)
+            if not key:
+                continue
+            if key in seen:
+                to_remove.append(idx)
+            else:
+                seen[key] = idx
+        for idx in reversed(to_remove):
+            del watched_ads[idx]
+        if to_remove:
+            print(f"[android-session] dedup: removed {len(to_remove)} duplicate ads", flush=True)
+
+    def _midroll_continues_previous_ad(
+        self,
+        *,
+        previous_ad: dict[str, object] | None,
+        extension_samples: list[object],
+    ) -> bool:
+        if not isinstance(previous_ad, dict) or not extension_samples:
+            return False
+
+        previous_progress = self._coerce_float(previous_ad.get("ad_last_progress_seconds"))
+        if previous_progress is None:
+            return False
+
+        current_progress_values = [
+            float(getattr(sample, "ad_progress_seconds"))
+            for sample in extension_samples
+            if getattr(sample, "ad_detected", False)
+            and isinstance(getattr(sample, "ad_progress_seconds", None), (int, float))
+        ]
+        if not current_progress_values:
+            return False
+
+        current_progress = max(current_progress_values)
+        if current_progress + 1.0 < previous_progress:
+            return False
+
+        previous_duration = self._coerce_float(previous_ad.get("ad_duration_seconds"))
+        current_duration_values = [
+            float(getattr(sample, "ad_duration_seconds"))
+            for sample in extension_samples
+            if getattr(sample, "ad_detected", False)
+            and isinstance(getattr(sample, "ad_duration_seconds", None), (int, float))
+        ]
+        current_duration = max(current_duration_values) if current_duration_values else None
+        if (
+            previous_duration is not None
+            and current_duration is not None
+            and abs(current_duration - previous_duration) > 2.0
+        ):
+            return False
+
+        if current_progress >= previous_progress + 8.0:
+            return True
+        return False
+
+    def _merge_midroll_continuation_into_previous_ad(
+        self,
+        *,
+        previous_ad: dict[str, object],
+        extension_samples: list[object],
+    ) -> None:
+        current_progress_values = [
+            float(getattr(sample, "ad_progress_seconds"))
+            for sample in extension_samples
+            if getattr(sample, "ad_detected", False)
+            and isinstance(getattr(sample, "ad_progress_seconds", None), (int, float))
+        ]
+        if current_progress_values:
+            previous_progress = self._coerce_float(previous_ad.get("ad_last_progress_seconds")) or 0.0
+            previous_ad["ad_last_progress_seconds"] = max(previous_progress, max(current_progress_values))
+
+        current_duration_values = [
+            float(getattr(sample, "ad_duration_seconds"))
+            for sample in extension_samples
+            if getattr(sample, "ad_detected", False)
+            and isinstance(getattr(sample, "ad_duration_seconds", None), (int, float))
+        ]
+        if current_duration_values and previous_ad.get("ad_duration_seconds") in (None, 0, 0.0):
+            previous_ad["ad_duration_seconds"] = max(current_duration_values)
+
+        updated_progress = self._coerce_float(previous_ad.get("ad_last_progress_seconds"))
+        updated_duration = self._coerce_float(previous_ad.get("ad_duration_seconds"))
+        if (
+            updated_progress is not None
+            and updated_duration is not None
+            and updated_progress >= max(1.0, updated_duration - 1.0)
+        ):
+            previous_ad["completed"] = True
+
+    def _backfill_advertiser_from_landing_scrape(
+        self, watched_ads: list[dict[str, object]],
+    ) -> None:
+        """After Playwright scrapes the landing URL, the final redirect
+        destination is stored in capture['landing_scrape_url']. Use it to
+        resolve advertiser_domain + headline_text for ads where the original
+        aclk/pagead link couldn't be unwrapped statically."""
+        from urllib.parse import urlsplit
+        from app.services.mobile_app.android.youtube.ad_record import _SUPPRESSED_ADVERTISER_HOSTS
+        for ad in watched_ads:
+            if not isinstance(ad, dict):
+                continue
+            capture = ad.get("capture") if isinstance(ad.get("capture"), dict) else {}
+            if not ad.get("advertiser_domain"):
+                final_url = capture.get("landing_scrape_url") if isinstance(capture, dict) else None
+                if isinstance(final_url, str) and final_url.strip():
+                    try:
+                        host = (urlsplit(final_url.strip()).netloc or "").lower()
+                    except Exception:
+                        host = ""
+                    if host and host not in _SUPPRESSED_ADVERTISER_HOSTS:
+                        ad["advertiser_domain"] = host
+                        if isinstance(capture, dict):
+                            existing_landing = capture.get("landing_url")
+                            if isinstance(existing_landing, str):
+                                try:
+                                    existing_host = (urlsplit(existing_landing).netloc or "").lower()
+                                except Exception:
+                                    existing_host = ""
+                                if existing_host in _SUPPRESSED_ADVERTISER_HOSTS:
+                                    capture["landing_url"] = final_url
+                                    ad["landing_url"] = final_url
+                            existing_display = capture.get("display_url") or ad.get("display_url")
+                            if isinstance(existing_display, str):
+                                try:
+                                    display_host = (urlsplit(existing_display).netloc or "").lower()
+                                except Exception:
+                                    display_host = ""
+                                if not display_host or display_host in _SUPPRESSED_ADVERTISER_HOSTS:
+                                    capture["display_url"] = final_url
+                                    ad["display_url"] = final_url
+            if not ad.get("headline_text") and isinstance(capture, dict):
+                scrape_title = capture.get("landing_scrape_title")
+                if isinstance(scrape_title, str) and scrape_title.strip():
+                    scrape_host = (urlsplit(capture.get("landing_scrape_url") or "").netloc or "").lower()
+                    if scrape_host not in _SUPPRESSED_ADVERTISER_HOSTS:
+                        ad["headline_text"] = scrape_title.strip()
+                        capture["headline_text"] = scrape_title.strip()
+
+    def _cleanup_irrelevant_ad_videos(self, watched_ads: list[dict[str, object]]) -> None:
+        """Retain debug artifacts for not_relevant ads.
+
+        Media visibility is already handled by the API/frontend serializers, so
+        deleting files here only makes post-run debugging harder and can make it
+        look like captures were never recorded.
+        """
+        _ = watched_ads
+
+    def _should_skip_post_ad_settle(self, built_ad: object | None) -> bool:
+        if not isinstance(built_ad, dict):
+            return False
+        if bool(built_ad.get("completed")):
+            return True
+        watched_seconds = built_ad.get("watched_seconds")
+        try:
+            watched_value = float(watched_seconds)
+        except (TypeError, ValueError):
+            return False
+        min_watch_threshold = max(
+            12.0,
+            float(self._config.android_app.probe_ad_min_watch_seconds) - 2.0,
+        )
+        if watched_value >= min_watch_threshold:
+            return True
+        ad_duration_seconds = built_ad.get("ad_duration_seconds")
+        try:
+            duration_value = float(ad_duration_seconds)
+        except (TypeError, ValueError):
+            duration_value = None
+        if duration_value is not None and watched_value >= max(1.0, duration_value - 1.0):
+            return True
+        return False
+
+    @staticmethod
+    def _can_attempt_engagement(samples: list[object]) -> bool:
+        return AndroidYouTubeProbeRunner._engagement_gate_reason(samples) == "ok"
+
+    @staticmethod
+    def _sample_has_active_ad_ui(sample: object) -> bool:
+        if getattr(sample, "skip_available", False):
+            return True
+        if isinstance(getattr(sample, "ad_progress_seconds", None), (int, float)):
+            return True
+        if isinstance(getattr(sample, "ad_duration_seconds", None), (int, float)):
+            return True
+        has_main_watch_progress = isinstance(getattr(sample, "progress_seconds", None), (int, float))
+        has_main_watch_surface = bool(
+            getattr(sample, "player_visible", False)
+            and getattr(sample, "watch_panel_visible", False)
+        )
+        ad_signal_labels = [
+            str(value).casefold()
+            for value in (getattr(sample, "ad_signal_labels", []) or [])
+            if str(value).strip()
+        ]
+        has_active_signal = any(
+            token in label
+            for label in ad_signal_labels
+            for token in (
+                "visit advertiser",
+                "learn more",
+                "like ad",
+                "share ad",
+                "close ad panel",
+                "install",
+                "buy now",
+                "shop now",
+                "відвідати",
+                "подробнее",
+            )
+        )
+        if has_active_signal:
+            return True
+        ad_cta_text = str(getattr(sample, "ad_cta_text", "") or "").strip()
+        if not ad_cta_text:
+            return False
+        if has_main_watch_surface and has_main_watch_progress:
+            return False
+        return True
+
+    @staticmethod
+    def _engagement_gate_reason(samples: list[object] | None) -> str:
+        if not samples:
+            return "no_samples"
+        for sample in reversed(samples):
+            if getattr(sample, "is_reel_surface", False):
+                return "short_form"
+            if not (
+                getattr(sample, "player_visible", False)
+                and getattr(sample, "watch_panel_visible", False)
+            ):
+                continue
+            if bool(getattr(sample, "error_messages", [])):
+                return "player_errors"
+            if AndroidYouTubeProbeRunner._sample_has_active_ad_ui(sample):
+                return "ad_detected"
+            return "ok"
+        if any(bool(getattr(sample, "error_messages", [])) for sample in samples):
+            return "player_errors"
+        if any(getattr(sample, "is_reel_surface", False) for sample in samples):
+            return "short_form"
+        return "no_watch_surface"
+
+    async def _run_engagement_safe(
+        self,
+        *,
+        driver: object,
+        adb_serial: str | None,
+        topic: str,
+        opened_title: str | None,
+        notes: list[str],
+        note_prefix: str,
+    ):
+        try:
+            engagement = AndroidYouTubeEngagementController(
+                driver,
+                self._config.android_app,
+                adb_serial=adb_serial,
+            )
+            engagement_result = await asyncio.wait_for(
+                engagement.engage(
+                    topic=topic,
+                    opened_title=opened_title,
+                ),
+                timeout=14.0,
+            )
+        except asyncio.TimeoutError:
+            notes.append(f"{note_prefix}:TimeoutError:engagement_timeout")
+            return None
+        except Exception as exc:
+            notes.append(f"{note_prefix}:{type(exc).__name__}:{exc}")
+            return None
+
+        notes.extend(engagement_result.notes)
+        return engagement_result
+
+
+class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
+    _SEMANTIC_TOKEN_GROUPS = (
+        frozenset({"invest", "trad", "profit", "income", "earn"}),
+        frozenset({"crypto", "cryptocurrency"}),
+    )
+    _BROAD_QUERY_TOKENS = frozenset(
+        {
+            "crypto",
+            "cryptocurrency",
+            "bitcoin",
+            "platform",
+            "review",
+            "guide",
+            "tutorial",
+            "course",
+            "strategy",
+            "strateg",
+            "path",
+            "automat",
+        }
+    )
+
+    async def run(
+        self,
+        *,
+        topics: list[str],
+        duration_minutes: int | None = None,
+        avd_name: str | None = None,
+        proxy_url: str | None = None,
+        adspower_profile_id: str | None = None,
+        headless: bool | None = None,
+        on_progress: Callable[..., Awaitable[None]] | None = None,
+    ) -> AndroidSessionRunResult:
+        resolved_topics = [topic.strip() for topic in topics if topic.strip()]
+        if not resolved_topics:
+            raise ValueError("Android session runner requires at least one topic")
+        # Cap topics to what's realistically achievable in the session duration.
+        # Each topic needs ~3-4 min (search + navigation + watch + CTA).
+        # Reserve ~3 min for emulator boot/teardown overhead.
+        if duration_minutes and duration_minutes > 0:
+            _usable_minutes = max(duration_minutes - 3, 1)
+            _max_topics = max(1, int(_usable_minutes // 3))
+            if len(resolved_topics) > _max_topics:
+                import random as _random
+                _random.shuffle(resolved_topics)
+                resolved_topics = resolved_topics[:_max_topics]
+
+        resolved_avd_name = avd_name or self._config.android_app.default_avd_name
+        snapshot_name = (
+            self._config.android_app.runtime_snapshot_name
+            if self._config.android_app.emulator_use_snapshots
+            else None
+        )
+        device = None
+        session = None
+        navigator = None
+        watcher = None
+        dialog_watchdog_task: asyncio.Task[None] | None = None
+        dialog_watchdog_stop: asyncio.Event | None = None
+        launcher_tripwire: asyncio.Event | None = None
+        proxy_bridge_handle = None
+        ad_analysis = AndroidAdAnalysisCoordinator(self._config.gemini, self._config.storage)
+        proxy_notes: list[str] = []
+        emulator_http_proxy = None
+        host_http_proxy = None
+        landing_scraper: AndroidLandingPageScraper | None = None
+        try:
+            (
+                emulator_http_proxy,
+                host_http_proxy,
+                proxy_notes,
+                proxy_bridge_handle,
+            ) = await self._prepare_emulator_proxy(
+                proxy_url=proxy_url,
+                adspower_profile_id=adspower_profile_id,
+            )
+            topic_results: list[AndroidSessionTopicResult] = []
+            watched_ads: list[dict[str, object]] = []
+            _initial_rx_bytes: int = 0
+
+            async def _read_rx_bytes() -> int:
+                """Read total received bytes from emulator via ADB."""
+                try:
+                    if device is None:
+                        return 0
+                    adb_bin = "adb"
+                    proc = await asyncio.create_subprocess_exec(
+                        adb_bin, "-s", device.adb_serial,
+                        "shell", "cat", "/proc/net/dev",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+                    total = 0
+                    for line in stdout.decode(errors="ignore").splitlines():
+                        line = line.strip()
+                        if ":" not in line or line.startswith("Inter") or line.startswith("face"):
+                            continue
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                total += int(parts[1])
+                            except ValueError:
+                                pass
+                    return total
+                except Exception:
+                    return 0
+
+            async def _notify_ads_progress(event_name: str) -> None:
+                if on_progress is None:
+                    return
+                try:
+                    _ads = [
+                        {**ad, "position": idx + 1}
+                        for idx, ad in enumerate(watched_ads)
+                    ]
+                    await on_progress(
+                        event=event_name,
+                        watched_ads=_ads,
+                        watched_ads_count=len(_ads),
+                    )
+                except Exception:
+                    pass
+
+            async def _notify_ad_captured() -> None:
+                await _notify_ads_progress("ad_captured")
+
+            async def _notify_ad_updated(_: dict[str, object]) -> None:
+                await _notify_ads_progress("ad_updated")
+
+            landing_scraper = AndroidLandingPageScraper(
+                self._config.storage,
+                proxy_url=host_http_proxy,
+                on_result=_notify_ad_updated,
+            )
+            await landing_scraper.start()
+
+            started_at = time.monotonic()
+            session_artifact_path = self._build_session_artifact_path()
+            infra_failure_streak = 0
+            deadline = (
+                started_at + (duration_minutes * 60)
+                if duration_minutes is not None and duration_minutes > 0
+                else None
+            )
+            topic_cursor = 0
+            topics_cycled_once = False  # True after first full pass through all topics
+            last_adb_serial: str | None = None
+            last_server_url: str | None = None
+            last_reused_running_device = False
+            last_started_local_appium = False
+            print(
+                f"[android-session] start avd={resolved_avd_name} topics={len(resolved_topics)} duration_minutes={duration_minutes or 0} proxy={emulator_http_proxy or 'none'}",
+                flush=True,
+            )
+
+            while True:
+                if deadline is not None and topic_results and time.monotonic() >= deadline:
+                    break
+                if deadline is not None:
+                    remaining_seconds = deadline - time.monotonic()
+                    # On repeat cycles use a lower threshold so we can squeeze in one more topic.
+                    _topic_buffer = (
+                        60.0
+                        if topics_cycled_once
+                        else self._config.android_app.session_topic_start_buffer_seconds
+                    )
+                    if remaining_seconds <= _topic_buffer:
+                        print(
+                            f"[android-session] stop:no_time_for_next_topic remaining_seconds={max(0, int(remaining_seconds))}",
+                            flush=True,
+                        )
+                        break
+                if session is None or device is None or navigator is None or watcher is None:
+                    print("[android-session] device_or_session:acquire", flush=True)
+                    try:
+                        launch_options = AndroidEmulatorLaunchOptions(
+                            headless=(
+                                self._config.android_app.emulator_headless
+                                if headless is None
+                                else headless
+                            ),
+                            gpu_mode=self._config.android_app.emulator_gpu_mode,
+                            accel_mode=self._config.android_app.emulator_accel_mode,
+                            http_proxy=emulator_http_proxy,
+                            load_snapshot=self._config.android_app.emulator_use_snapshots,
+                            save_snapshot=False,
+                            snapshot_name=snapshot_name,
+                            force_snapshot_load=bool(snapshot_name),
+                            skip_adb_auth=self._config.android_app.emulator_skip_adb_auth,
+                            force_stop_running=self._config.android_app.emulator_force_restart_before_run,
+                        )
+                        if device is None:
+                            print("[android-session] acquire:ensure_device", flush=True)
+                            try:
+                                device = await asyncio.wait_for(
+                                    self._runtime.avd_manager.ensure_device(
+                                        avd_name=resolved_avd_name,
+                                        launch=launch_options,
+                                    ),
+                                    timeout=(
+                                        self._config.android_app.emulator_start_timeout_seconds
+                                        + self._config.android_app.device_ready_timeout_seconds
+                                        + 30
+                                    ),
+                                )
+                            except asyncio.TimeoutError as exc:
+                                raise AndroidUiError("ensure_device timed out") from exc
+                            print(
+                                f"[android-session] acquire:device_ready serial={device.adb_serial} reused={str(device.reused_running_device).lower()}",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"[android-session] acquire:reuse_device serial={device.adb_serial}",
+                                flush=True,
+                            )
+                            # Proactively reset UiAutomator2 helpers before reusing the device
+                            # to prevent "UiAutomationService already registered" crashes.
+                            with contextlib.suppress(Exception):
+                                await self._runtime.appium_provider.recover_session_environment(
+                                    adb_serial=device.adb_serial,
+                                )
+                        print("[android-session] acquire:create_session", flush=True)
+                        try:
+                            session = await asyncio.wait_for(
+                                self._runtime.appium_provider.create_youtube_session(
+                                    adb_serial=device.adb_serial,
+                                    avd_name=device.avd_name,
+                                ),
+                                timeout=(
+                                    self._config.android_app.device_ready_timeout_seconds
+                                    + self._config.android_app.appium_create_session_timeout_seconds
+                                    + self._config.android_app.appium_validate_session_timeout_seconds
+                                    + 45
+                                ),
+                            )
+                        except asyncio.TimeoutError as exc:
+                            raise AndroidUiError("create_youtube_session timed out") from exc
+                        last_adb_serial = device.adb_serial
+                        last_server_url = session.server_url
+                        last_reused_running_device = device.reused_running_device
+                        last_started_local_appium = session.started_local_server
+                        navigator = AndroidYouTubeNavigator(
+                            session.driver,
+                            self._config.android_app,
+                            adb_serial=device.adb_serial,
+                        )
+                        watcher = AndroidYouTubeWatcher(
+                            session.driver,
+                            self._config.android_app,
+                            adb_serial=device.adb_serial,
+                        )
+                        acquire_notes: list[str] = []
+                        print("[android-session] stage:ensure_app_ready", flush=True)
+                        await self._ensure_app_ready_with_timeout(
+                            navigator=navigator,
+                            topic_notes=acquire_notes,
+                            stage_label="ensure_app_ready",
+                            launcher_tripwire=None,
+                        )
+                        for note in acquire_notes:
+                            print(f"[android-session] acquire_note:{note}", flush=True)
+                        dialog_watchdog_stop = asyncio.Event()
+                        launcher_tripwire = asyncio.Event()
+                        dialog_watchdog_task = asyncio.create_task(
+                            self._system_dialog_watchdog_loop(
+                                navigator=navigator,
+                                stop_event=dialog_watchdog_stop,
+                                tripwire_event=launcher_tripwire,
+                                log_prefix="[android-session]",
+                            )
+                        )
+                        if _initial_rx_bytes == 0:
+                            _initial_rx_bytes = await _read_rx_bytes()
+                        print(
+                            f"[android-session] device_or_session:ready serial={device.adb_serial} reused={str(device.reused_running_device).lower()}",
+                            flush=True,
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[android-session] device_or_session:error error={type(exc).__name__}:{exc}",
+                            flush=True,
+                        )
+                        if not self._is_infrastructure_failure(str(exc)):
+                            raise
+                        infra_failure_streak += 1
+                        if device is not None:
+                            acquire_diag_notes = self._write_infra_diagnostic_artifacts(
+                                topic="acquire",
+                                stage_label="device_or_session_error",
+                                adb_serial=device.adb_serial,
+                            )
+                            for note in acquire_diag_notes:
+                                print(f"[android-session] acquire_note:{note}", flush=True)
+                        if session is not None:
+                            await self._stop_system_dialog_watchdog(
+                                stop_event=dialog_watchdog_stop,
+                                task=dialog_watchdog_task,
+                            )
+                            dialog_watchdog_stop = None
+                            dialog_watchdog_task = None
+                            launcher_tripwire = None
+                            with contextlib.suppress(Exception):
+                                if (
+                                    device is not None
+                                    and self._is_session_only_infrastructure_failure(str(exc))
+                                ):
+                                    await self._runtime.appium_provider.close_broken_session(
+                                        session,
+                                        adb_serial=device.adb_serial,
+                                    )
+                                else:
+                                    await self._runtime.appium_provider.close_session(session)
+                        if (
+                            device is not None
+                            and self._config.android_app.emulator_stop_after_run
+                            and not self._is_session_only_infrastructure_failure(str(exc))
+                        ):
+                            await self._cleanup_device_after_failure(device)
+                        session = None
+                        _device_gone = self._is_device_gone_failure(str(exc))
+                        if not self._is_session_only_infrastructure_failure(str(exc)) or _device_gone:
+                            device = None
+                        navigator = None
+                        watcher = None
+                        print(
+                            f"[android-session] checkpoint acquire_failed infra_failure_streak={infra_failure_streak}",
+                            flush=True,
+                        )
+                        if infra_failure_streak >= 5:
+                            break
+                        await asyncio.sleep(2)
+                        continue
+                topic = resolved_topics[topic_cursor % len(resolved_topics)]
+                topic_cursor += 1
+                if topic_cursor >= len(resolved_topics):
+                    topics_cycled_once = True
+                print(
+                    f"[android-session] topic:start idx={len(topic_results) + 1} topic={topic}",
+                    flush=True,
+                )
+                if on_progress is not None:
+                    try:
+                        await on_progress(
+                            event="topic_start",
+                            current_topic=topic,
+                            topics_searched=[tr.topic for tr in topic_results],
+                            total_duration_seconds=max(0, int(time.monotonic() - started_at)),
+                        )
+                    except Exception:
+                        pass
+                topic_notes: list[str] = []
+                opened_title: str | None = None
+                current_watch_started_at: float | None = None
+                topic_started_at = time.monotonic()
+                watch_verified = False
+                watch_seconds: float | None = None
+                watch_ad_detected = False
+                target_watch_seconds: float = 0.0
+                liked = False
+                already_liked = False
+                subscribed = False
+                already_subscribed = False
+                comments_glanced = False
+                topic_watched_ads: list[dict[str, object]] = []
+                discard_topic_result = False
+                retry_same_topic = False
+                pending_midroll_result: object | None = None
+                pending_midroll_samples_ended_monotonic: float | None = None
+
+                try:
+                    _net_ok = await self._ensure_topic_network_ready(
+                        adb_serial=device.adb_serial if device is not None else None,
+                        topic=topic,
+                        topic_notes=topic_notes,
+                    )
+                    if not _net_ok:
+                        topic_notes.append("network_check_failed:soft_proceed")
+
+                    results_ready_confirmed = True
+                    print("[android-session] stage:submit_search", flush=True)
+                    await self._submit_search_with_timeout(
+                        navigator=navigator,
+                        topic=topic,
+                        topic_notes=topic_notes,
+                        stage_label="submit_search",
+                        launcher_tripwire=launcher_tripwire,
+                    )
+                    print("[android-session] stage:wait_for_results", flush=True)
+                    try:
+                        await self._wait_for_results_with_timeout(
+                            navigator=navigator,
+                            topic=topic,
+                            topic_notes=topic_notes,
+                            stage_label="wait_for_results",
+                            launcher_tripwire=launcher_tripwire,
+                        )
+                    except Exception as exc:
+                        if "Failed to detect native YouTube results list" not in str(exc):
+                            raise
+                        results_ready_confirmed = False
+                        topic_notes.append("wait_for_results_failed:first_attempt")
+                        self._append_stage_debug_artifacts(
+                            driver=session.driver if session is not None else None,
+                            topic_notes=topic_notes,
+                            topic=topic,
+                            stage_label="wait_for_results_first_attempt",
+                            adb_serial=device.adb_serial if device is not None else None,
+                        )
+                        print(
+                            "[android-session] topic:wait_for_results_failed attempt=1",
+                            flush=True,
+                        )
+                        wait_results_ad_captured = (
+                            await self._probe_unaccepted_watch_surface_for_ad(
+                                driver=session.driver if session is not None else None,
+                                navigator=navigator,
+                                watcher=watcher,
+                                adb_serial=device.adb_serial if device is not None else None,
+                                topic=topic,
+                                stage_label="wait_for_results_first_attempt",
+                                topic_notes=topic_notes,
+                                ad_analysis=ad_analysis,
+                                landing_scraper=landing_scraper,
+                                watched_ads=watched_ads,
+                                topic_watched_ads=topic_watched_ads,
+                                notify_ad_captured=_notify_ad_captured,
+                            )
+                        )
+                        if wait_results_ad_captured:
+                            print(
+                                f"[android-session] stage:wait_for_results_first_attempt_ad_done total_ads={len(watched_ads)}",
+                                flush=True,
+                            )
+                    if not results_ready_confirmed:
+                        with contextlib.suppress(Exception):
+                            if await navigator.has_query_ready_surface_via_adb(topic):
+                                results_ready_confirmed = True
+                                topic_notes.append("wait_for_results_recovered:surface_ready_adb")
+                        if not results_ready_confirmed:
+                            with contextlib.suppress(Exception):
+                                if await navigator.has_query_ready_surface(topic):
+                                    results_ready_confirmed = True
+                                    topic_notes.append("wait_for_results_recovered:surface_ready")
+                    if results_ready_confirmed and not opened_title:
+                        provisional_opened_title = (
+                            await self._provisional_watch_title_with_hard_timeout(
+                                navigator=navigator,
+                                topic=topic,
+                                topic_notes=topic_notes,
+                                stage_label="opened_title_after_wait_for_results",
+                                timeout_seconds=2.0,
+                            )
+                        )
+                        if provisional_opened_title:
+                            opened_title = provisional_opened_title
+                            topic_notes.append("opened_title_recovered_after_wait_for_results")
+                    if results_ready_confirmed and not opened_title:
+                        delayed_opened_title = await self._await_current_watch_title_with_hard_timeout(
+                            navigator=navigator,
+                            topic=topic,
+                            topic_notes=topic_notes,
+                            stage_label="opened_title_after_wait_for_results_delay",
+                            timeout_seconds=2.0,
+                        )
+                        if delayed_opened_title:
+                            opened_title = delayed_opened_title
+                            topic_notes.append(
+                                "opened_title_recovered_after_wait_for_results_delay"
+                            )
+                    if results_ready_confirmed and not opened_title:
+                        print("[android-session] stage:open_first_result", flush=True)
+                        opened_title = await self._open_first_result_with_timeout(
+                            navigator=navigator,
+                            topic=topic,
+                            topic_notes=topic_notes,
+                            stage_label="open_first_result",
+                            launcher_tripwire=launcher_tripwire,
+                        )
+                    elif not results_ready_confirmed and not opened_title:
+                        topic_notes.append("open_first_result_skipped:no_results_surface")
+                    if not opened_title:
+                        delayed_opened_title = await self._await_current_watch_title_with_hard_timeout(
+                            navigator=navigator,
+                            topic=topic,
+                            topic_notes=topic_notes,
+                            stage_label="await_current_watch_title_first_attempt",
+                            timeout_seconds=8.5,
+                        )
+                        if delayed_opened_title:
+                            opened_title = delayed_opened_title
+                            topic_notes.append("opened_title_recovered_after_delay:first_attempt")
+                    if opened_title and self._opened_title_is_provisional(opened_title, topic):
+                        topic_notes.append("opened_title_provisional:first_attempt")
+                        delayed_opened_title = await self._await_current_watch_title_with_hard_timeout(
+                            navigator=navigator,
+                            topic=topic,
+                            topic_notes=topic_notes,
+                            stage_label="await_current_watch_title_first_attempt_provisional",
+                            timeout_seconds=5.0,
+                        )
+                        if (
+                            delayed_opened_title
+                            and not self._opened_title_is_provisional(delayed_opened_title, topic)
+                        ):
+                            opened_title = delayed_opened_title
+                            topic_notes.append("opened_title_resolved:first_attempt")
+                        elif (
+                            any(
+                                note in topic_notes
+                                for note in (
+                                    "opened_title_provisional_allowed:watch_activity",
+                                    "opened_title_provisional_allowed:watch_surface",
+                                )
+                            )
+                            and await navigator.has_watch_surface_for_query(topic)
+                        ):
+                            topic_notes.append("opened_title_provisional_kept:first_attempt")
+                        else:
+                            opened_title = None
+                            topic_notes.append("opened_title_provisional_unresolved:first_attempt")
+                    if opened_title and not self._opened_title_matches_topic(opened_title, topic):
+                        topic_notes.append("opened_title_rejected:first_attempt")
+                        print(
+                            f"[android-session] topic:opened_title_rejected attempt=1 title={opened_title}",
+                            flush=True,
+                        )
+                        await navigator.reject_result_title(opened_title)
+                        # Fallback: accept whatever is playing if no better match expected
+                        fallback_title = await navigator.await_current_watch_title(timeout_seconds=3.0)
+                        if fallback_title and await navigator.has_watch_activity():
+                            topic_notes.append(f"opened_title_fallback:{fallback_title}")
+                            print(
+                                f"[android-session] topic:opened_title_fallback title={fallback_title}",
+                                flush=True,
+                            )
+                            opened_title = fallback_title
+                        else:
+                            opened_title = None
+                    if not opened_title:
+                        topic_notes.append("no_result_opened:first_attempt")
+                        self._append_stage_debug_artifacts(
+                            driver=session.driver if session is not None else None,
+                            topic_notes=topic_notes,
+                            topic=topic,
+                            stage_label="open_first_result_first_attempt",
+                            adb_serial=device.adb_serial if device is not None else None,
+                        )
+                        print("[android-session] topic:no_result_opened attempt=1", flush=True)
+                        unaccepted_surface_ad_captured = (
+                            await self._probe_unaccepted_watch_surface_for_ad(
+                                driver=session.driver if session is not None else None,
+                                navigator=navigator,
+                                watcher=watcher,
+                                adb_serial=device.adb_serial if device is not None else None,
+                                topic=topic,
+                                stage_label="no_result_opened_first_attempt",
+                                topic_notes=topic_notes,
+                                ad_analysis=ad_analysis,
+                                landing_scraper=landing_scraper,
+                                watched_ads=watched_ads,
+                                topic_watched_ads=topic_watched_ads,
+                            )
+                        )
+                        if unaccepted_surface_ad_captured:
+                            print(
+                                f"[android-session] stage:no_result_opened_first_attempt_ad_done total_ads={len(watched_ads)}",
+                                flush=True,
+                            )
+                        delayed_opened_title = None
+                        if not unaccepted_surface_ad_captured:
+                            delayed_opened_title = await self._await_current_watch_title_with_hard_timeout(
+                                navigator=navigator,
+                                topic=topic,
+                                topic_notes=topic_notes,
+                                stage_label="await_current_watch_title_first_attempt",
+                                timeout_seconds=6.5,
+                            )
+                        if delayed_opened_title:
+                            opened_title = delayed_opened_title
+                            topic_notes.append("opened_title_recovered_before_retry:first_attempt")
+                        else:
+                            should_retry_topic = self._should_retry_topic_attempt(
+                                topic_started_at=topic_started_at,
+                                session_started_at=started_at,
+                                duration_minutes=duration_minutes,
+                            )
+                            if not should_retry_topic:
+                                topic_notes.append("topic_retry_skipped:budget")
+                                topic_notes.append("open_first_result_retry_skipped:budget")
+                            else:
+                                retry_results_ready_confirmed = True
+                                print("[android-session] stage:submit_search_retry", flush=True)
+                                await self._submit_search_with_timeout(
+                                    navigator=navigator,
+                                    topic=topic,
+                                    topic_notes=topic_notes,
+                                    stage_label="submit_search_retry",
+                                    launcher_tripwire=launcher_tripwire,
+                                )
+                                print("[android-session] stage:wait_for_results_retry", flush=True)
+                                try:
+                                    await self._wait_for_results_with_timeout(
+                                        navigator=navigator,
+                                        topic=topic,
+                                        topic_notes=topic_notes,
+                                        stage_label="wait_for_results_retry",
+                                        launcher_tripwire=launcher_tripwire,
+                                    )
+                                except Exception as exc:
+                                    if "Failed to detect native YouTube results list" not in str(exc):
+                                        raise
+                                    retry_results_ready_confirmed = False
+                                    topic_notes.append("wait_for_results_failed:retry")
+                                    self._append_stage_debug_artifacts(
+                                        driver=session.driver if session is not None else None,
+                                        topic_notes=topic_notes,
+                                        topic=topic,
+                                        stage_label="wait_for_results_retry",
+                                        adb_serial=device.adb_serial if device is not None else None,
+                                    )
+                                    print(
+                                        "[android-session] topic:wait_for_results_failed attempt=2",
+                                        flush=True,
+                                    )
+                                    wait_results_retry_ad_captured = (
+                                        await self._probe_unaccepted_watch_surface_for_ad(
+                                            driver=session.driver if session is not None else None,
+                                            navigator=navigator,
+                                            watcher=watcher,
+                                            adb_serial=device.adb_serial if device is not None else None,
+                                            topic=topic,
+                                            stage_label="wait_for_results_retry",
+                                            topic_notes=topic_notes,
+                                            ad_analysis=ad_analysis,
+                                            landing_scraper=landing_scraper,
+                                            watched_ads=watched_ads,
+                                            topic_watched_ads=topic_watched_ads,
+                                            notify_ad_captured=_notify_ad_captured,
+                                        )
+                                    )
+                                    if wait_results_retry_ad_captured:
+                                        print(
+                                            f"[android-session] stage:wait_for_results_retry_ad_done total_ads={len(watched_ads)}",
+                                            flush=True,
+                                        )
+                                if retry_results_ready_confirmed:
+                                    print("[android-session] stage:open_first_result_retry", flush=True)
+                                    opened_title = await self._open_first_result_with_timeout(
+                                        navigator=navigator,
+                                        topic=topic,
+                                        topic_notes=topic_notes,
+                                        stage_label="open_first_result_retry",
+                                        launcher_tripwire=launcher_tripwire,
+                                    )
+                                else:
+                                    topic_notes.append("open_first_result_retry_skipped:no_results_surface")
+                                if not opened_title:
+                                    delayed_opened_title = await self._await_current_watch_title_with_hard_timeout(
+                                        navigator=navigator,
+                                        topic=topic,
+                                        topic_notes=topic_notes,
+                                        stage_label="await_current_watch_title_retry",
+                                        timeout_seconds=8.5,
+                                    )
+                                    if delayed_opened_title:
+                                        opened_title = delayed_opened_title
+                                        topic_notes.append("opened_title_recovered_after_delay:retry")
+                                if opened_title and self._opened_title_is_provisional(opened_title, topic):
+                                    topic_notes.append("opened_title_provisional:retry")
+                                    delayed_opened_title = await self._await_current_watch_title_with_hard_timeout(
+                                        navigator=navigator,
+                                        topic=topic,
+                                        topic_notes=topic_notes,
+                                        stage_label="await_current_watch_title_retry_provisional",
+                                        timeout_seconds=5.0,
+                                    )
+                                    if (
+                                        delayed_opened_title
+                                        and not self._opened_title_is_provisional(
+                                            delayed_opened_title,
+                                            topic,
+                                        )
+                                    ):
+                                        opened_title = delayed_opened_title
+                                        topic_notes.append("opened_title_resolved:retry")
+                                    elif (
+                                        any(
+                                            note in topic_notes
+                                            for note in (
+                                                "opened_title_provisional_allowed:watch_activity",
+                                                "opened_title_provisional_allowed:watch_surface",
+                                            )
+                                        )
+                                        and await navigator.has_watch_surface_for_query(topic)
+                                    ):
+                                        topic_notes.append("opened_title_provisional_kept:retry")
+                                    else:
+                                        opened_title = None
+                                        topic_notes.append("opened_title_provisional_unresolved:retry")
+                            if opened_title and not self._opened_title_matches_topic(opened_title, topic):
+                                topic_notes.append("opened_title_rejected:retry")
+                                print(
+                                    f"[android-session] topic:opened_title_rejected attempt=2 title={opened_title}",
+                                    flush=True,
+                                )
+                                await navigator.reject_result_title(opened_title)
+                                # Fallback: if still on watch surface, accept whatever is playing
+                                fallback_title = await navigator.await_current_watch_title(timeout_seconds=3.0)
+                                if fallback_title and await navigator.has_watch_activity():
+                                    topic_notes.append(f"opened_title_fallback:{fallback_title}")
+                                    print(
+                                        f"[android-session] topic:opened_title_fallback title={fallback_title}",
+                                        flush=True,
+                                    )
+                                    opened_title = fallback_title
+                                else:
+                                    opened_title = None
+                    if not opened_title:
+                        final_unaccepted_surface_ad_captured = (
+                            await self._probe_unaccepted_watch_surface_for_ad(
+                                driver=session.driver if session is not None else None,
+                                navigator=navigator,
+                                watcher=watcher,
+                                adb_serial=device.adb_serial if device is not None else None,
+                                topic=topic,
+                                stage_label="no_result_opened_final",
+                                topic_notes=topic_notes,
+                                ad_analysis=ad_analysis,
+                                landing_scraper=landing_scraper,
+                                watched_ads=watched_ads,
+                                topic_watched_ads=topic_watched_ads,
+                                notify_ad_captured=_notify_ad_captured,
+                            )
+                        )
+                        if final_unaccepted_surface_ad_captured:
+                            print(
+                                f"[android-session] stage:no_result_opened_final_ad_done total_ads={len(watched_ads)}",
+                                flush=True,
+                            )
+                        topic_notes.append("no_result_opened")
+                        print("[android-session] topic:no_result_opened attempt=2", flush=True)
+                        if session is not None:
+                            debug_screen_path, debug_page_source_path = self._write_watch_debug_artifacts(
+                                driver=session.driver,
+                                topic=f"{topic}_results",
+                            )
+                            if debug_screen_path is not None:
+                                topic_notes.append(f"results_debug:{debug_screen_path}")
+                            if debug_page_source_path is not None:
+                                topic_notes.append(f"results_debug_xml:{debug_page_source_path}")
+                    else:
+                        print(
+                            f"[android-session] topic:opened title={opened_title}",
+                            flush=True,
+                        )
+                        if on_progress is not None:
+                            try:
+                                current_watch_started_at = time.time()
+                                await on_progress(
+                                    event="video_opened",
+                                    current_topic=topic,
+                                    current_watch={
+                                        "action": "watch",
+                                        "title": opened_title or topic,
+                                        "url": "",
+                                        "started_at": current_watch_started_at,
+                                        "watched_seconds": 0,
+                                        "target_seconds": 0,
+                                        "search_keyword": topic,
+                                        "matched_topics": [topic],
+                                        "keywords": [],
+                                    },
+                                )
+                            except Exception:
+                                pass
+                        recording_handle = None
+                        recorder = None
+                        recorded_video_path = None
+                        recorded_video_duration_seconds = None
+                        try:
+                            if self._config.android_app.probe_screenrecord_enabled:
+                                (
+                                    recorder,
+                                    recording_handle,
+                                ) = await self._start_recording_handle(
+                                    label="session",
+                                    topic=topic,
+                                    adb_serial=device.adb_serial,
+                                )
+                            initial_watch_seconds = max(
+                                4,
+                                min(6, self._config.android_app.probe_watch_seconds),
+                            )
+                            print("[android-session] stage:watch_current", flush=True)
+                            watch_result = await watcher.watch_current(
+                                watch_seconds=initial_watch_seconds
+                            )
+                            watch_result, watch_extension_note = await self._extend_ad_watch_if_needed(
+                                watcher=watcher,
+                                watch_result=watch_result,
+                            )
+                            _samples_ended_monotonic = time.monotonic()
+                            if watch_extension_note is not None:
+                                topic_notes.append(watch_extension_note)
+                                print(
+                                    f"[android-session] stage:watch_extension note={watch_extension_note}",
+                                    flush=True,
+                                )
+                        except Exception:
+                            if recorder is not None and recording_handle is not None:
+                                recorded_video_path = await self._stop_recording_handle(
+                                    recorder=recorder,
+                                    recording_handle=recording_handle,
+                                )
+                                recording_handle = None
+                                recorded_video_duration_seconds = self._probe_recorded_video_duration(
+                                    recorded_video_path
+                                )
+                            raise
+
+                        target_watch_seconds = self._decide_session_target_watch_seconds(
+                            topic=topic,
+                            topics=resolved_topics,
+                            topic_results=topic_results,
+                            watch_samples=list(getattr(watch_result, "samples", []) or []),
+                            started_at=started_at,
+                            duration_minutes=duration_minutes,
+                        )
+                        topic_notes.append(f"session_target_watch:{target_watch_seconds}")
+                        watch_debug_screen_path = None
+                        watch_debug_page_source_path = None
+                        watch_verified = watch_result.verified
+                        watch_seconds = self._derive_watch_seconds(watch_result.samples)
+                        watch_ad_detected = any(
+                            sample.ad_detected for sample in watch_result.samples
+                        )
+                        if on_progress is not None and current_watch_started_at is not None:
+                            try:
+                                await on_progress(
+                                    event="watch_target_planned",
+                                    current_topic=topic,
+                                    current_watch={
+                                        "action": "watch",
+                                        "title": opened_title or topic,
+                                        "url": "",
+                                        "started_at": current_watch_started_at,
+                                        "watched_seconds": float(watch_seconds or 0.0),
+                                        "target_seconds": target_watch_seconds,
+                                        "search_keyword": topic,
+                                        "matched_topics": [topic],
+                                        "keywords": [],
+                                    },
+                                )
+                            except Exception:
+                                pass
+                        if opened_title and self._opened_title_is_provisional(opened_title, topic):
+                            refreshed_title = await navigator.await_current_watch_title(
+                                topic,
+                                timeout_seconds=3.0,
+                            )
+                            if (
+                                refreshed_title
+                                and not self._opened_title_is_provisional(refreshed_title, topic)
+                            ):
+                                opened_title = refreshed_title
+                                topic_notes.append("opened_title_resolved_after_watch")
+                        if not watch_ad_detected:
+                            watch_result, opened_title, watch_surface_recovery_notes = (
+                                await self._recover_unstable_watch_surface(
+                                    navigator=navigator,
+                                    watcher=watcher,
+                                    topic=topic,
+                                    opened_title=opened_title,
+                                    watch_result=watch_result,
+                                )
+                            )
+                            topic_notes.extend(watch_surface_recovery_notes)
+                            watch_verified = watch_result.verified
+                            watch_seconds = self._derive_watch_seconds(watch_result.samples)
+                            watch_ad_detected = any(
+                                sample.ad_detected for sample in watch_result.samples
+                            )
+                            if (
+                                watch_debug_screen_path is None
+                                and "watch_surface_probe:no_watch_surface" in watch_surface_recovery_notes
+                            ):
+                                watch_debug_screen_path, watch_debug_page_source_path = (
+                                    self._write_watch_debug_artifacts(
+                                        driver=session.driver,
+                                        topic=f"{topic}_watch_surface",
+                                    )
+                                )
+                                if watch_debug_screen_path is not None:
+                                    topic_notes.append(f"watch_debug:{watch_debug_screen_path}")
+                        if not watch_ad_detected:
+                            watch_result, verify_probe_note = await self._reinforce_watch_verification_if_needed(
+                                watcher=watcher,
+                                watch_result=watch_result,
+                            )
+                            if verify_probe_note is not None:
+                                topic_notes.append(verify_probe_note)
+                            watch_verified = watch_result.verified
+                            watch_seconds = self._derive_watch_seconds(watch_result.samples)
+                            watch_ad_detected = any(
+                                sample.ad_detected for sample in watch_result.samples
+                            )
+                        _ad_sample_detail = [
+                            f"off={getattr(s,'offset_seconds','?')} prog={getattr(s,'ad_progress_seconds','?')} dur={getattr(s,'ad_duration_seconds','?')} skip={getattr(s,'skip_available','?')}"
+                            for s in watch_result.samples if getattr(s, "ad_detected", False)
+                        ]
+                        print(
+                            f"[android-session] stage:watch_done verified={str(watch_verified).lower()} ad_detected={str(watch_ad_detected).lower()} samples={len(watch_result.samples)} target_watch={target_watch_seconds} ad_samples={len(_ad_sample_detail)} recorder={'yes' if recorder else 'no'}",
+                            flush=True,
+                        )
+                        for _asd in _ad_sample_detail:
+                            print(f"[android-session] ad_sample: {_asd}", flush=True)
+                        if watch_ad_detected or any(
+                            sample.error_messages for sample in watch_result.samples
+                        ):
+                            watch_debug_screen_path, watch_debug_page_source_path = (
+                                self._write_watch_debug_artifacts(
+                                    driver=session.driver,
+                                    topic=topic,
+                                    adb_serial=device.adb_serial,
+                                    page_source_override=getattr(
+                                        watch_result,
+                                        "ad_debug_page_source",
+                                        None,
+                                    ),
+                                )
+                            )
+                            if watch_debug_screen_path is not None:
+                                topic_notes.append(f"watch_debug:{watch_debug_screen_path}")
+
+                        topic_notes.append(
+                            f"engagement_deferred:{self._engagement_gate_reason(watch_result.samples)}"
+                        )
+
+                        # If no ad detected, stop recording and discard — no video needed
+                        if not watch_ad_detected and recorder is not None and recording_handle is not None:
+                            try:
+                                local_video = await recorder.stop(recording_handle, keep_local=True)
+                                if local_video is not None:
+                                    logger.info(
+                                        "recorder[session]: discarded no-ad recording topic=%s path=%s",
+                                        topic,
+                                        local_video,
+                                    )
+                                    local_video.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            recording_handle = None
+
+                        skip_main_watch_after_ad = False
+                        if watch_ad_detected:
+                            print("[android-session] stage:ad_probe_cta", flush=True)
+                            try:
+                                built_ad = None
+                                ad_cta_result = None
+                                try:
+                                    ad_interactor = AndroidYouTubeAdInteractor(
+                                        session.driver,
+                                        self._config.android_app,
+                                        adb_serial=device.adb_serial,
+                                    )
+                                    ad_cta_result = await ad_interactor.probe_cta(
+                                        artifact_dir=(
+                                            self._config.storage.base_path
+                                            / self._config.android_app.artifacts_subdir
+                                        ),
+                                        artifact_prefix=self._build_safe_artifact_prefix(topic),
+                                    )
+                                except Exception as exc:
+                                    topic_notes.append(
+                                        f"ad_cta_probe_failed:{type(exc).__name__}:{exc}"
+                                    )
+                                # Total elapsed since last sample = debug artifacts + CTA probe
+                                _cta_probe_elapsed = time.monotonic() - _samples_ended_monotonic
+                                print(
+                                    f"[android-session] stage:cta_done elapsed_since_samples={_cta_probe_elapsed:.1f}s "
+                                    f"cta_clicked={getattr(ad_cta_result,'clicked',None)} "
+                                    f"cta_returned={getattr(ad_cta_result,'returned_to_youtube',None)} "
+                                    f"recorder={'active' if recorder and recording_handle else 'none'}",
+                                    flush=True,
+                                )
+                                # Stop recording after CTA probe — wait for remaining ad time first.
+                                # Subtract CTA probe elapsed time since ad progressed during that window.
+                                if recorder is not None and recording_handle is not None:
+                                    _watch_samples = list(watch_result.samples)
+                                    (
+                                        recorded_video_path,
+                                        recorded_video_duration_seconds,
+                                    ) = await self._finalize_recording_after_cta(
+                                        label="session",
+                                        recorder=recorder,
+                                        recording_handle=recording_handle,
+                                        samples=_watch_samples,
+                                        debug_page_source_path=watch_debug_page_source_path,
+                                        clicked=(
+                                            ad_cta_result.clicked if ad_cta_result is not None else None
+                                        ),
+                                        returned_to_youtube=(
+                                            ad_cta_result.returned_to_youtube
+                                            if ad_cta_result is not None
+                                            else None
+                                        ),
+                                        elapsed_since_samples=_cta_probe_elapsed,
+                                    )
+                                    recording_handle = None
+                                built_ad = build_watched_ad_record(
+                                    watch_samples=watch_result.samples,
+                                    watch_debug_screen_path=watch_debug_screen_path,
+                                    watch_debug_page_source_path=watch_debug_page_source_path,
+                                    ad_cta_result=ad_cta_result,
+                                    recorded_video_path=recorded_video_path,
+                                    recorded_video_duration_seconds=recorded_video_duration_seconds,
+                                )
+                                if built_ad is None:
+                                    # Fallback: ad was detected but samples had no ad_detected=True.
+                                    # Record minimal entry from XML+cta so we never silently drop it.
+                                    print(
+                                        f"[android-session] stage:build_ad_fallback recorded_video={recorded_video_path} rec_dur={recorded_video_duration_seconds}",
+                                        flush=True,
+                                    )
+                                    built_ad = build_watched_ad_record(
+                                        watch_samples=watch_result.samples,
+                                        watch_debug_screen_path=watch_debug_screen_path,
+                                        watch_debug_page_source_path=watch_debug_page_source_path,
+                                        ad_cta_result=ad_cta_result,
+                                        recorded_video_path=recorded_video_path,
+                                        recorded_video_duration_seconds=recorded_video_duration_seconds,
+                                        force_from_debug=True,
+                                    )
+                                if built_ad is not None:
+                                    await self._focus_captured_ad_video_if_needed(built_ad)
+                                    print("[android-session] stage:ad_analyze", flush=True)
+                                    ad_analysis.submit(built_ad)
+                                    landing_scraper.submit(built_ad)
+                                    topic_watched_ads.append(built_ad)
+                                    watched_ads.append(built_ad)
+                                    await _notify_ad_captured()
+                                    print(
+                                        f"[android-session] stage:ad_done total_ads={len(watched_ads)}",
+                                        flush=True,
+                                    )
+                                if ad_cta_result is not None:
+                                    topic_notes.append(
+                                        f"ad_cta_returned:{str(ad_cta_result.returned_to_youtube).lower()}"
+                                    )
+                                if ad_cta_result is not None and ad_cta_result.returned_to_youtube:
+                                    post_ad_watch = None
+                                    try:
+                                        print("[android-session] stage:post_ad_watch", flush=True)
+                                        post_ad_watch, post_ad_notes = await self._resume_after_ad_return(
+                                            watcher=watcher,
+                                            built_ad=built_ad,
+                                        )
+                                        topic_notes.extend(post_ad_notes)
+                                        for note in post_ad_notes:
+                                            print(
+                                                f"[android-session] stage:post_ad_watch_extension note={note}",
+                                                flush=True,
+                                            )
+                                    except Exception as exc:
+                                        topic_notes.append(f"post_ad_watch_failed:{type(exc).__name__}")
+                                        if self._should_skip_post_ad_settle(built_ad):
+                                            skip_main_watch_after_ad = True
+                                            topic_notes.append("post_ad_watch_handoff:completed_ad")
+                                    if post_ad_watch is not None:
+                                        watch_result = replace(
+                                            watch_result,
+                                            verified=bool(
+                                                getattr(watch_result, "verified", False)
+                                                or getattr(post_ad_watch, "verified", False)
+                                            ),
+                                            samples=self._merge_watch_samples(
+                                                list(getattr(watch_result, "samples", []) or []),
+                                                list(getattr(post_ad_watch, "samples", []) or []),
+                                            ),
+                                            ad_debug_page_source=self._preferred_ad_debug_page_source(
+                                                post_ad_watch,
+                                                watch_result,
+                                            ),
+                                        )
+                                        if self._result_has_ad_samples(post_ad_watch):
+                                            pending_midroll_result = post_ad_watch
+                                            pending_midroll_samples_ended_monotonic = (
+                                                time.monotonic()
+                                            )
+                                    elif self._should_skip_post_ad_settle(built_ad):
+                                        skip_main_watch_after_ad = True
+                                        topic_notes.append("post_ad_watch_handoff:completed_ad")
+                            except Exception as exc:
+                                topic_notes.append(f"ad_flow_failed:{type(exc).__name__}:{exc}")
+                                print(
+                                    f"[android-session] stage:ad_flow_failed error={type(exc).__name__}:{exc}",
+                                    flush=True,
+                                )
+                                if watch_debug_screen_path is None:
+                                    watch_debug_screen_path, watch_debug_page_source_path = (
+                                        self._write_watch_debug_artifacts(
+                                            driver=session.driver,
+                                            topic=topic,
+                                            adb_serial=device.adb_serial,
+                                            page_source_override=getattr(
+                                                watch_result,
+                                                "ad_debug_page_source",
+                                                None,
+                                            ),
+                                        )
+                                    )
+
+                        # ── main watch loop: watch → catch mid-roll ads → resume → repeat ──
+                        _max_midroll_rounds = 10
+                        for _midroll_round in range(_max_midroll_rounds):
+                            watch_gate_reason = self._engagement_gate_reason(
+                                list(getattr(watch_result, "samples", []) or [])
+                            )
+                            if skip_main_watch_after_ad:
+                                topic_notes.append("main_watch_skipped:post_ad_handoff")
+                                break
+                            elif (
+                                not watch_verified
+                                and watch_gate_reason in {"no_watch_surface", "short_form"}
+                            ):
+                                topic_notes.append(f"main_watch_skipped:{watch_gate_reason}")
+                                break
+
+                            if (
+                                self._config.android_app.probe_screenrecord_enabled
+                                and recording_handle is None
+                            ):
+                                (
+                                    recorder,
+                                    recording_handle,
+                                ) = await self._start_recording_handle(
+                                    label="midroll",
+                                    topic=topic,
+                                    adb_serial=device.adb_serial,
+                                    round_index=_midroll_round + 1,
+                                )
+
+                            (
+                                watch_result,
+                                main_watch_extension_note,
+                                _extension_extra_result,
+                                _mr_samples_ended_monotonic,
+                            ) = await self._advance_main_watch_iteration(
+                                watcher=watcher,
+                                watch_result=watch_result,
+                                target_watch_seconds=target_watch_seconds,
+                                pending_midroll_result=pending_midroll_result,
+                                pending_midroll_samples_ended_monotonic=(
+                                    pending_midroll_samples_ended_monotonic
+                                ),
+                            )
+                            pending_midroll_result = None
+                            pending_midroll_samples_ended_monotonic = None
+                            if main_watch_extension_note is not None:
+                                topic_notes.append(main_watch_extension_note)
+                                print(
+                                    f"[android-session] stage:main_watch_extension note={main_watch_extension_note}",
+                                    flush=True,
+                                )
+
+                            # Check if a NEW mid-roll ad appeared during this main_watch chunk
+                            _midroll_ad_found = (
+                                main_watch_extension_note is not None
+                                and "main_watch_ad_detected" in main_watch_extension_note
+                            )
+                            if not _midroll_ad_found:
+                                break  # no ad — main watch completed to target
+
+                            # ── catch the mid-roll ad ──
+                            # Dedup: check if this mid-roll is the same ad we already caught.
+                            # Use ONLY the new extension samples (not the full merged result) to avoid
+                            # false-positive dedup against the original pre-roll ad samples.
+                            _DEDUP_GENERIC = {
+                                "sponsored", "skip ad", "skip", "visit advertiser", "visit site",
+                                "shop now", "learn more", "install", "get quote", "sign up",
+                                "like ad", "share ad", "more options", "close ad panel", "more info",
+                                "minimize", "captions", "pause video", "enter fullscreen",
+                                "expand mini player", "drag handle", "my ad center",
+                            }
+                            def _dedup_key(lines: list) -> set:
+                                result = set()
+                                for line in lines:
+                                    s = str(line).strip()
+                                    if not s or len(s) < 4:
+                                        continue
+                                    # Skip generic labels and pod position indicators ("1 of 2")
+                                    if s.casefold() in _DEDUP_GENERIC:
+                                        continue
+                                    if s.casefold().startswith("sponsored"):
+                                        continue
+                                    result.add(s[:80])
+                                return result
+
+                            # Use only NEW extension samples for dedup key — avoids matching
+                            # the original pre-roll ad's lines (which are in the merged watch_result)
+                            _mr_new_samples = list(getattr(_extension_extra_result, "samples", []) or []) if _extension_extra_result is not None else []
+                            if (
+                                topic_watched_ads
+                                and self._midroll_continues_previous_ad(
+                                    previous_ad=topic_watched_ads[-1],
+                                    extension_samples=_mr_new_samples,
+                                )
+                            ):
+                                self._merge_midroll_continuation_into_previous_ad(
+                                    previous_ad=topic_watched_ads[-1],
+                                    extension_samples=_mr_new_samples,
+                                )
+                                topic_notes.append(
+                                    f"midroll_ad_skip_duplicate:round{_midroll_round + 1}:continuation"
+                                )
+                                print(
+                                    f"[android-session] stage:midroll_ad_skip_duplicate round={_midroll_round + 1} reason=continuation",
+                                    flush=True,
+                                )
+                                continue
+                            _mr_raw_hints: list[str] = []
+                            for _s in _mr_new_samples:
+                                if getattr(_s, "ad_detected", False):
+                                    _mr_raw_hints.extend(getattr(_s, "ad_visible_lines", []) or [])
+                            _mr_sponsor_hints = _dedup_key(_mr_raw_hints)
+                            _mr_is_duplicate = False
+                            if topic_watched_ads and _mr_sponsor_hints:
+                                for _prev_ad in topic_watched_ads:
+                                    _prev_lines = _dedup_key(
+                                        (_prev_ad.get("visible_lines") or [])
+                                    )
+                                    if _prev_lines and _prev_lines & _mr_sponsor_hints:
+                                        _mr_is_duplicate = True
+                                        break
+                            if not _mr_is_duplicate and topic_watched_ads:
+                                def _host(u):
+                                    if not isinstance(u, str) or not u:
+                                        return None
+                                    from urllib.parse import urlsplit
+                                    try:
+                                        h = urlsplit(u if "://" in u else f"https://{u}").netloc.lower()
+                                    except Exception:
+                                        return None
+                                    return h[4:] if h.startswith("www.") else h or None
+                                _mr_new_hosts = {
+                                    _host(getattr(_s, "ad_display_url", None))
+                                    for _s in _mr_new_samples
+                                }
+                                _mr_new_hosts.discard(None)
+                                _mr_new_hosts.discard("www.googleadservices.com")
+                                _mr_new_hosts.discard("googleadservices.com")
+                                _prev_hosts: set = set()
+                                for _prev_ad in topic_watched_ads:
+                                    cap = _prev_ad.get("capture") or {}
+                                    for u in (
+                                        _prev_ad.get("display_url"),
+                                        _prev_ad.get("landing_url"),
+                                        cap.get("landing_scrape_url"),
+                                        cap.get("pre_click_display_url"),
+                                    ):
+                                        h = _host(u)
+                                        if h and h not in {"googleadservices.com", "www.googleadservices.com"}:
+                                            _prev_hosts.add(h)
+                                if _mr_new_hosts and _mr_new_hosts & _prev_hosts:
+                                    _mr_is_duplicate = True
+                            if _mr_is_duplicate:
+                                topic_notes.append(f"midroll_ad_skip_duplicate:round{_midroll_round + 1}")
+                                print(
+                                    f"[android-session] stage:midroll_ad_skip_duplicate round={_midroll_round + 1}",
+                                    flush=True,
+                                )
+                                break  # same banner — stop looping
+
+                            topic_notes.append(f"midroll_ad_catch:round{_midroll_round + 1}")
+                            print(
+                                f"[android-session] stage:midroll_ad_catch round={_midroll_round + 1}",
+                                flush=True,
+                            )
+                            try:
+                                _mr_watch_debug_screen, _mr_watch_debug_xml = (
+                                    self._write_watch_debug_artifacts(
+                                        driver=session.driver,
+                                        topic=topic,
+                                        adb_serial=device.adb_serial,
+                                        page_source_override=getattr(
+                                            watch_result, "ad_debug_page_source", None,
+                                        ),
+                                    )
+                                )
+                                if _mr_watch_debug_screen is not None:
+                                    topic_notes.append(f"midroll_debug:{_mr_watch_debug_screen}")
+                                _mr_video_path = None
+                                _mr_video_dur = None
+                                _mr_cta_result = None
+                                try:
+                                    _mr_interactor = AndroidYouTubeAdInteractor(
+                                        session.driver,
+                                        self._config.android_app,
+                                        adb_serial=device.adb_serial,
+                                    )
+                                    _mr_cta_result = await _mr_interactor.probe_cta(
+                                        artifact_dir=(
+                                            self._config.storage.base_path
+                                            / self._config.android_app.artifacts_subdir
+                                        ),
+                                        artifact_prefix=self._build_safe_artifact_prefix(topic),
+                                    )
+                                except Exception as exc:
+                                    topic_notes.append(f"midroll_cta_failed:{type(exc).__name__}:{exc}")
+                                # Full elapsed from last sample: debug artifact write + CTA probe.
+                                _mr_cta_elapsed = time.monotonic() - _mr_samples_ended_monotonic
+                                if recorder is not None and recording_handle is not None:
+                                    (
+                                        _mr_video_path,
+                                        _mr_video_dur,
+                                    ) = await self._finalize_recording_after_cta(
+                                        label=f"midroll_round{_midroll_round + 1}",
+                                        recorder=recorder,
+                                        recording_handle=recording_handle,
+                                        samples=(
+                                            _mr_new_samples
+                                            if _mr_new_samples
+                                            else list(getattr(watch_result, "samples", []) or [])
+                                        ),
+                                        debug_page_source_path=_mr_watch_debug_xml,
+                                        clicked=(
+                                            _mr_cta_result.clicked
+                                            if _mr_cta_result is not None
+                                            else None
+                                        ),
+                                        returned_to_youtube=(
+                                            _mr_cta_result.returned_to_youtube
+                                            if _mr_cta_result is not None
+                                            else None
+                                        ),
+                                        elapsed_since_samples=_mr_cta_elapsed,
+                                    )
+                                    recording_handle = None
+                                else:
+                                    logger.warning(
+                                        "recorder[midroll]: missing active recording round=%s topic=%s",
+                                        _midroll_round + 1,
+                                        topic,
+                                    )
+                                # Use only the NEW extension samples for the midroll ad record.
+                                # The full merged watch_result.samples includes original pre-roll
+                                # samples which would corrupt the midroll ad metadata.
+                                _mr_watch_samples = _mr_new_samples if _mr_new_samples else list(getattr(watch_result, "samples", []) or [])
+                                _mr_built_ad = build_watched_ad_record(
+                                    watch_samples=_mr_watch_samples,
+                                    watch_debug_screen_path=_mr_watch_debug_screen,
+                                    watch_debug_page_source_path=_mr_watch_debug_xml,
+                                    ad_cta_result=_mr_cta_result,
+                                    recorded_video_path=_mr_video_path,
+                                    recorded_video_duration_seconds=_mr_video_dur,
+                                )
+                                if _mr_built_ad is not None:
+                                    await self._trim_recording_tail_to_ad(
+                                        built_ad=_mr_built_ad,
+                                        ad_sample_count=len(_mr_new_samples),
+                                        extension_samples=_mr_new_samples,
+                                    )
+                                    await self._focus_captured_ad_video_if_needed(_mr_built_ad)
+                                    ad_analysis.submit(_mr_built_ad)
+                                    landing_scraper.submit(_mr_built_ad)
+                                    topic_watched_ads.append(_mr_built_ad)
+                                    watched_ads.append(_mr_built_ad)
+                                    await _notify_ad_captured()
+                                    print(
+                                        f"[android-session] stage:midroll_ad_done total_ads={len(watched_ads)}",
+                                        flush=True,
+                                    )
+                                # Return to YouTube and resume
+                                if _mr_cta_result is not None and _mr_cta_result.returned_to_youtube:
+                                    try:
+                                        _mr_post_ad, _mr_post_notes = await self._resume_after_ad_return(
+                                            watcher=watcher, built_ad=_mr_built_ad,
+                                        )
+                                        topic_notes.extend(_mr_post_notes)
+                                        if _mr_post_ad is not None:
+                                            watch_result = replace(
+                                                watch_result,
+                                                verified=bool(
+                                                    getattr(watch_result, "verified", False)
+                                                    or getattr(_mr_post_ad, "verified", False)
+                                                ),
+                                                samples=self._merge_watch_samples(
+                                                    list(getattr(watch_result, "samples", []) or []),
+                                                    list(getattr(_mr_post_ad, "samples", []) or []),
+                                                ),
+                                            )
+                                            if self._result_has_ad_samples(_mr_post_ad):
+                                                pending_midroll_result = _mr_post_ad
+                                                pending_midroll_samples_ended_monotonic = (
+                                                    time.monotonic()
+                                                )
+                                    except Exception as exc:
+                                        topic_notes.append(f"midroll_post_ad_failed:{type(exc).__name__}")
+                                # Start a fresh recording for the next watch chunk
+                                if self._config.android_app.probe_screenrecord_enabled:
+                                    (
+                                        recorder,
+                                        recording_handle,
+                                    ) = await self._start_recording_handle(
+                                        label="midroll",
+                                        topic=topic,
+                                        adb_serial=device.adb_serial,
+                                        round_index=_midroll_round + 1,
+                                    )
+                                watch_verified = bool(getattr(watch_result, "verified", False))
+                                skip_main_watch_after_ad = False
+                            except Exception as exc:
+                                topic_notes.append(f"midroll_flow_failed:{type(exc).__name__}:{exc}")
+                                break  # don't loop on errors
+                        # Refresh after main watch loop
+                        watch_verified = bool(getattr(watch_result, "verified", False))
+                        watch_seconds = self._derive_watch_seconds(
+                            list(getattr(watch_result, "samples", []) or [])
+                        )
+                        # Stop any remaining recording
+                        if recorder is not None and recording_handle is not None:
+                            _final_video = await self._stop_recording_handle(
+                                recorder=recorder,
+                                recording_handle=recording_handle,
+                            )
+                            recording_handle = None
+                            # Discard if no ads used this recording segment
+                            if _final_video and not topic_watched_ads:
+                                _final_abs = self._config.storage.base_path / _final_video
+                                logger.info(
+                                    "recorder[midroll]: discarded no-ad segment topic=%s path=%s",
+                                    topic,
+                                    _final_abs,
+                                )
+                                _final_abs.unlink(missing_ok=True)
+                        if not self._config.android_app.session_engagement_enabled:
+                            topic_notes.append("engagement_skipped:disabled_for_session_stability")
+                        elif opened_title and self._opened_title_is_provisional(opened_title, topic):
+                            topic_notes.append("engagement_skipped:provisional_title")
+                        else:
+                            engagement_samples, engagement_notes = (
+                                await self._prepare_engagement_samples(
+                                    watcher=watcher,
+                                    samples=list(getattr(watch_result, "samples", []) or []),
+                                    force_refresh=bool(topic_watched_ads),
+                                )
+                            )
+                            topic_notes.extend(engagement_notes)
+                            if self._can_attempt_engagement(engagement_samples):
+                                print("[android-session] stage:engagement_after_watch", flush=True)
+                                topic_notes.extend(
+                                    await self._prepare_for_engagement(
+                                        watcher=watcher,
+                                    )
+                                )
+                                engagement_result = await self._run_engagement_safe(
+                                    driver=session.driver,
+                                    adb_serial=device.adb_serial,
+                                    topic=topic,
+                                    opened_title=opened_title,
+                                    notes=topic_notes,
+                                    note_prefix="engagement_failed",
+                                )
+                                if engagement_result is not None:
+                                    liked = engagement_result.liked
+                                    already_liked = engagement_result.already_liked
+                                    subscribed = engagement_result.subscribed
+                                    already_subscribed = engagement_result.already_subscribed
+                                    comments_glanced = engagement_result.comments_glanced
+                                    topic_notes.extend(
+                                        await self._stabilize_playback_after_engagement(
+                                            watcher=watcher,
+                                        )
+                                    )
+                            else:
+                                topic_notes.append(
+                                    f"engagement_skipped:{self._engagement_gate_reason(engagement_samples)}"
+                                )
+                except Exception as exc:
+                    print(
+                        f"[android-session] topic:error topic={topic} error={type(exc).__name__}:{exc}",
+                        flush=True,
+                    )
+                    topic_notes.append(f"topic_failed:{type(exc).__name__}:{exc}")
+                    lowered_error = str(exc).casefold()
+                    if session is not None and (
+                        "submit_search timed out" in lowered_error
+                        or "submit_search_retry timed out" in lowered_error
+                    ):
+                        self._append_stage_debug_artifacts(
+                            driver=session.driver,
+                            topic_notes=topic_notes,
+                            topic=topic,
+                            stage_label="submit_search_timeout",
+                            adb_serial=device.adb_serial if device is not None else None,
+                        )
+                    if session is not None and "timed out collecting watch samples" in lowered_error:
+                        self._append_stage_debug_artifacts(
+                            driver=session.driver,
+                            topic_notes=topic_notes,
+                            topic=topic,
+                            stage_label="watch_timeout",
+                            adb_serial=device.adb_serial if device is not None else None,
+                        )
+                    if session is not None and "lost youtube foreground" in lowered_error:
+                        self._append_stage_debug_artifacts(
+                            driver=session.driver,
+                            topic_notes=topic_notes,
+                            topic=topic,
+                            stage_label="off_youtube",
+                            adb_serial=device.adb_serial if device is not None else None,
+                        )
+                    if (
+                        session is not None
+                        and (
+                            "failed to detect native youtube results list" in lowered_error
+                            or "no_result_opened" in lowered_error
+                        )
+                    ):
+                        debug_screen_path, debug_page_source_path = self._write_watch_debug_artifacts(
+                            driver=session.driver,
+                            topic=f"{topic}_results",
+                            adb_serial=device.adb_serial if device is not None else None,
+                        )
+                        if debug_screen_path is not None:
+                            topic_notes.append(f"results_debug:{debug_screen_path}")
+                        if debug_page_source_path is not None:
+                            topic_notes.append(f"results_debug_xml:{debug_page_source_path}")
+                    if self._is_infrastructure_failure(str(exc)):
+                        infra_failure_streak += 1
+                        topic_notes.append(f"infra_failure_streak:{infra_failure_streak}")
+                        topic_notes.extend(
+                            self._write_infra_diagnostic_artifacts(
+                                topic=topic,
+                                stage_label="topic_error",
+                                adb_serial=device.adb_serial if device is not None else None,
+                            )
+                        )
+                        if not self._topic_has_meaningful_progress(
+                            opened_title=opened_title,
+                            watch_verified=watch_verified,
+                            watch_seconds=watch_seconds,
+                            topic_watched_ads=topic_watched_ads,
+                            current_watch_started_at=current_watch_started_at,
+                        ):
+                            discard_topic_result = True
+                            retry_same_topic = self._should_retry_topic_attempt(
+                                topic_started_at=topic_started_at,
+                                session_started_at=started_at,
+                                duration_minutes=duration_minutes,
+                            )
+                            topic_notes.append(
+                                "infra_topic_discarded_before_watch"
+                                if retry_same_topic
+                                else "infra_topic_discarded_move_next"
+                            )
+                        elif self._is_session_only_infrastructure_failure(str(exc)):
+                            topic_notes.append("infra_topic_partial_progress_preserved")
+                        try:
+                            if session is not None:
+                                await self._stop_system_dialog_watchdog(
+                                    stop_event=dialog_watchdog_stop,
+                                    task=dialog_watchdog_task,
+                                )
+                                dialog_watchdog_stop = None
+                                dialog_watchdog_task = None
+                                launcher_tripwire = None
+                                if (
+                                    device is not None
+                                    and self._is_session_only_infrastructure_failure(str(exc))
+                                ):
+                                    await self._runtime.appium_provider.close_broken_session(
+                                        session,
+                                        adb_serial=device.adb_serial,
+                                    )
+                                else:
+                                    await self._runtime.appium_provider.close_session(session)
+                        finally:
+                            if (
+                                device is not None
+                                and self._config.android_app.emulator_stop_after_run
+                                and not self._is_session_only_infrastructure_failure(str(exc))
+                            ):
+                                await self._cleanup_device_after_failure(device)
+                        session = None
+                        _device_gone = self._is_device_gone_failure(str(exc))
+                        if not self._is_session_only_infrastructure_failure(str(exc)) or _device_gone:
+                            device = None
+                        navigator = None
+                        watcher = None
+                    else:
+                        infra_failure_streak = 0
+                else:
+                    infra_failure_streak = 0
+                    print(
+                        f"[android-session] topic:done topic={topic} verified={str(watch_verified).lower()} topic_ads={len(topic_watched_ads)}",
+                        flush=True,
+                    )
+
+                if retry_same_topic:
+                    topic_cursor = max(0, topic_cursor - 1)
+
+                if discard_topic_result:
+                    print(
+                        f"[android-session] topic:discarded topic={topic} reason=infra_before_watch",
+                        flush=True,
+                    )
+                    if infra_failure_streak >= 5:
+                        break
+                    continue
+
+                if target_watch_seconds <= 0.0:
+                    target_watch_seconds = self._decide_session_target_watch_seconds(
+                        topic=topic,
+                        topics=resolved_topics,
+                        topic_results=topic_results,
+                        watch_samples=[],
+                        started_at=started_at,
+                        duration_minutes=duration_minutes,
+                    )
+                    topic_notes.append(f"session_target_watch_fallback:{target_watch_seconds}")
+
+                topic_results.append(
+                    AndroidSessionTopicResult(
+                        topic=topic,
+                        opened_title=opened_title,
+                        notes=topic_notes,
+                        watch_verified=watch_verified,
+                        watch_seconds=watch_seconds,
+                        target_watch_seconds=target_watch_seconds,
+                        watch_ad_detected=watch_ad_detected,
+                        watched_ads=topic_watched_ads,
+                        liked=liked,
+                        already_liked=already_liked,
+                        subscribed=subscribed,
+                        already_subscribed=already_subscribed,
+                        comments_glanced=comments_glanced,
+                    )
+                )
+                elapsed_seconds = max(0, int(time.monotonic() - started_at))
+                artifact_avd_name = device.avd_name if device is not None else resolved_avd_name
+                artifact_adb_serial = (
+                    device.adb_serial if device is not None else (last_adb_serial or "unknown")
+                )
+                artifact_server_url = (
+                    session.server_url if session is not None else (last_server_url or "unknown")
+                )
+                artifact_reused_running_device = (
+                    device.reused_running_device
+                    if device is not None
+                    else last_reused_running_device
+                )
+                artifact_started_local_appium = (
+                    session.started_local_server
+                    if session is not None
+                    else last_started_local_appium
+                )
+                self._write_session_artifact(
+                    artifact_path=session_artifact_path,
+                    avd_name=artifact_avd_name,
+                    adb_serial=artifact_adb_serial,
+                    topics=resolved_topics,
+                    duration_minutes_target=duration_minutes,
+                    elapsed_seconds=elapsed_seconds,
+                    appium_server_url=artifact_server_url,
+                    reused_running_device=artifact_reused_running_device,
+                    started_local_appium=artifact_started_local_appium,
+                    topic_results=topic_results,
+                    watched_ads=watched_ads,
+                    notes=(
+                        [
+                            *proxy_notes,
+                            *( [f"snapshot:{snapshot_name}"] if snapshot_name else [] ),
+                            f"topics:{len(resolved_topics)}",
+                            *( [f"duration_minutes_target:{duration_minutes}"] if duration_minutes is not None else [] ),
+                            f"elapsed_seconds:{elapsed_seconds}",
+                            f"topic_runs:{len(topic_results)}",
+                            f"verified_topics:{sum(1 for item in topic_results if item.watch_verified)}",
+                            f"ads:{len(watched_ads)}",
+                            f"infra_failure_streak:{infra_failure_streak}",
+                            "completed:false",
+                        ]
+                    ),
+                )
+                print(
+                    f"[android-session] checkpoint topic_runs={len(topic_results)} verified={sum(1 for item in topic_results if item.watch_verified)} ads={len(watched_ads)} infra_failure_streak={infra_failure_streak}",
+                    flush=True,
+                )
+                if on_progress is not None:
+                    try:
+                        verified_count = sum(1 for tr in topic_results if tr.watch_verified)
+                        _progress_videos = [
+                            build_topic_watched_video_payload(
+                                tr,
+                                position=idx + 1,
+                                recorded_at=time.time(),
+                            )
+                            for idx, tr in enumerate(topic_results)
+                        ]
+                        _progress_ads = [
+                            {**ad, "position": idx + 1}
+                            for idx, ad in enumerate(watched_ads)
+                        ]
+                        _current_rx = await _read_rx_bytes()
+                        _dl_bytes = max(0, _current_rx - _initial_rx_bytes) if _initial_rx_bytes else 0
+                        await on_progress(
+                            event="checkpoint",
+                            current_topic=topic,
+                            current_watch=None,
+                            topics_searched=[tr.topic for tr in topic_results],
+                            videos_watched=verified_count,
+                            watched_videos_count=verified_count,
+                            watched_videos=_progress_videos,
+                            watched_ads=_progress_ads,
+                            watched_ads_count=len(_progress_ads),
+                            total_duration_seconds=elapsed_seconds,
+                            bytes_downloaded=_dl_bytes,
+                        )
+                    except Exception as exc:
+                        print(f"[android-session] on_progress error: {exc}", flush=True)
+                if infra_failure_streak >= 5:
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                # Return to a clean home surface before the next topic so stale
+                # watch/ad overlays don't break the next submit_search flow.
+                if navigator is not None:
+                    try:
+                        await asyncio.wait_for(navigator.reset_to_home(), timeout=45)
+                        print("[android-session] topic:post_reset:home", flush=True)
+                    except Exception as exc:
+                        print(
+                            f"[android-session] topic:post_reset:failed {type(exc).__name__}:{exc}",
+                            flush=True,
+                        )
+                        if self._is_infrastructure_failure(str(exc)):
+                            infra_failure_streak += 1
+                            topic_notes.append(
+                                f"post_reset_infra_failure_streak:{infra_failure_streak}"
+                            )
+                            try:
+                                if session is not None:
+                                    await self._stop_system_dialog_watchdog(
+                                        stop_event=dialog_watchdog_stop,
+                                        task=dialog_watchdog_task,
+                                    )
+                                    dialog_watchdog_stop = None
+                                    dialog_watchdog_task = None
+                                    launcher_tripwire = None
+                                    if (
+                                        device is not None
+                                        and self._is_session_only_infrastructure_failure(str(exc))
+                                    ):
+                                        await self._runtime.appium_provider.close_broken_session(
+                                            session,
+                                            adb_serial=device.adb_serial,
+                                        )
+                                    else:
+                                        await self._runtime.appium_provider.close_session(session)
+                            except Exception:
+                                pass
+                            session = None
+                            _device_gone = self._is_device_gone_failure(str(exc))
+                            if (
+                                not self._is_session_only_infrastructure_failure(str(exc))
+                                or _device_gone
+                            ):
+                                device = None
+                            navigator = None
+                            watcher = None
+                            if infra_failure_streak >= 5:
+                                break
+                            continue
+
+            elapsed_seconds = max(0, int(time.monotonic() - started_at))
+            artifact_avd_name = device.avd_name if device is not None else resolved_avd_name
+            artifact_adb_serial = (
+                device.adb_serial if device is not None else (last_adb_serial or "unknown")
+            )
+            artifact_server_url = (
+                session.server_url if session is not None else (last_server_url or "unknown")
+            )
+            artifact_reused_running_device = (
+                device.reused_running_device
+                if device is not None
+                else last_reused_running_device
+            )
+            artifact_started_local_appium = (
+                session.started_local_server
+                if session is not None
+                else last_started_local_appium
+            )
+            await ad_analysis.drain(timeout_seconds=90.0)
+            if landing_scraper is not None:
+                with contextlib.suppress(Exception):
+                    await landing_scraper.drain(timeout_seconds=60.0)
+                with contextlib.suppress(Exception):
+                    await landing_scraper.stop()
+            with contextlib.suppress(Exception):
+                self._backfill_advertiser_from_landing_scrape(watched_ads)
+            with contextlib.suppress(Exception):
+                self._dedupe_watched_ads(watched_ads)
+            self._cleanup_irrelevant_ad_videos(watched_ads)
+            artifact_path = self._write_session_artifact(
+                artifact_path=session_artifact_path,
+                avd_name=artifact_avd_name,
+                adb_serial=artifact_adb_serial,
+                topics=resolved_topics,
+                duration_minutes_target=duration_minutes,
+                elapsed_seconds=elapsed_seconds,
+                appium_server_url=artifact_server_url,
+                reused_running_device=artifact_reused_running_device,
+                started_local_appium=artifact_started_local_appium,
+                topic_results=topic_results,
+                watched_ads=watched_ads,
+                notes=(
+                    [
+                        *proxy_notes,
+                        *( [f"snapshot:{snapshot_name}"] if snapshot_name else [] ),
+                        f"topics:{len(resolved_topics)}",
+                        *( [f"duration_minutes_target:{duration_minutes}"] if duration_minutes is not None else [] ),
+                        f"elapsed_seconds:{elapsed_seconds}",
+                        f"topic_runs:{len(topic_results)}",
+                        f"verified_topics:{sum(1 for item in topic_results if item.watch_verified)}",
+                        f"ads:{len(watched_ads)}",
+                        f"infra_failure_streak:{infra_failure_streak}",
+                        "completed:true",
+                    ]
+                ),
+            )
+
+            _final_rx = await _read_rx_bytes()
+            _final_bytes_downloaded = max(0, _final_rx - _initial_rx_bytes) if _initial_rx_bytes else 0
+
+            return AndroidSessionRunResult(
+                avd_name=artifact_avd_name,
+                adb_serial=artifact_adb_serial,
+                topics=resolved_topics,
+                artifact_path=artifact_path,
+                appium_server_url=artifact_server_url,
+                duration_minutes_target=duration_minutes,
+                elapsed_seconds=elapsed_seconds,
+                reused_running_device=artifact_reused_running_device,
+                started_local_appium=artifact_started_local_appium,
+                topic_results=topic_results,
+                watched_ads=watched_ads,
+                bytes_downloaded=_final_bytes_downloaded,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                await ad_analysis.drain(timeout_seconds=5.0)
+            if landing_scraper is not None:
+                with contextlib.suppress(Exception):
+                    await landing_scraper.drain(timeout_seconds=60.0)
+                with contextlib.suppress(Exception):
+                    await landing_scraper.stop()
+            with contextlib.suppress(Exception):
+                self._backfill_advertiser_from_landing_scrape(watched_ads)
+            print("[android-session] shutdown:start", flush=True)
+            try:
+                await self._stop_system_dialog_watchdog(
+                    stop_event=dialog_watchdog_stop,
+                    task=dialog_watchdog_task,
+                )
+                if session is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(
+                            self._runtime.appium_provider.close_session(session),
+                            timeout=30,
+                        )
+            finally:
+                if (
+                    device is not None
+                    and self._config.android_app.emulator_stop_after_run
+                ):
+                    try:
+                        await asyncio.wait_for(
+                            self._runtime.avd_manager.stop_device(
+                                device.adb_serial,
+                                avd_name=device.avd_name,
+                            ),
+                            timeout=30,
+                        )
+                    except Exception:
+                        with contextlib.suppress(Exception):
+                            await self._runtime.avd_manager.force_cleanup_device(
+                                adb_serial=device.adb_serial,
+                                avd_name=device.avd_name,
+                            )
+                if proxy_bridge_handle is not None:
+                    with contextlib.suppress(Exception):
+                        await self._proxy_bridge.stop(proxy_bridge_handle)
+            print("[android-session] shutdown:done", flush=True)
+
+    async def _system_dialog_watchdog_loop(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        stop_event: asyncio.Event,
+        tripwire_event: asyncio.Event,
+        log_prefix: str,
+    ) -> None:
+        handled_timestamps: list[float] = []
+        while not stop_event.is_set():
+            try:
+                handled = await navigator.dismiss_system_dialogs_via_adb()
+                if handled:
+                    now = time.monotonic()
+                    handled_timestamps = [
+                        timestamp
+                        for timestamp in handled_timestamps
+                        if now - timestamp <= 10.0
+                    ]
+                    handled_timestamps.append(now)
+                    print(f"{log_prefix} watchdog:system_dialog_wait_clicked", flush=True)
+                    if len(handled_timestamps) >= 2 and not tripwire_event.is_set():
+                        tripwire_event.set()
+                        print(
+                            f"{log_prefix} watchdog:launcher_tripwire_set waits={len(handled_timestamps)}",
+                            flush=True,
+                        )
+                        handled_timestamps.clear()
+                        continue
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=1.2)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+                handled_timestamps.clear()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(
+                    f"{log_prefix} watchdog:error error={type(exc).__name__}:{exc}",
+                    flush=True,
+                )
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=2.5)
+            except asyncio.TimeoutError:
+                continue
+
+    async def _stop_system_dialog_watchdog(
+        self,
+        *,
+        stop_event: asyncio.Event | None,
+        task: asyncio.Task[None] | None,
+    ) -> None:
+        if stop_event is not None:
+            stop_event.set()
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    async def _ensure_app_ready_with_timeout(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        topic_notes: list[str],
+        stage_label: str,
+        launcher_tripwire: asyncio.Event | None,
+        timeout_seconds: float = 24.0,
+    ) -> None:
+        self._raise_if_launcher_tripwire_set(
+            launcher_tripwire=launcher_tripwire,
+            stage_label=stage_label,
+        )
+        ensure_task = asyncio.create_task(navigator.ensure_app_ready())
+        tripwire_task = (
+            asyncio.create_task(launcher_tripwire.wait())
+            if launcher_tripwire is not None
+            else None
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {ensure_task, *( [tripwire_task] if tripwire_task is not None else [] )},
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if ensure_task in done:
+                await ensure_task
+                return
+            if tripwire_task is not None and tripwire_task in done:
+                raise AndroidUiError(f"launcher anr burst detected during {stage_label}")
+            topic_notes.append(f"{stage_label}_timeout")
+            with contextlib.suppress(Exception):
+                package, activity, page_source_length = await navigator.describe_surface()
+                topic_notes.append(
+                    f"{stage_label}_foreground:{package}:{activity}:xml={page_source_length}"
+                )
+                if package == self._config.android_app.youtube_package:
+                    topic_notes.append(f"{stage_label}_timeout_proceed:youtube_foreground")
+                    return
+            recovered = await self._recover_from_launcher_anr_with_timeout(
+                navigator=navigator,
+            )
+            topic_notes.append(f"{stage_label}_launcher_recovery:{str(recovered).lower()}")
+            self._raise_if_launcher_tripwire_set(
+                launcher_tripwire=launcher_tripwire,
+                stage_label=stage_label,
+            )
+            raise AndroidUiError(f"{stage_label} timed out")
+        finally:
+            ensure_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception, TimeoutError):
+                await asyncio.wait_for(asyncio.shield(ensure_task), timeout=0.5)
+            if tripwire_task is not None:
+                tripwire_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception, TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(tripwire_task), timeout=0.5)
+
+    def _check_emulator_network_sync(self, adb_serial: str | None) -> bool:
+        """Quick network connectivity check via ADB ping inside the emulator.
+
+        Returns True if network is reachable, False otherwise.
+        Uses a 3-second timeout so it doesn't block the session loop long.
+        """
+        if not adb_serial:
+            return True  # No ADB — assume ok, let normal flow detect issues
+        try:
+            result = subprocess.run(
+                [
+                    require_tool_path("adb"),
+                    "-s", adb_serial,
+                    "shell",
+                    "ping", "-c", "1", "-W", "3", "8.8.8.8",
+                ],
+                capture_output=True,
+                check=False,
+                env=build_android_runtime_env(),
+                text=True,
+                timeout=8,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _recover_emulator_network_sync(self, adb_serial: str | None) -> bool:
+        if not adb_serial:
+            return True
+        adb_bin = require_tool_path("adb")
+        env = build_android_runtime_env()
+        recovery_commands: tuple[tuple[str, ...], ...] = (
+            (
+                adb_bin,
+                "-s",
+                adb_serial,
+                "shell",
+                "settings",
+                "put",
+                "global",
+                "airplane_mode_on",
+                "0",
+            ),
+            (
+                adb_bin,
+                "-s",
+                adb_serial,
+                "shell",
+                "am",
+                "broadcast",
+                "-a",
+                "android.intent.action.AIRPLANE_MODE",
+                "--ez",
+                "state",
+                "false",
+            ),
+            (
+                adb_bin,
+                "-s",
+                adb_serial,
+                "shell",
+                "svc",
+                "wifi",
+                "enable",
+            ),
+            (
+                adb_bin,
+                "-s",
+                adb_serial,
+                "shell",
+                "svc",
+                "data",
+                "enable",
+            ),
+        )
+        try:
+            for command in recovery_commands:
+                subprocess.run(
+                    command,
+                    capture_output=True,
+                    check=False,
+                    env=env,
+                    text=True,
+                    timeout=20,
+                )
+        except Exception:
+            return False
+
+        for _ in range(3):
+            time.sleep(2)
+            if self._check_emulator_network_sync(adb_serial):
+                return True
+        return False
+
+    async def _ensure_topic_network_ready(
+        self,
+        *,
+        adb_serial: str | None,
+        topic: str,
+        topic_notes: list[str],
+    ) -> bool:
+        loop = asyncio.get_running_loop()
+        network_ok = await loop.run_in_executor(
+            None,
+            self._check_emulator_network_sync,
+            adb_serial,
+        )
+        if network_ok:
+            return True
+
+        topic_notes.append("network_check_failed:first_probe")
+        print(
+            f"[android-session] network_check_failed:first_probe topic={topic}",
+            flush=True,
+        )
+        network_recovered = await loop.run_in_executor(
+            None,
+            self._recover_emulator_network_sync,
+            adb_serial,
+        )
+        topic_notes.append(f"network_check_recovered:{str(network_recovered).lower()}")
+        if network_recovered:
+            print(
+                f"[android-session] network_check_recovered topic={topic}",
+                flush=True,
+            )
+            return True
+
+        print(
+            f"[android-session] network_check_failed:soft_proceed topic={topic}",
+            flush=True,
+        )
+        return False
+
+    async def _submit_search_with_timeout(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        topic: str,
+        topic_notes: list[str],
+        stage_label: str,
+        launcher_tripwire: asyncio.Event | None,
+        timeout_seconds: float = 25.0,
+    ) -> None:
+        started_at = time.monotonic()
+        self._raise_if_launcher_tripwire_set(
+            launcher_tripwire=launcher_tripwire,
+            stage_label=stage_label,
+        )
+        submit_task = asyncio.create_task(
+            navigator.submit_search(topic, deadline=time.monotonic() + timeout_seconds)
+        )
+        tripwire_task = (
+            asyncio.create_task(launcher_tripwire.wait())
+            if launcher_tripwire is not None
+            else None
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {submit_task, *( [tripwire_task] if tripwire_task is not None else [] )},
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if submit_task in done:
+                await submit_task
+                topic_notes.append(f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}")
+                return
+            if tripwire_task is not None and tripwire_task in done:
+                raise AndroidUiError(f"launcher anr burst detected during {stage_label}")
+            topic_notes.append(f"{stage_label}_timeout")
+            if await self._handle_stage_foreground_loss(
+                navigator=navigator,
+                topic_notes=topic_notes,
+                stage_label=stage_label,
+            ):
+                raise AndroidUiError(f"{stage_label} lost youtube foreground")
+            task_drained = await self._drain_cancelled_stage_task(
+                task=submit_task,
+                stage_label=stage_label,
+            )
+            if not task_drained:
+                topic_notes.append(f"{stage_label}_cleanup_timed_out")
+                raise AndroidUiError(f"{stage_label} cleanup timed out")
+            with contextlib.suppress(Exception):
+                if await navigator.has_query_ready_surface_via_adb(topic):
+                    topic_notes.append(f"{stage_label}_timeout_recovered:surface_ready_adb")
+                    topic_notes.append(
+                        f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}"
+                    )
+                    return
+            with contextlib.suppress(Exception):
+                if await navigator.has_query_results_surface(topic):
+                    topic_notes.append(f"{stage_label}_timeout_recovered:results_ready")
+                    topic_notes.append(
+                        f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}"
+                    )
+                    return
+            topic_notes.append(f"{stage_label}_timeout_proceed_to_wait_for_results")
+            topic_notes.append(f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}")
+            return
+        finally:
+            submit_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception, TimeoutError):
+                await asyncio.wait_for(asyncio.shield(submit_task), timeout=0.5)
+            if tripwire_task is not None:
+                tripwire_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception, TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(tripwire_task), timeout=0.5)
+
+    async def _wait_for_results_with_timeout(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        topic: str,
+        topic_notes: list[str],
+        stage_label: str,
+        launcher_tripwire: asyncio.Event | None,
+        timeout_seconds: float = 16.0,
+    ) -> None:
+        started_at = time.monotonic()
+        self._raise_if_launcher_tripwire_set(
+            launcher_tripwire=launcher_tripwire,
+            stage_label=stage_label,
+        )
+        wait_task = asyncio.create_task(
+            navigator.wait_for_results(topic, deadline=time.monotonic() + timeout_seconds)
+        )
+        tripwire_task = (
+            asyncio.create_task(launcher_tripwire.wait())
+            if launcher_tripwire is not None
+            else None
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {wait_task, *( [tripwire_task] if tripwire_task is not None else [] )},
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if wait_task in done:
+                await wait_task
+                topic_notes.append(f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}")
+                return
+            if tripwire_task is not None and tripwire_task in done:
+                raise AndroidUiError(f"launcher anr burst detected during {stage_label}")
+            topic_notes.append(f"{stage_label}_timeout")
+            if await self._handle_stage_foreground_loss(
+                navigator=navigator,
+                topic_notes=topic_notes,
+                stage_label=stage_label,
+            ):
+                raise AndroidUiError(f"{stage_label} lost youtube foreground")
+            task_drained = await self._drain_cancelled_stage_task(
+                task=wait_task,
+                stage_label=stage_label,
+            )
+            if not task_drained:
+                topic_notes.append(f"{stage_label}_cleanup_timed_out")
+                raise AndroidUiError(f"{stage_label} cleanup timed out")
+            with contextlib.suppress(Exception):
+                if await navigator.has_query_ready_surface_via_adb(topic):
+                    topic_notes.append(f"{stage_label}_timeout_recovered:surface_ready_adb")
+                    topic_notes.append(
+                        f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}"
+                    )
+                    return
+            with contextlib.suppress(Exception):
+                if await navigator.has_query_ready_surface(topic):
+                    topic_notes.append(f"{stage_label}_timeout_recovered:surface_ready")
+                    topic_notes.append(
+                        f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}"
+                    )
+                    return
+            recovered = await self._recover_from_launcher_anr_with_timeout(
+                navigator=navigator,
+            )
+            topic_notes.append(f"{stage_label}_launcher_recovery:{str(recovered).lower()}")
+            self._raise_if_launcher_tripwire_set(
+                launcher_tripwire=launcher_tripwire,
+                stage_label=stage_label,
+            )
+            raise AndroidUiError("Failed to detect native YouTube results list")
+        finally:
+            wait_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception, TimeoutError):
+                await asyncio.wait_for(asyncio.shield(wait_task), timeout=0.5)
+            if tripwire_task is not None:
+                tripwire_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception, TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(tripwire_task), timeout=0.5)
+
+    async def _open_first_result_with_timeout(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        topic: str,
+        topic_notes: list[str],
+        stage_label: str,
+        launcher_tripwire: asyncio.Event | None,
+        timeout_seconds: float = 30.0,
+    ) -> str | None:
+        started_at = time.monotonic()
+        self._raise_if_launcher_tripwire_set(
+            launcher_tripwire=launcher_tripwire,
+            stage_label=stage_label,
+        )
+        open_task = asyncio.create_task(
+            navigator.open_first_result(topic, deadline=time.monotonic() + timeout_seconds)
+        )
+        tripwire_task = (
+            asyncio.create_task(launcher_tripwire.wait())
+            if launcher_tripwire is not None
+            else None
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {open_task, *( [tripwire_task] if tripwire_task is not None else [] )},
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if open_task in done:
+                opened = await open_task
+                topic_notes.append(f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}")
+                return opened
+            if tripwire_task is not None and tripwire_task in done:
+                raise AndroidUiError(f"launcher anr burst detected during {stage_label}")
+            topic_notes.append(f"{stage_label}_timeout")
+            task_drained = await self._drain_cancelled_stage_task(
+                task=open_task,
+                stage_label=stage_label,
+            )
+            if not task_drained:
+                topic_notes.append(f"{stage_label}_cleanup_timed_out")
+            recovered = await self._recover_from_launcher_anr_with_timeout(
+                navigator=navigator,
+            )
+            topic_notes.append(f"{stage_label}_launcher_recovery:{str(recovered).lower()}")
+            self._raise_if_launcher_tripwire_set(
+                launcher_tripwire=launcher_tripwire,
+                stage_label=stage_label,
+            )
+            return None
+        except asyncio.TimeoutError:
+            topic_notes.append(f"{stage_label}_timeout")
+            recovered = await self._recover_from_launcher_anr_with_timeout(
+                navigator=navigator,
+            )
+            topic_notes.append(f"{stage_label}_launcher_recovery:{str(recovered).lower()}")
+            self._raise_if_launcher_tripwire_set(
+                launcher_tripwire=launcher_tripwire,
+                stage_label=stage_label,
+            )
+            return None
+        finally:
+            open_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception, TimeoutError):
+                await asyncio.wait_for(asyncio.shield(open_task), timeout=0.5)
+            if tripwire_task is not None:
+                tripwire_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception, TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(tripwire_task), timeout=0.5)
+
+    async def _drain_cancelled_stage_task(
+        self,
+        *,
+        task: asyncio.Task[object],
+        stage_label: str,
+        timeout_seconds: float = 1.5,
+    ) -> bool:
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+        except asyncio.CancelledError:
+            return True
+        except TimeoutError:
+            return False
+        except Exception:
+            return True
+        return True
+
+    async def _recover_from_launcher_anr_with_timeout(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        timeout_seconds: float = 8.0,
+    ) -> bool:
+        try:
+            return await asyncio.wait_for(
+                navigator.recover_from_launcher_anr(),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return False
+
+    async def _await_current_watch_title_with_hard_timeout(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        topic: str,
+        topic_notes: list[str],
+        stage_label: str,
+        timeout_seconds: float,
+    ) -> str | None:
+        try:
+            return await asyncio.wait_for(
+                navigator.await_current_watch_title(
+                    topic,
+                    timeout_seconds=timeout_seconds,
+                ),
+                timeout=timeout_seconds + 2.0,
+            )
+        except asyncio.TimeoutError:
+            topic_notes.append(f"{stage_label}_timeout")
+            return None
+
+    async def _provisional_watch_title_with_hard_timeout(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        topic: str,
+        topic_notes: list[str],
+        stage_label: str,
+        timeout_seconds: float,
+    ) -> str | None:
+        try:
+            return await asyncio.wait_for(
+                navigator.provisional_watch_title(topic),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            topic_notes.append(f"{stage_label}_timeout")
+            return None
+
+    async def _handle_stage_foreground_loss(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        topic_notes: list[str],
+        stage_label: str,
+    ) -> bool:
+        try:
+            package, activity = await asyncio.wait_for(
+                navigator.current_package_activity(),
+                timeout=2.0,
+            )
+        except asyncio.TimeoutError:
+            topic_notes.append(f"{stage_label}_foreground_probe_timeout")
+            return False
+        except Exception as exc:
+            topic_notes.append(f"{stage_label}_foreground_probe_failed:{type(exc).__name__}")
+            return False
+        topic_notes.append(
+            f"{stage_label}_foreground:{package or 'unknown'}:{activity or 'unknown'}"
+        )
+        if package == self._config.android_app.youtube_package:
+            return False
+        try:
+            await navigator.ensure_app_ready()
+            recovered_package, recovered_activity = await asyncio.wait_for(
+                navigator.current_package_activity(),
+                timeout=2.0,
+            )
+            topic_notes.append(
+                f"{stage_label}_foreground_recovery:true:{recovered_package or 'unknown'}:{recovered_activity or 'unknown'}"
+            )
+            if recovered_package == self._config.android_app.youtube_package:
+                return False
+        except Exception as exc:
+            topic_notes.append(
+                f"{stage_label}_foreground_recovery:false:{type(exc).__name__}"
+            )
+        return True
+
+    async def _cleanup_device_after_failure(self, device: object) -> None:
+        adb_serial = getattr(device, "adb_serial", None)
+        avd_name = getattr(device, "avd_name", None)
+        if not adb_serial or not avd_name:
+            return
+        try:
+            await asyncio.wait_for(
+                self._runtime.avd_manager.stop_device(
+                    adb_serial,
+                    avd_name=avd_name,
+                ),
+                timeout=30,
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                await self._runtime.avd_manager.force_cleanup_device(
+                    adb_serial=adb_serial,
+                    avd_name=avd_name,
+                )
+        else:
+            with contextlib.suppress(Exception):
+                await self._runtime.avd_manager.force_cleanup_device(
+                    adb_serial=adb_serial,
+                    avd_name=avd_name,
+                )
+
+    def _write_infra_diagnostic_artifacts(
+        self,
+        *,
+        topic: str,
+        stage_label: str,
+        adb_serial: str | None,
+    ) -> list[str]:
+        notes: list[str] = []
+        artifact_dir = self._config.storage.base_path / self._config.android_app.artifacts_subdir
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        safe_topic = self._build_safe_artifact_prefix(f"{topic}_{stage_label}")
+
+        appium_tail = self._runtime.appium_provider.tail_server_log(lines=160)
+        if appium_tail:
+            appium_path = artifact_dir / f"{timestamp}_{safe_topic}_appium.log"
+            appium_path.write_text(appium_tail, encoding="utf-8")
+            notes.append(f"{stage_label}_appium_log:{appium_path}")
+
+        if adb_serial:
+            logcat_path = self._write_logcat_snapshot_sync(
+                adb_serial=adb_serial,
+                output_path=artifact_dir / f"{timestamp}_{safe_topic}_logcat.log",
+            )
+            if logcat_path is not None:
+                notes.append(f"{stage_label}_logcat:{logcat_path}")
+
+        return notes
+
+    def _write_logcat_snapshot_sync(
+        self,
+        *,
+        adb_serial: str,
+        output_path: Path,
+    ) -> Path | None:
+        try:
+            result = subprocess.run(
+                [
+                    require_tool_path("adb"),
+                    "-s",
+                    adb_serial,
+                    "logcat",
+                    "-d",
+                    "-t",
+                    "500",
+                ],
+                capture_output=True,
+                check=False,
+                env=build_android_runtime_env(),
+                text=True,
+                timeout=30,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        filtered_lines = [
+            line
+            for line in (result.stdout or "").splitlines()
+            if any(
+                token in line.casefold()
+                for token in (
+                    "activitymanager",
+                    "windowmanager",
+                    "androidruntime",
+                    "uiautomator",
+                    "appium",
+                    "instrumentation",
+                    "anr",
+                    "inputdispatcher",
+                    "launcher",
+                    # Added: URL / navigation / CTA debug
+                    "customtab",
+                    "chrometabbrowser",
+                    "chromium",
+                    "chromecustomtab",
+                    "intentactivity",
+                    "browsableactivity",
+                    "intentresolution",
+                    "youtube",
+                    "com.google.android",
+                )
+            )
+        ]
+        content = "\n".join(filtered_lines[-400:] or (result.stdout or "").splitlines()[-400:])
+        output_path.write_text(content, encoding="utf-8")
+        return output_path
+
+    @staticmethod
+    def _raise_if_launcher_tripwire_set(
+        *,
+        launcher_tripwire: asyncio.Event | None,
+        stage_label: str,
+    ) -> None:
+        if launcher_tripwire is not None and launcher_tripwire.is_set():
+            raise AndroidUiError(f"launcher anr burst detected during {stage_label}")
+
+    def _write_session_artifact(
+        self,
+        *,
+        artifact_path: Path | None = None,
+        avd_name: str,
+        adb_serial: str,
+        topics: list[str],
+        duration_minutes_target: int | None,
+        elapsed_seconds: int,
+        appium_server_url: str,
+        reused_running_device: bool,
+        started_local_appium: bool,
+        topic_results: list[AndroidSessionTopicResult],
+        watched_ads: list[dict[str, object]],
+        notes: list[str],
+    ) -> Path:
+        base_dir = (
+            self._config.storage.base_path
+            / self._config.android_app.session_artifacts_subdir
+        )
+        base_dir.mkdir(parents=True, exist_ok=True)
+        if artifact_path is None:
+            artifact_path = self._build_session_artifact_path()
+        payload = {
+            "avd_name": avd_name,
+            "adb_serial": adb_serial,
+            "topics": topics,
+            "duration_minutes_target": duration_minutes_target,
+            "elapsed_seconds": elapsed_seconds,
+            "appium_server_url": appium_server_url,
+            "reused_running_device": reused_running_device,
+            "started_local_appium": started_local_appium,
+            "topic_results": [asdict(item) for item in topic_results],
+            "watched_ads": [
+                self._flatten_watched_ad_summary(item)
+                for item in watched_ads
+            ],
+            "videos_verified": sum(1 for item in topic_results if item.watch_verified),
+            "watched_ads_count": len(watched_ads),
+            "ad_analysis_done": self._count_ad_analysis_done(watched_ads),
+            "ad_analysis_terminal": self._count_ad_analysis_terminal(watched_ads),
+            "notes": notes,
+            "recorded_at": datetime.now(UTC).isoformat(),
+        }
+        artifact_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return artifact_path
+
+    @staticmethod
+    def _flatten_watched_ad_summary(ad_record: dict[str, object]) -> dict[str, object]:
+        flattened = dict(ad_record)
+        capture = flattened.get("capture")
+        if isinstance(capture, dict):
+            for source_key, target_key in (
+                ("video_status", "video_status"),
+                ("video_file", "video_file"),
+                ("landing_url", "landing_url"),
+                ("landing_status", "landing_status"),
+                ("landing_dir", "landing_dir"),
+                ("analysis_status", "analysis_status"),
+                ("analysis_summary", "analysis_summary"),
+                ("analysis_error", "analysis_error"),
+            ):
+                if flattened.get(target_key) in (None, "", []):
+                    value = capture.get(source_key)
+                    if value not in (None, "", []):
+                        flattened[target_key] = value
+
+        analysis_summary = flattened.get("analysis_summary")
+        if isinstance(analysis_summary, dict) and "analysis" not in flattened:
+            flattened["analysis"] = {
+                "is_relevant": analysis_summary.get("result") == "relevant",
+                "result": analysis_summary.get("result"),
+                "reason": analysis_summary.get("reason"),
+            }
+        return flattened
+
+    def _build_session_artifact_path(self) -> Path:
+        base_dir = (
+            self._config.storage.base_path
+            / self._config.android_app.session_artifacts_subdir
+        )
+        base_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        return base_dir / f"session_{timestamp}.json"
+
+    @staticmethod
+    def _derive_watch_seconds(samples: list[AndroidWatchSample]) -> float | None:
+        if not samples:
+            return None
+
+        non_ad_offsets = [
+            float(sample.offset_seconds)
+            for sample in samples
+            if isinstance(sample.offset_seconds, (int, float)) and not sample.ad_detected
+        ]
+        if len(non_ad_offsets) >= 2:
+            delta = max(non_ad_offsets) - min(non_ad_offsets)
+            if delta > 0:
+                return delta
+        elif len(non_ad_offsets) == 1:
+            return max(non_ad_offsets)
+
+        explicit_progress = [
+            float(sample.progress_seconds)
+            for sample in samples
+            if isinstance(sample.progress_seconds, (int, float)) and not sample.ad_detected
+        ]
+        if len(explicit_progress) >= 2:
+            delta = max(explicit_progress) - min(explicit_progress)
+            if delta > 0:
+                return delta
+        elif len(explicit_progress) == 1:
+            return None
+
+        sample_offsets = [
+            float(sample.offset_seconds)
+            for sample in samples
+            if isinstance(sample.offset_seconds, (int, float))
+        ]
+        if sample_offsets:
+            if len(sample_offsets) >= 2:
+                delta = max(sample_offsets) - min(sample_offsets)
+                if delta > 0:
+                    return delta
+            return max(sample_offsets)
+        return None
+
+    @staticmethod
+    def _derive_video_duration(samples: list[AndroidWatchSample]) -> float | None:
+        durations = [
+            float(sample.duration_seconds)
+            for sample in samples
+            if isinstance(sample.duration_seconds, (int, float)) and not sample.ad_detected
+        ]
+        if durations:
+            return max(durations)
+        return None
+
+    @staticmethod
+    def _derive_current_video_progress(samples: list[AndroidWatchSample]) -> float | None:
+        progress_points = [
+            float(sample.progress_seconds)
+            for sample in samples
+            if isinstance(sample.progress_seconds, (int, float)) and not sample.ad_detected
+        ]
+        if progress_points:
+            return max(progress_points)
+        return None
+
+    @staticmethod
+    def _covered_topics(topic_results: list[AndroidSessionTopicResult]) -> set[str]:
+        return {
+            (item.topic or "").strip()
+            for item in topic_results
+            if item.watch_verified and (item.topic or "").strip()
+        }
+
+    @staticmethod
+    def _session_remaining_seconds(
+        *,
+        started_at: float,
+        duration_minutes: int | None,
+    ) -> float:
+        if duration_minutes is None or duration_minutes <= 0:
+            return float(WATCH_LONG_FALLBACK[1])
+        total = float(duration_minutes * 60)
+        elapsed = max(time.monotonic() - started_at, 0.0)
+        return max(total - elapsed, 0.0)
+
+    @staticmethod
+    def _topic_has_meaningful_progress(
+        *,
+        opened_title: str | None,
+        watch_verified: bool,
+        watch_seconds: float | None,
+        topic_watched_ads: list[dict[str, object]],
+        current_watch_started_at: float | None,
+    ) -> bool:
+        if watch_verified or topic_watched_ads:
+            return True
+        if opened_title and opened_title.strip():
+            return True
+        if isinstance(watch_seconds, (int, float)) and watch_seconds > 0.0:
+            return True
+        return current_watch_started_at is not None
+
+    def _should_retry_topic_attempt(
+        self,
+        *,
+        topic_started_at: float,
+        session_started_at: float,
+        duration_minutes: int | None,
+    ) -> bool:
+        topic_elapsed = max(time.monotonic() - topic_started_at, 0.0)
+        session_remaining = self._session_remaining_seconds(
+            started_at=session_started_at,
+            duration_minutes=duration_minutes,
+        )
+        # A full retry costs another search/open cycle. Skip it once the current
+        # topic already burned enough wall time or the session is nearly out.
+        if topic_elapsed >= 75.0:
+            return False
+        return session_remaining >= 120.0
+
+    def _decide_session_target_watch_seconds(
+        self,
+        *,
+        topic: str,
+        topics: list[str],
+        topic_results: list[AndroidSessionTopicResult],
+        watch_samples: list[AndroidWatchSample],
+        started_at: float,
+        duration_minutes: int | None,
+    ) -> float:
+        remaining_seconds = self._session_remaining_seconds(
+            started_at=started_at,
+            duration_minutes=duration_minutes,
+        )
+        pending_topics = [
+            candidate
+            for candidate in topics
+            if candidate not in self._covered_topics(topic_results)
+        ]
+        video_duration = self._derive_video_duration(watch_samples)
+
+        if video_duration and video_duration > 5:
+            if random.random() < 0.18:
+                target = video_duration * random.uniform(0.85, 1.0)
+            elif video_duration < 180:
+                target = max(video_duration * random.uniform(0.4, 0.8), WATCH_LONG_FALLBACK[0])
+            elif video_duration < 600:
+                target = max(video_duration * random.uniform(0.2, 0.6), WATCH_LONG_FALLBACK[0])
+            else:
+                target = max(video_duration * random.uniform(0.1, 0.4), WATCH_LONG_FALLBACK[0])
+        else:
+            target = random.uniform(*WATCH_LONG_FALLBACK)
+
+        before_coverage = any(candidate != topic for candidate in pending_topics) or (
+            topic not in self._covered_topics(topic_results)
+        )
+        if before_coverage:
+            default_cap = random.uniform(*COVERAGE_CAP_DEFAULT)
+            pending_count = max(len(pending_topics), 1)
+            budget = max(remaining_seconds - pending_count * COVERAGE_SEARCH_OVERHEAD_S, 0.0)
+            dynamic_cap = max(
+                COVERAGE_CAP_MIN_S,
+                (budget / max(pending_count + 1, 1)) * COVERAGE_CAP_BUDGET_FRACTION,
+            )
+            target = min(target, min(default_cap, dynamic_cap))
+
+        if remaining_seconds >= REALISM_MIN_WATCH_TRIGGER_REMAINING_S:
+            if before_coverage:
+                pending_count = max(len(pending_topics), 1)
+                budget_floor = (remaining_seconds / max(pending_count + 1, 1)) * REALISM_MULTI_TOPIC_BUDGET_FRACTION
+                floor = min(
+                    REALISM_MIN_WATCH_S,
+                    max(
+                        REALISM_MULTI_TOPIC_MIN_WATCH_S,
+                        min(REALISM_MULTI_TOPIC_MAX_WATCH_S, budget_floor),
+                    ),
+                )
+            else:
+                floor = REALISM_MIN_WATCH_AFTER_COVERAGE_S
+            target = max(target, floor)
+
+        if not before_coverage:
+            target = min(target, random.uniform(*TOPIC_BALANCE_POST_COVERAGE_CAP_S))
+
+        target = min(
+            target,
+            self._cap_short_form_target_watch_seconds(
+                watch_samples=watch_samples,
+                current_target=target,
+            ),
+        )
+        target = min(target, max(remaining_seconds - 30.0, 5.0))
+        return max(12.0, round(target, 1))
+
+    def _cap_short_form_target_watch_seconds(
+        self,
+        *,
+        watch_samples: list[AndroidWatchSample],
+        current_target: float,
+    ) -> float:
+        video_duration = self._derive_video_duration(watch_samples)
+        if video_duration is None or video_duration > 70:
+            return current_target
+
+        observed_watch_seconds = self._derive_watch_seconds(watch_samples) or 0.0
+        current_progress = self._derive_current_video_progress(watch_samples)
+        if current_progress is None:
+            return min(current_target, max(12.0, min(video_duration + 2.0, 24.0)))
+
+        remaining_to_end = max(0.0, video_duration - current_progress)
+        extension_budget = min(max(remaining_to_end + 2.0, 0.0), 12.0)
+        short_form_cap = observed_watch_seconds + extension_budget
+        short_form_cap = min(short_form_cap, video_duration + 4.0, 24.0)
+        return min(current_target, max(observed_watch_seconds, short_form_cap, 12.0))
+
+    @staticmethod
+    def _main_watch_chunk_timeout_seconds(watch_seconds: int) -> float:
+        # Keep the outer guard slightly above watcher.watch_current()'s own timeout
+        # so we do not abort a healthy watch chunk before the sampler is done.
+        internal_timeout = max(float(watch_seconds) + 35.0, 45.0)
+        return internal_timeout + 5.0
+
+    async def _continue_main_watch_if_needed(
+        self,
+        *,
+        watcher: AndroidYouTubeWatcher,
+        watch_result: object,
+        target_watch_seconds: float,
+    ) -> tuple[object, str | None, object | None]:
+        current_watch_seconds = self._derive_watch_seconds(
+            list(getattr(watch_result, "samples", []) or [])
+        ) or 0.0
+        remaining_seconds = max(0, int(round(target_watch_seconds - current_watch_seconds)))
+        if remaining_seconds < 6:
+            return watch_result, None, None
+
+        merged_result = watch_result
+        remaining = remaining_seconds
+        watched_extra = 0
+        last_extra_result = None
+        while remaining >= 6:
+            chunk_seconds = min(remaining, 12)
+            try:
+                extra_result = await asyncio.wait_for(
+                    watcher.watch_current(watch_seconds=chunk_seconds),
+                    timeout=self._main_watch_chunk_timeout_seconds(chunk_seconds),
+                )
+            except (asyncio.TimeoutError, AndroidUiError) as exc:
+                if isinstance(exc, AndroidUiError) and "Timed out collecting watch samples" not in str(exc):
+                    raise
+                return merged_result, f"main_watch_timeout:{remaining_seconds}:after{watched_extra}", last_extra_result
+
+            merged_samples = self._merge_watch_samples(
+                list(getattr(merged_result, "samples", []) or []),
+                list(getattr(extra_result, "samples", []) or []),
+            )
+            merged_result = replace(
+                merged_result,
+                verified=bool(
+                    getattr(merged_result, "verified", False)
+                    or getattr(extra_result, "verified", False)
+                ),
+                samples=merged_samples,
+                ad_debug_page_source=self._preferred_ad_debug_page_source(
+                    extra_result,
+                    merged_result,
+                ),
+            )
+            watched_extra += chunk_seconds
+            # Only check NEW samples for ad — old samples from initial watch already handled
+            extra_samples = list(getattr(extra_result, "samples", []) or [])
+            if any(getattr(sample, "ad_detected", False) for sample in extra_samples):
+                last_extra_result = extra_result
+                return merged_result, f"main_watch_ad_detected:{watched_extra}", last_extra_result
+            last_extra_result = extra_result
+            remaining -= chunk_seconds
+
+        return merged_result, f"main_watch_extended:{watched_extra}", last_extra_result
+
+    async def _prepare_engagement_samples(
+        self,
+        *,
+        watcher: AndroidYouTubeWatcher,
+        samples: list[object],
+        force_refresh: bool,
+    ) -> tuple[list[object], list[str]]:
+        notes: list[str] = []
+        current_reason = self._engagement_gate_reason(samples)
+        if not force_refresh and current_reason == "ok":
+            return samples, notes
+
+        probe_seconds = max(
+            4,
+            min(6, self._config.android_app.probe_post_ad_watch_seconds),
+        )
+        best_samples = samples
+        best_reason = current_reason
+
+        for attempt in range(1, 3):
+            with contextlib.suppress(Exception):
+                await watcher.dismiss_residual_ad_if_present()
+            await watcher.ensure_playing()
+            probe_result = await watcher.watch_current(watch_seconds=probe_seconds)
+            probe_samples = list(getattr(probe_result, "samples", []) or [])
+            probe_reason = self._engagement_gate_reason(probe_samples)
+            notes.append(f"engagement_probe:{attempt}:{probe_reason}")
+            if probe_reason == "ok":
+                return probe_samples, notes
+            if best_reason != "ok" and probe_reason != "no_samples":
+                best_samples = probe_samples
+                best_reason = probe_reason
+
+        return best_samples, notes
+
+    async def _reinforce_watch_verification_if_needed(
+        self,
+        *,
+        watcher: AndroidYouTubeWatcher,
+        watch_result: object,
+    ) -> tuple[object, str | None]:
+        samples = list(getattr(watch_result, "samples", []) or [])
+        if getattr(watch_result, "verified", False):
+            return watch_result, None
+        if any(getattr(sample, "ad_detected", False) for sample in samples):
+            return watch_result, None
+        if self._engagement_gate_reason(samples) != "ok":
+            return watch_result, None
+
+        video_duration = self._derive_video_duration(samples)
+        probe_seconds = 3 if video_duration is not None and video_duration <= 70 else 6
+        probe_result = await watcher.watch_current(watch_seconds=probe_seconds)
+        merged_result = replace(
+            watch_result,
+            verified=bool(
+                getattr(watch_result, "verified", False)
+                or getattr(probe_result, "verified", False)
+            ),
+            samples=self._merge_watch_samples(
+                samples,
+                list(getattr(probe_result, "samples", []) or []),
+            ),
+            ad_debug_page_source=self._preferred_ad_debug_page_source(
+                probe_result,
+                watch_result,
+            ),
+        )
+        return merged_result, f"watch_verify_probe:{probe_seconds}"
+
+    async def _prepare_for_engagement(
+        self,
+        *,
+        watcher: AndroidYouTubeWatcher,
+    ) -> list[str]:
+        notes: list[str] = []
+        if await watcher.restore_primary_watch_surface():
+            notes.append("pre_engagement_surface:restored")
+        else:
+            notes.append("pre_engagement_surface:restore_missed")
+        if await watcher.ensure_playing():
+            notes.append("pre_engagement_playback:resume_requested")
+        else:
+            notes.append("pre_engagement_playback:resume_missed")
+        return notes
+
+    def _is_short_form_watch_verified_by_dwell(
+        self,
+        samples: list[AndroidWatchSample],
+    ) -> bool:
+        video_duration = self._derive_video_duration(samples)
+        if video_duration is None or video_duration > 70:
+            return False
+        if self._engagement_gate_reason(samples) != "ok":
+            return False
+        stable_samples = [
+            sample
+            for sample in samples
+            if getattr(sample, "player_visible", False)
+            and getattr(sample, "watch_panel_visible", False)
+            and not getattr(sample, "ad_detected", False)
+            and not bool(getattr(sample, "error_messages", []))
+        ]
+        if len(stable_samples) < 3:
+            return False
+        watched_seconds = self._derive_watch_seconds(samples) or 0.0
+        minimum_verified_dwell = min(12.0, max(8.0, video_duration * 0.35))
+        return watched_seconds >= minimum_verified_dwell
+
+    async def _recover_unstable_watch_surface(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        watcher: AndroidYouTubeWatcher,
+        topic: str,
+        opened_title: str | None,
+        watch_result: object,
+    ) -> tuple[object, str | None, list[str]]:
+        notes: list[str] = []
+        samples = list(getattr(watch_result, "samples", []) or [])
+        gate_reason = self._engagement_gate_reason(samples)
+        if getattr(watch_result, "verified", False) or gate_reason not in {
+            "no_watch_surface",
+            "short_form",
+        }:
+            return watch_result, opened_title, notes
+        if gate_reason == "short_form":
+            notes.append("watch_surface_short_form_rejected")
+            if await navigator.reject_reel_watch_surface(topic):
+                notes.append("watch_surface_short_form_escaped")
+            else:
+                notes.append("watch_surface_short_form_escape_missed")
+            return watch_result, opened_title, notes
+
+        if await navigator.dismiss_system_dialogs_via_adb():
+            notes.append("watch_surface_dialog_dismissed")
+
+        current_package, _ = await navigator.current_package_activity()
+        if current_package == "android":
+            if await navigator.recover_from_launcher_anr():
+                notes.append("watch_surface_launcher_recovered")
+            current_package, _ = await navigator.current_package_activity()
+        if current_package != self._config.android_app.youtube_package:
+            notes.append(f"watch_surface_foreground:{current_package or 'unknown'}")
+            with contextlib.suppress(Exception):
+                await navigator.ensure_app_ready()
+            current_package, _ = await navigator.current_package_activity()
+            notes.append(
+                f"watch_surface_foreground_after_reacquire:{current_package or 'unknown'}"
+            )
+
+        if await watcher.restore_primary_watch_surface():
+            notes.append("watch_surface_restore:ok")
+        else:
+            notes.append("watch_surface_restore:missed")
+
+        if await watcher.ensure_playing():
+            notes.append("watch_surface_resume:requested")
+        else:
+            notes.append("watch_surface_resume:missed")
+
+        delayed_opened_title = await navigator.await_current_watch_title(
+            topic,
+            timeout_seconds=5.0,
+        )
+        resolved_title = opened_title
+        if delayed_opened_title:
+            if not resolved_title:
+                resolved_title = delayed_opened_title
+                notes.append("opened_title_recovered:watch_surface")
+            elif (
+                self._opened_title_is_provisional(resolved_title, topic)
+                and not self._opened_title_is_provisional(delayed_opened_title, topic)
+            ):
+                resolved_title = delayed_opened_title
+                notes.append("opened_title_resolved:watch_surface")
+
+        probe_seconds = max(
+            6,
+            min(10, self._config.android_app.probe_post_ad_watch_seconds),
+        )
+        probe_result = await watcher.watch_current(watch_seconds=probe_seconds)
+        probe_samples = list(getattr(probe_result, "samples", []) or [])
+        notes.append(f"watch_surface_probe:{self._engagement_gate_reason(probe_samples)}")
+        merged_result = replace(
+            watch_result,
+            verified=bool(
+                getattr(watch_result, "verified", False)
+                or getattr(probe_result, "verified", False)
+            ),
+            samples=self._merge_watch_samples(samples, probe_samples),
+            ad_debug_page_source=self._preferred_ad_debug_page_source(
+                probe_result,
+                watch_result,
+            ),
+        )
+        return merged_result, resolved_title, notes
+
+    async def _stabilize_playback_after_engagement(
+        self,
+        *,
+        watcher: AndroidYouTubeWatcher,
+    ) -> list[str]:
+        notes: list[str] = []
+        if await watcher.restore_primary_watch_surface():
+            notes.append("post_engagement_surface:restored")
+        else:
+            notes.append("post_engagement_surface:restore_missed")
+        with contextlib.suppress(Exception):
+            await watcher.dismiss_residual_ad_if_present()
+        if await watcher.ensure_playing():
+            notes.append("post_engagement_playback:resume_requested")
+            return notes
+
+        notes.append("post_engagement_playback:retry")
+        if await watcher.restore_primary_watch_surface():
+            notes.append("post_engagement_surface:restored_retry")
+        else:
+            notes.append("post_engagement_surface:restore_retry_missed")
+        if await watcher.ensure_playing():
+            notes.append("post_engagement_playback:resume_requested_retry")
+        else:
+            notes.append("post_engagement_playback:still_stalled")
+            notes.append("post_engagement_handoff:next_topic")
+        return notes
+
+    async def _run_organic_watch_loop(
+        self,
+        *,
+        watcher: AndroidYouTubeWatcher,
+        navigator: AndroidYouTubeNavigator,
+        driver: object,
+        adb_serial: str | None,
+        deadline: float,
+        watched_ads: list[dict[str, object]],
+        ad_analysis: AndroidAdAnalysisCoordinator,
+        landing_scraper: AndroidLandingPageScraper,
+    ) -> None:
+        """Fill leftover session time by watching recommended videos from the current watch surface."""
+        organic_iteration = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining < 90.0:
+                break
+            organic_iteration += 1
+            print(
+                f"[android-session] organic_watch:iteration={organic_iteration} remaining_seconds={int(remaining)}",
+                flush=True,
+            )
+            # Open a recommended video from the current watch panel (no search query)
+            try:
+                opened_title = await asyncio.wait_for(
+                    navigator.open_first_result(query=None, deadline=time.monotonic() + 30.0),
+                    timeout=35.0,
+                )
+            except Exception as exc:
+                print(f"[android-session] organic_watch:open_failed error={exc}", flush=True)
+                break
+            if not opened_title:
+                print("[android-session] organic_watch:no_result_opened", flush=True)
+                break
+            print(f"[android-session] organic_watch:opened title={opened_title}", flush=True)
+            # Watch the opened video for remaining time (capped at 90s per video)
+            watch_seconds = max(20, min(90, int(deadline - time.monotonic()) - 10))
+            if watch_seconds < 20:
+                break
+            recorder = None
+            recording_handle = None
+            recorded_video_path = None
+            recorded_video_duration_seconds = None
+            try:
+                if self._config.android_app.probe_screenrecord_enabled:
+                    recorder = AndroidScreenRecorder(
+                        adb_serial=adb_serial,
+                        artifacts_dir=(
+                            self._config.storage.base_path
+                            / self._config.android_app.probe_screenrecord_artifacts_subdir
+                        ),
+                        bitrate=self._config.android_app.probe_screenrecord_bitrate,
+                    )
+                    recording_handle = await recorder.start(
+                        artifact_prefix=self._build_safe_artifact_prefix(
+                            f"organic_{organic_iteration}"
+                        ),
+                    )
+                watch_result = await watcher.watch_current(
+                    watch_seconds=watch_seconds,
+                    timeout_grace_seconds=12.0,
+                    timeout_floor_seconds=18.0,
+                )
+            except Exception as exc:
+                print(f"[android-session] organic_watch:watch_failed error={exc}", flush=True)
+                break
+            finally:
+                if recorder is not None and recording_handle is not None:
+                    recorded_video_path = await self._stop_recording_handle(
+                        recorder=recorder,
+                        recording_handle=recording_handle,
+                    )
+                    recorded_video_duration_seconds = self._probe_recorded_video_duration(
+                        recorded_video_path
+                    )
+
+            # Capture any ad seen during organic watch
+            ad_cta_result = None
+            if any(getattr(s, "ad_detected", False) for s in watch_result.samples):
+                try:
+                    ad_interactor = AndroidYouTubeAdInteractor(
+                        driver,
+                        self._config.android_app,
+                        adb_serial=adb_serial,
+                    )
+                    ad_cta_result = await ad_interactor.probe_cta(
+                        artifact_dir=(
+                            self._config.storage.base_path
+                            / self._config.android_app.artifacts_subdir
+                        ),
+                        artifact_prefix=self._build_safe_artifact_prefix(
+                            f"organic_{organic_iteration}"
+                        ),
+                    )
+                except Exception:
+                    pass
+
+            built_ad = build_watched_ad_record(
+                watch_samples=watch_result.samples,
+                watch_debug_screen_path=None,
+                watch_debug_page_source_path=None,
+                ad_cta_result=ad_cta_result,
+                recorded_video_path=recorded_video_path,
+                recorded_video_duration_seconds=recorded_video_duration_seconds,
+            )
+            if built_ad is not None:
+                await self._focus_captured_ad_video_if_needed(built_ad)
+                ad_analysis.submit(built_ad)
+                landing_scraper.submit(built_ad)
+                watched_ads.append(built_ad)
+                await _notify_ad_captured()
+                print(
+                    f"[android-session] organic_watch:ad_captured total_ads={len(watched_ads)}",
+                    flush=True,
+                )
+
+    @staticmethod
+    def _has_non_ad_progress(samples: list[object]) -> bool:
+        progress_points = [
+            getattr(sample, "progress_seconds", None)
+            for sample in samples
+            if isinstance(getattr(sample, "progress_seconds", None), (int, float))
+            and not getattr(sample, "ad_detected", False)
+            and not getattr(sample, "is_reel_surface", False)
+        ]
+        if len(progress_points) >= 2:
+            return float(progress_points[-1]) > float(progress_points[0])
+        stable_points = [
+            sample
+            for sample in samples
+            if getattr(sample, "player_visible", False)
+            and getattr(sample, "watch_panel_visible", False)
+            and not getattr(sample, "ad_detected", False)
+            and not getattr(sample, "is_reel_surface", False)
+            and not bool(getattr(sample, "error_messages", []))
+        ]
+        return len(stable_points) >= 2
+
+    @staticmethod
+    def _opened_title_matches_topic(title: str, topic: str) -> bool:
+        title_tokens = AndroidYouTubeSessionRunner._normalized_match_tokens(title)
+        topic_tokens = AndroidYouTubeSessionRunner._normalized_match_tokens(topic)
+        if not title_tokens or not topic_tokens:
+            return False
+        matched_topic_tokens = {
+            topic_token
+            for topic_token in topic_tokens
+            if any(
+                AndroidYouTubeSessionRunner._tokens_related(topic_token, title_token)
+                for title_token in title_tokens
+            )
+        }
+        anchor_tokens = AndroidYouTubeSessionRunner._topic_anchor_tokens(topic)
+        if anchor_tokens and not any(
+            any(
+                AndroidYouTubeSessionRunner._tokens_related(anchor_token, title_token)
+                for title_token in title_tokens
+            )
+            for anchor_token in anchor_tokens
+        ):
+            return False
+        if len(matched_topic_tokens) >= 2:
+            return True
+        if bool(matched_topic_tokens) and len(topic_tokens) == 1:
+            return True
+        return AndroidYouTubeSessionRunner._is_reasonable_topic_video_title(
+            title_tokens=title_tokens,
+            topic_tokens=topic_tokens,
+        )
+
+    @staticmethod
+    def _is_reasonable_topic_video_title(
+        *,
+        title_tokens: set[str],
+        topic_tokens: set[str],
+    ) -> bool:
+        finance_tokens = {
+            "automat",
+            "bitcoin",
+            "bot",
+            "crypto",
+            "cryptocurrency",
+            "earn",
+            "edge",
+            "income",
+            "immediate",
+            "invest",
+            "market",
+            "money",
+            "path",
+            "platform",
+            "profit",
+            "quantum",
+            "review",
+            "software",
+            "stock",
+            "trad",
+            "traderai",
+        }
+        if not any(token in topic_tokens for token in finance_tokens):
+            return False
+        return any(token in title_tokens for token in finance_tokens)
+
+    @staticmethod
+    def _opened_title_is_provisional(title: str, topic: str) -> bool:
+        normalized_title = AndroidYouTubeSessionRunner._normalize_phrase(title)
+        normalized_topic = AndroidYouTubeSessionRunner._normalize_phrase(topic)
+        if not normalized_title or not normalized_topic:
+            return False
+        return normalized_title == normalized_topic
+
+    @staticmethod
+    def _normalize_phrase(value: str) -> str:
+        return " ".join(re.findall(r"[A-Za-zА-Яа-я0-9]+", value.casefold()))
+
+    @staticmethod
+    def _normalized_match_tokens(value: str) -> set[str]:
+        tokens: set[str] = set()
+        for raw in re.findall(r"[A-Za-zА-Яа-я0-9]+", value.casefold()):
+            token = raw.strip()
+            if len(token) < 4:
+                continue
+            for suffix in ("ments", "ment", "ings", "ing", "ers", "er", "ies", "es", "s"):
+                if len(token) > len(suffix) + 2 and token.endswith(suffix):
+                    token = token[: -len(suffix)]
+                    break
+            if len(token) >= 4:
+                tokens.add(token)
+        return tokens
+
+    @classmethod
+    def _topic_anchor_tokens(cls, topic: str) -> set[str]:
+        topic_tokens = cls._normalized_match_tokens(topic)
+        anchor_tokens: set[str] = set()
+        for token in topic_tokens:
+            if token in cls._BROAD_QUERY_TOKENS:
+                continue
+            if any(token in group for group in cls._SEMANTIC_TOKEN_GROUPS):
+                continue
+            anchor_tokens.add(token)
+        return anchor_tokens
+
+    @staticmethod
+    def _tokens_related(left: str, right: str) -> bool:
+        if left == right:
+            return True
+        for group in AndroidYouTubeSessionRunner._SEMANTIC_TOKEN_GROUPS:
+            if left in group and right in group:
+                return True
+        shorter, longer = sorted((left, right), key=len)
+        return len(shorter) >= 5 and longer.startswith(shorter)
+
+    @staticmethod
+    def _is_infrastructure_failure(message: str) -> bool:
+        lowered = message.casefold()
+        return any(
+            token in lowered
+            for token in (
+                "socket hang up",
+                "could not proxy command to the remote server",
+                "device offline",
+                "device not found",
+                "adb: device",
+                "timed out waiting for emulator device to appear in adb",
+                "adb monkey launch failed",
+                "instrumentation process is not running",
+                "uiautomator2 server",
+                "instrumentation process cannot be initialized",
+                "cannot be proxied to uiautomator2",
+                "connection refused",
+                "max retries exceeded with url",
+                "failed to establish a new connection",
+                "android services did not become ready for appium session",
+                "failed to launch youtube app",
+                "appium server is not reachable",
+                "appium session health check failed",
+                "invalidsessionidexception",
+                "the session identified by",
+                "read timed out",
+                "readtimeouterror",
+                "httpconnectionpool(host='127.0.0.1', port=4723)",
+                "launcher anr burst detected",
+                "lost youtube foreground",
+                "ensure_app_ready timed out",
+                "cleanup timed out",
+            )
+        )
+
+    @staticmethod
+    def _is_device_gone_failure(message: str) -> bool:
+        """True when the error definitively means the emulator process is gone."""
+        lowered = message.casefold()
+        return any(
+            token in lowered
+            for token in (
+                "device not found",
+                "adb: device",
+                "device offline",
+                "timed out waiting for emulator device to appear in adb",
+            )
+        )
+
+    @staticmethod
+    def _is_session_only_infrastructure_failure(message: str) -> bool:
+        lowered = message.casefold()
+        return any(
+            token in lowered
+            for token in (
+                "instrumentation process is not running",
+                "uiautomator2 server",
+                "instrumentation process cannot be initialized",
+                "cannot be proxied to uiautomator2",
+                "invalidsessionidexception",
+                "invalid session id",
+                "the session identified by",
+                "could not proxy command to the remote server",
+                "socket hang up",
+                "read timed out",
+                "readtimeouterror",
+                "new command timeout",
+            )
+        )

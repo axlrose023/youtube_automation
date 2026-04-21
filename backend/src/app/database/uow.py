@@ -3,6 +3,7 @@ from typing import Self
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.modules.emulation.gateway import AdCaptureGateway, EmulationHistoryGateway
+from app.api.modules.proxies.gateway import ProxyGateway
 from app.api.modules.users.gateway import UserGateway
 
 
@@ -10,12 +11,14 @@ class UnitOfWork:
     users: UserGateway
     ad_captures: AdCaptureGateway
     emulation_history: EmulationHistoryGateway
+    proxies: ProxyGateway
 
     def __init__(self, session: AsyncSession):
         self.session = session
         self.users = UserGateway(session)
         self.ad_captures = AdCaptureGateway(session)
         self.emulation_history = EmulationHistoryGateway(session)
+        self.proxies = ProxyGateway(session)
 
     async def __aenter__(self):
         return self

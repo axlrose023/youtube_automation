@@ -1,0 +1,182 @@
+upstream api_upstream {
+    server api:8000;
+    keepalive 32;
+}
+
+map $http_x_forwarded_proto $yta_forwarded_https {
+    default 0;
+    https 1;
+}
+
+map $http_cf_visitor $yta_cf_https {
+    default 0;
+    ~*"\"scheme\":\"https\"" 1;
+}
+
+map "${yta_forwarded_https}${yta_cf_https}" $yta_skip_origin_redirect {
+    default 0;
+    ~*1 1;
+}
+
+server {
+    listen 80 default_server;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    client_max_body_size 50m;
+
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_types
+        text/plain
+        text/css
+        text/javascript
+        application/javascript
+        application/json
+        application/xml
+        image/svg+xml;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        try_files $uri =404;
+    }
+
+    location = /api {
+        return 301 /api/;
+    }
+
+    location ^~ /api/ {
+        rewrite ^/api/?(.*)$ /$1 break;
+        proxy_pass http://api_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location ~* \.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff2?)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    location / {
+        add_header Cache-Control "no-store";
+        try_files $uri $uri/ /index.html;
+    }
+}
+
+server {
+    listen 80;
+    server_name ${YTA_SERVER_NAME};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        try_files $uri =404;
+    }
+
+    location = /api {
+        if ($yta_skip_origin_redirect = 0) {
+            return 301 https://$host/api/;
+        }
+        return 301 /api/;
+    }
+
+    location ^~ /api/ {
+        if ($yta_skip_origin_redirect = 0) {
+            return 301 https://$host$request_uri;
+        }
+
+        rewrite ^/api/?(.*)$ /$1 break;
+        proxy_pass http://api_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location / {
+        if ($yta_skip_origin_redirect = 0) {
+            return 301 https://$host$request_uri;
+        }
+
+        root /usr/share/nginx/html;
+        add_header Cache-Control "no-store";
+        try_files $uri $uri/ /index.html;
+    }
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name ${YTA_SERVER_NAME};
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    client_max_body_size 50m;
+
+    ssl_certificate /etc/letsencrypt/live/${YTA_SERVER_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${YTA_SERVER_NAME}/privkey.pem;
+    ssl_session_cache shared:YTASSL:10m;
+    ssl_session_timeout 1d;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_types
+        text/plain
+        text/css
+        text/javascript
+        application/javascript
+        application/json
+        application/xml
+        image/svg+xml;
+
+    location = /api {
+        return 301 /api/;
+    }
+
+    location ^~ /api/ {
+        rewrite ^/api/?(.*)$ /$1 break;
+        proxy_pass http://api_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    location ~* \.(?:js|css|png|jpg|jpeg|gif|svg|ico|woff2?)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    location / {
+        add_header Cache-Control "no-store";
+        try_files $uri $uri/ /index.html;
+    }
+}

@@ -14,7 +14,20 @@ class StartEmulationRequest(BaseModel):
         default=None,
         min_length=1,
         max_length=128,
-        description="AdsPower profile id for this emulation session",
+        description="AdsPower profile id (desktop runner only)",
+    )
+    runner: str = Field(
+        default="desktop",
+        pattern=r"^(desktop|android)$",
+        description="Runner backend: desktop (browser + AdsPower) or android (emulator)",
+    )
+    proxy_id: UUID | None = Field(
+        default=None,
+        description="Proxy id from /proxies table; required for android runner",
+    )
+    headless: bool | None = Field(
+        default=None,
+        description="Optional headless override for android runner",
     )
 
 
@@ -32,18 +45,18 @@ class EmulationStatusBatchRequest(BaseModel):
 
 
 class EmulationWatchedVideo(BaseModel):
-    position: int
-    action: str
-    title: str
-    url: str
-    watched_seconds: float
-    target_seconds: float
+    position: int = 0
+    action: str = "watch"
+    title: str = ""
+    url: str = ""
+    watched_seconds: float = 0
+    target_seconds: float = 0
     watch_ratio: float | None = None
-    completed: bool
+    completed: bool = False
     search_keyword: str | None = None
     matched_topics: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
-    recorded_at: float
+    recorded_at: float = 0
 
 
 class EmulationAdTextSample(BaseModel):
@@ -62,6 +75,7 @@ class EmulationLiveAdCapture(BaseModel):
     video_src_url: str | None = None
     video_status: str | None = None
     video_file: str | None = None
+    recorded_video_duration_seconds: float | None = None
     landing_url: str | None = None
     landing_status: str | None = None
     landing_dir: str | None = None
@@ -71,13 +85,13 @@ class EmulationLiveAdCapture(BaseModel):
 
 
 class EmulationWatchedAd(BaseModel):
-    position: int
-    started_at: float
-    ended_at: float
-    watched_seconds: float
-    completed: bool
-    skip_clicked: bool
-    skip_visible: bool
+    position: int = 0
+    started_at: float = 0
+    ended_at: float = 0
+    watched_seconds: float = 0
+    completed: bool = False
+    skip_clicked: bool = False
+    skip_visible: bool = False
     skip_text: str | None = None
     cta_text: str | None = None
     cta_candidates: list[str] = Field(default_factory=list)
@@ -103,7 +117,7 @@ class EmulationWatchedAd(BaseModel):
     text_samples: list[EmulationAdTextSample] = Field(default_factory=list)
     end_reason: str | None = None
     capture: EmulationLiveAdCapture | None = None
-    recorded_at: float
+    recorded_at: float = 0
 
 
 class EmulationAnalyticsAd(BaseModel):

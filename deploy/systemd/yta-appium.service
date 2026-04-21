@@ -1,0 +1,19 @@
+[Unit]
+Description=YouTube Automation Appium Server
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/youtube_automation/deploy/android.env
+PartOf=yta-android.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/youtube_automation/backend
+EnvironmentFile=/opt/youtube_automation/deploy/android.env
+Environment=PYTHONPATH=/opt/youtube_automation/backend/src
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/opt/android-sdk/emulator:/opt/android-sdk/platform-tools:/opt/android-sdk/cmdline-tools/latest/bin
+ExecStart=/usr/bin/env appium --address 127.0.0.1 --port 4723 --base-path /
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=yta-android.target

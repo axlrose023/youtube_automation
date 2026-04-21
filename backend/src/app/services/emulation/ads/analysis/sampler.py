@@ -71,6 +71,53 @@ class AdAnalysisVideoSampler:
             )
         return output
 
+    async def prepare_focus_window(
+        self,
+        video_path: Path,
+        *,
+        start_seconds: float,
+        max_duration_seconds: float,
+    ) -> PreparedAnalysisVideo:
+        duration = await self._probe_duration(video_path)
+        if duration is None:
+            return await self.prepare(video_path)
+
+        start = max(0.0, min(float(start_seconds), max(duration - 0.25, 0.0)))
+        clip_duration = min(float(max_duration_seconds), max(duration - start, 0.0))
+        if clip_duration <= 0:
+            return PreparedAnalysisVideo(
+                path=video_path,
+                duration_seconds=duration,
+            )
+
+        if start <= 0.05 and duration <= clip_duration + 0.5:
+            return PreparedAnalysisVideo(
+                path=video_path,
+                duration_seconds=duration,
+            )
+
+        if not self._ffmpeg_bin:
+            logger.warning(
+                "Focus-window sampler unavailable for %s (ffmpeg missing), using full clip",
+                video_path,
+            )
+            return PreparedAnalysisVideo(
+                path=video_path,
+                duration_seconds=duration,
+            )
+
+        output = await self._build_trimmed_sample(
+            video_path,
+            start_seconds=start,
+            duration_seconds=clip_duration,
+        )
+        if output is None:
+            return PreparedAnalysisVideo(
+                path=video_path,
+                duration_seconds=duration,
+            )
+        return output
+
     async def _probe_duration(self, video_path: Path) -> float | None:
         if not self._ffprobe_bin:
             return None
@@ -208,6 +255,60 @@ class AdAnalysisVideoSampler:
             cleanup_dir=temp_dir,
             sampled=True,
             duration_seconds=head_seconds + tail_seconds,
+        )
+
+    async def _build_trimmed_sample(
+        self,
+        video_path: Path,
+        *,
+        start_seconds: float,
+        duration_seconds: float,
+    ) -> PreparedAnalysisVideo | None:
+        if not self._ffmpeg_bin:
+            return None
+
+        temp_dir = Path(tempfile.mkdtemp(prefix="ad-analysis-", suffix="-focus"))
+        output_path = temp_dir / "analysis_focus.mp4"
+        has_audio = await self._has_audio_stream(video_path)
+        audio_args = ["-c:a", "aac"] if has_audio else ["-an"]
+
+        process = await asyncio.create_subprocess_exec(
+            self._ffmpeg_bin,
+            "-y",
+            "-ss",
+            f"{start_seconds:.3f}",
+            "-t",
+            f"{duration_seconds:.3f}",
+            "-i",
+            str(video_path),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "28",
+            *audio_args,
+            "-movflags",
+            "+faststart",
+            str(output_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0 or not output_path.exists():
+            logger.warning(
+                "ffmpeg focus sample build failed for %s: %s",
+                video_path,
+                stderr.decode("utf-8", errors="ignore").strip(),
+            )
+            await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+            return None
+
+        return PreparedAnalysisVideo(
+            path=output_path,
+            cleanup_dir=temp_dir,
+            sampled=True,
+            duration_seconds=duration_seconds,
         )
 
     async def _has_audio_stream(self, video_path: Path) -> bool:

@@ -8,6 +8,7 @@ import { LoginPage } from "@/src/pages/LoginPage";
 import { NotFoundPage } from "@/src/pages/NotFoundPage";
 import { SessionsPage } from "@/src/pages/SessionsPage";
 import { SessionDetailPage } from "@/src/pages/SessionDetailPage";
+import { ProxiesPage } from "@/src/pages/ProxiesPage";
 import { UsersPage } from "@/src/pages/UsersPage";
 import { DashboardLayout } from "@/src/router/DashboardLayout";
 
@@ -36,6 +37,7 @@ export function App() {
             <Route path="dashboard" element={<DashboardPage />} />
             <Route path="sessions" element={<SessionsPage />} />
             <Route path="sessions/:sessionId" element={<SessionDetailPage />} />
+            <Route path="proxies" element={<ProxiesPage />} />
             <Route path="users" element={<UsersPage />} />
           </Route>
           <Route path="*" element={<NotFoundPage />} />
