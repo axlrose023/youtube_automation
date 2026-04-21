@@ -548,6 +548,16 @@ class AndroidYouTubeNavigator:
             return
         if self._is_watch_surface_for_query_sync(query):
             return
+        if self._has_query_ready_surface_sync(query):
+            return
+        if self._should_force_fresh_query_surface_sync(query):
+            logger.info(
+                "navigator: forcing fresh query surface recovery query=%s visible_query=%s",
+                query,
+                self._extract_visible_query_text_sync(),
+            )
+            self._restore_results_surface_sync(query, prefer_hard_reset=True)
+            return
         if self._has_results_surface_sync() and self._has_openable_result_sync():
             return
         if self._is_search_input_visible_sync() or self._has_search_context_sync():

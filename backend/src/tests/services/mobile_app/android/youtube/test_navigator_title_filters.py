@@ -106,6 +106,18 @@ def test_recover_results_surface_uses_hard_deeplink_fallback_from_browsing_surfa
     )
     monkeypatch.setattr(
         navigator,
+        "_has_query_ready_surface_sync",
+        lambda query: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_should_force_fresh_query_surface_sync",
+        lambda query: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
         "_has_results_surface_sync",
         lambda: False,
         raising=False,
@@ -163,6 +175,76 @@ def test_recover_results_surface_uses_hard_deeplink_fallback_from_browsing_surfa
         ("hard", ("ai trading bot", True)),
         ("dismiss", None),
     ]
+
+
+def test_recover_results_surface_forces_fresh_query_when_generic_results_surface_is_stale(
+    monkeypatch,
+) -> None:
+    navigator = AndroidYouTubeNavigator.__new__(AndroidYouTubeNavigator)
+    navigator._config = SimpleNamespace(youtube_package="com.google.android.youtube")
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        navigator,
+        "_safe_current_package_sync",
+        lambda: "com.google.android.youtube",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_has_mixed_watch_results_surface_sync",
+        lambda: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_is_loading_results_shell_sync",
+        lambda: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_is_blank_youtube_shell_sync",
+        lambda: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_is_watch_surface_for_query_sync",
+        lambda query: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_has_query_ready_surface_sync",
+        lambda query: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_should_force_fresh_query_surface_sync",
+        lambda query: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_extract_visible_query_text_sync",
+        lambda: None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_restore_results_surface_sync",
+        lambda query, prefer_hard_reset=False: calls.append(
+            ("restore", (query, prefer_hard_reset))
+        )
+        or True,
+        raising=False,
+    )
+
+    navigator._recover_results_surface_sync("quantum ai trading")
+
+    assert calls == [("restore", ("quantum ai trading", True))]
 
 
 def test_has_query_watch_transition_requires_query_matched_watch_surface(
