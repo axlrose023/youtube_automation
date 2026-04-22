@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "@/lib/auth-context";
 import { AuthGuard } from "@/src/router/AuthGuard";
 import { GuestGuard } from "@/src/router/GuestGuard";
+import { AdsPage } from "@/src/pages/AdsPage";
 import { DashboardPage } from "@/src/pages/DashboardPage";
 import { LoginPage } from "@/src/pages/LoginPage";
 import { NotFoundPage } from "@/src/pages/NotFoundPage";
@@ -37,6 +38,7 @@ export function App() {
             <Route path="dashboard" element={<DashboardPage />} />
             <Route path="sessions" element={<SessionsPage />} />
             <Route path="sessions/:sessionId" element={<SessionDetailPage />} />
+            <Route path="ads" element={<AdsPage />} />
             <Route path="proxies" element={<ProxiesPage />} />
             <Route path="users" element={<UsersPage />} />
           </Route>

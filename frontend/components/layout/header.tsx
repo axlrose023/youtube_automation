@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { Globe, LayoutDashboard, LogOut, Menu, PlayCircle, ShieldUser, Tv2, UserCircle2, X } from "lucide-react";
+import { Globe, LayoutDashboard, LogOut, Megaphone, Menu, PlayCircle, ShieldUser, Tv2, UserCircle2, X } from "lucide-react";
 import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 
@@ -8,6 +8,7 @@ import { useAuth } from "@/lib/auth-context";
 const items = [
   { href: "/dashboard", label: "Дашборд", icon: LayoutDashboard },
   { href: "/sessions", label: "Сессии", icon: PlayCircle },
+  { href: "/ads", label: "Реклама", icon: Megaphone },
   { href: "/proxies", label: "Прокси", icon: Globe },
 ];
 
