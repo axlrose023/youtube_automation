@@ -307,7 +307,7 @@ export function AdsScreen() {
       const data = await getEmulationHistory({
         has_ads: true,
         include_captures: true,
-        page_size: 200,
+        page_size: 100,
         page: 1,
       });
       setItems(data.items);
