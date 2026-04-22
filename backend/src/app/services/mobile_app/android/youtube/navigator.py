@@ -211,11 +211,17 @@ class AndroidYouTubeNavigator:
             abandon_on_cancel=True,
         )
 
-    async def reset_to_home(self) -> None:
-        await anyio.to_thread.run_sync(
-            self._reset_to_home_sync,
-            abandon_on_cancel=True,
-        )
+    async def reset_to_home(self, *, deadline: float | None = None) -> None:
+        hard_deadline = deadline if deadline is not None else float("inf")
+
+        def _run() -> None:
+            self._thread_local.hard_deadline = hard_deadline
+            try:
+                self._reset_to_home_sync()
+            finally:
+                self._thread_local.hard_deadline = float("inf")
+
+        await anyio.to_thread.run_sync(_run, abandon_on_cancel=True)
 
     async def submit_search(self, query: str, *, deadline: float | None = None) -> None:
         hard_deadline = deadline if deadline is not None else float("inf")
@@ -514,6 +520,67 @@ class AndroidYouTubeNavigator:
             )
         return False
 
+    @staticmethod
+    def _source_has_any_id_sync(page_source: str, candidate_ids: tuple[str, ...]) -> bool:
+        return bool(page_source) and any(candidate_id in page_source for candidate_id in candidate_ids)
+
+    @classmethod
+    def _source_has_search_input_markup_sync(cls, page_source: str) -> bool:
+        return cls._source_has_any_id_sync(page_source, selectors.SEARCH_INPUT_IDS)
+
+    @classmethod
+    def _source_has_search_context_markup_sync(cls, page_source: str) -> bool:
+        return cls._source_has_search_input_markup_sync(page_source) or cls._source_has_any_id_sync(
+            page_source,
+            selectors.SEARCH_QUERY_HEADER_IDS,
+        )
+
+    @classmethod
+    def _source_has_results_surface_markup_sync(cls, page_source: str) -> bool:
+        return cls._source_has_any_id_sync(page_source, selectors.RESULTS_CONTAINER_IDS)
+
+    @classmethod
+    def _source_has_watch_surface_markup_sync(cls, page_source: str) -> bool:
+        if cls._source_has_any_id_sync(
+            page_source,
+            (
+                *selectors.WATCH_PLAYER_IDS,
+                *selectors.WATCH_PANEL_IDS,
+                *selectors.WATCH_TIME_BAR_IDS,
+            ),
+        ):
+            return True
+        lowered = page_source.casefold()
+        has_comments = any(hint.casefold() in lowered for hint in selectors.COMMENT_TEXT_HINTS)
+        has_like = any(hint.casefold() in lowered for hint in selectors.LIKE_DESCRIPTION_HINTS)
+        return has_comments and has_like
+
+    @classmethod
+    def _source_has_reel_watch_surface_markup_sync(cls, page_source: str) -> bool:
+        if cls._source_has_any_id_sync(
+            page_source,
+            (
+                *selectors.REEL_WATCH_PLAYER_IDS,
+                *selectors.REEL_WATCH_PANEL_IDS,
+                *selectors.REEL_WATCH_TIME_BAR_IDS,
+            ),
+        ):
+            return True
+        lowered = page_source.casefold()
+        return "shorts" in lowered and "reel" in lowered
+
+    @classmethod
+    def _source_is_voice_search_surface_sync(
+        cls,
+        page_source: str,
+        current_activity: str | None = None,
+    ) -> bool:
+        activity = (current_activity or "").casefold()
+        if "voice" in activity:
+            return True
+        lowered = page_source.casefold()
+        return any(hint.casefold() in lowered for hint in selectors.VOICE_SEARCH_SCREEN_HINTS)
+
     def _has_playerless_watch_shell_sync(self, page_source: str | None = None) -> bool:
         if page_source is None:
             try:
@@ -655,21 +722,33 @@ class AndroidYouTubeNavigator:
             if self._is_clean_home_surface_sync():
                 return
 
+        self._check_sync_deadline()
         self._force_stop_youtube_via_adb_sync()
+        self._check_sync_deadline()
         time.sleep(1.0)
+        self._check_sync_deadline()
         self._launch_youtube_via_adb_sync()
+        self._check_sync_deadline()
         time.sleep(2.0)
+        self._check_sync_deadline()
         self._dismiss_possible_dialogs_sync()
         if self._tap_home_button_sync():
+            self._check_sync_deadline()
             time.sleep(1.0)
+            self._check_sync_deadline()
             self._dismiss_possible_dialogs_sync()
         if self._dismiss_miniplayer_on_results_sync():
+            self._check_sync_deadline()
             time.sleep(0.8)
+            self._check_sync_deadline()
         if self._is_clean_home_surface_sync():
             return
+        self._check_sync_deadline()
         self._ensure_youtube_foreground_sync(require_interactive=True)
         if self._tap_home_button_sync():
+            self._check_sync_deadline()
             time.sleep(1.0)
+            self._check_sync_deadline()
             self._dismiss_possible_dialogs_sync()
 
     def _submit_search_sync(self, query: str) -> None:
@@ -1022,16 +1101,31 @@ class AndroidYouTubeNavigator:
         if self._has_watch_surface_sync() and not self._has_results_surface_sync():
             self._press_back_sync()
             time.sleep(1.0)
-        for _ in range(8):
+        for attempt_idx in range(8):
             sponsor_bounds = self._extract_current_sponsored_bounds_sync()
             if query and self._recover_results_after_system_dialog_sync(query):
+                logger.info(
+                    "open_first_result: query=%s attempt=%s branch=recover_after_system_dialog",
+                    query,
+                    attempt_idx + 1,
+                )
                 time.sleep(0.8)
                 continue
             if self._escape_reel_surface_for_query_sync(query):
+                logger.info(
+                    "open_first_result: query=%s attempt=%s branch=escape_reel",
+                    query,
+                    attempt_idx + 1,
+                )
                 time.sleep(0.8)
                 continue
             handled_dialog = self._dismiss_possible_dialogs_sync()
             if handled_dialog:
+                logger.info(
+                    "open_first_result: query=%s attempt=%s branch=dialog_handled",
+                    query,
+                    attempt_idx + 1,
+                )
                 time.sleep(1.0)
                 if self._is_watch_surface_for_query_sync(query):
                     if self._is_reel_watch_surface_sync():
@@ -1057,24 +1151,99 @@ class AndroidYouTubeNavigator:
                 if resolved_watch_title:
                     return resolved_watch_title
                 if self._has_stale_previous_watch_surface_sync(query):
+                    logger.info(
+                        "open_first_result: query=%s attempt=%s branch=stale_previous_watch",
+                        query,
+                        attempt_idx + 1,
+                    )
                     self._recover_results_surface_sync(query)
                     time.sleep(0.8)
                     continue
             if query and self._is_blank_youtube_shell_sync():
+                logger.info(
+                    "open_first_result: query=%s attempt=%s branch=blank_shell",
+                    query,
+                    attempt_idx + 1,
+                )
                 self._recover_results_surface_sync(query)
                 time.sleep(0.8)
                 continue
             if query:
-                self._recover_results_surface_sync(query)
+                results_surface = self._has_results_surface_sync()
+                search_context = self._has_search_context_sync()
+                watch_surface = self._has_watch_surface_sync()
+                logger.info(
+                    "open_first_result: query=%s attempt=%s branch=sponsor_entry results=%s search=%s watch=%s",
+                    query,
+                    attempt_idx + 1,
+                    results_surface,
+                    search_context,
+                    watch_surface,
+                )
+                if results_surface and search_context and not watch_surface:
+                    logger.info(
+                        "open_first_result: query=%s attempt=%s branch=skip_recover_ready_results",
+                        query,
+                        attempt_idx + 1,
+                    )
+                else:
+                    recover_started_at = time.monotonic()
+                    self._recover_results_surface_sync(query)
+                    logger.info(
+                        "open_first_result: query=%s attempt=%s branch=post_recover seconds=%.2f results=%s search=%s watch=%s",
+                        query,
+                        attempt_idx + 1,
+                        time.monotonic() - recover_started_at,
+                        self._has_results_surface_sync(),
+                        self._has_search_context_sync(),
+                        self._has_watch_surface_sync(),
+                    )
+                playable_started_at = time.monotonic()
+                playable_organic_opened = self._tap_first_playable_candidate_below_sponsor_sync(query)
+                logger.info(
+                    "open_first_result: query=%s attempt=%s branch=post_playable seconds=%.2f opened=%s",
+                    query,
+                    attempt_idx + 1,
+                    time.monotonic() - playable_started_at,
+                    playable_organic_opened,
+                )
+                if playable_organic_opened is not None:
+                    return playable_organic_opened
+                titled_started_at = time.monotonic()
+                titled_organic_opened = self._tap_first_title_below_sponsor_sync(query)
+                logger.info(
+                    "open_first_result: query=%s attempt=%s branch=post_title seconds=%.2f opened=%s",
+                    query,
+                    attempt_idx + 1,
+                    time.monotonic() - titled_started_at,
+                    titled_organic_opened,
+                )
+                if titled_organic_opened is not None:
+                    return titled_organic_opened
             if self._advance_past_short_only_results_sync(query):
+                logger.info(
+                    "open_first_result: query=%s attempt=%s branch=advance_past_nonorganic",
+                    query,
+                    attempt_idx + 1,
+                )
                 time.sleep(0.8)
                 continue
             if self._has_watch_surface_sync() and not self._is_watch_surface_for_query_sync(query):
                 if not self._has_results_surface_sync():
+                    logger.info(
+                        "open_first_result: query=%s attempt=%s branch=back_from_wrong_watch",
+                        query,
+                        attempt_idx + 1,
+                    )
                     self._press_back_sync()
                     time.sleep(1.0)
                     continue
             if not self._has_results_surface_sync():
+                logger.info(
+                    "open_first_result: query=%s attempt=%s branch=no_results_surface",
+                    query,
+                    attempt_idx + 1,
+                )
                 time.sleep(0.8)
                 continue
 
@@ -1153,10 +1322,6 @@ class AndroidYouTubeNavigator:
                 top_result_opened = self._tap_top_result_region_sync(query)
                 if top_result_opened is not None:
                     return top_result_opened
-            else:
-                titled_organic_opened = self._tap_first_title_below_sponsor_sync(query)
-                if titled_organic_opened is not None:
-                    return titled_organic_opened
 
             for candidate_id in selectors.RESULT_TITLE_IDS:
                 elements = self._driver.find_elements("id", candidate_id)
@@ -1229,7 +1394,11 @@ class AndroidYouTubeNavigator:
         for x in (left_x, right_x):
             if not self._tap_via_adb_sync(x, candidate_y):
                 continue
-            if self._wait_for_watch_surface_sync(query=query, timeout_seconds=8.0):
+            if self._wait_for_watch_surface_sync(
+                query=query,
+                timeout_seconds=8.0,
+                allow_heavy_dialog_recovery=False,
+            ):
                 return True
             time.sleep(0.6)
         return False
@@ -1242,7 +1411,9 @@ class AndroidYouTubeNavigator:
         if root is None:
             return None
 
-        sponsor_bounds = self._extract_sponsor_cta_bounds_sync()
+        sponsor_bounds = self._extract_current_sponsored_bounds_sync()
+        if not sponsor_bounds:
+            sponsor_bounds = self._extract_sponsor_cta_bounds_sync()
         sponsor_bottom = max((bounds[3] for bounds in sponsor_bounds), default=0)
         results_bounds = self._extract_results_bounds_sync()
         results_left = results_bounds[0] if results_bounds is not None else 0
@@ -1251,6 +1422,7 @@ class AndroidYouTubeNavigator:
         short_bounds = self._extract_short_result_bounds_sync()
 
         candidates: list[NativeResultCandidate] = []
+        seen: set[tuple[str, tuple[int, int, int, int]]] = set()
         for node in root.iter():
             resource_id = (node.attrib.get("resource-id") or "").strip()
             if resource_id not in selectors.RESULT_TITLE_IDS:
@@ -1274,17 +1446,20 @@ class AndroidYouTubeNavigator:
                 min(results_right, max(right + 24, results_right - 32)),
                 min(results_bottom, bottom + 220),
             )
-            candidates.append(
-                NativeResultCandidate(
-                    title=text,
-                    bounds=tap_bounds,
-                    is_short=any(
-                        self._bounds_overlap_sync(tap_bounds, short_bound)
-                        for short_bound in short_bounds
-                    ),
-                    is_sponsored=False,
-                )
+            candidate = NativeResultCandidate(
+                title=text,
+                bounds=tap_bounds,
+                is_short=any(
+                    self._bounds_overlap_sync(tap_bounds, short_bound)
+                    for short_bound in short_bounds
+                ),
+                is_sponsored=False,
             )
+            key = (candidate.title, candidate.bounds)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(candidate)
 
         candidates.sort(key=lambda item: (item.bounds[1], item.bounds[0]))
         candidates.sort(
@@ -1299,6 +1474,243 @@ class AndroidYouTubeNavigator:
                 continue
             if self._tap_result_candidate_sync(candidate, query):
                 return candidate.title
+        return None
+
+    def _tap_first_playable_candidate_below_sponsor_sync(self, query: str) -> str | None:
+        logger.info("sponsor_fallback_enter: query=%s", query)
+        cta_started_at = time.monotonic()
+        cta_bounds = self._extract_sponsor_cta_bounds_sync()
+        logger.info(
+            "sponsor_fallback_step: query=%s step=cta_bounds seconds=%.2f count=%s",
+            query,
+            time.monotonic() - cta_started_at,
+            len(cta_bounds),
+        )
+        sponsor_started_at = time.monotonic()
+        sponsor_bounds = self._extract_current_sponsored_bounds_sync()
+        logger.info(
+            "sponsor_fallback_step: query=%s step=sponsor_bounds seconds=%.2f count=%s",
+            query,
+            time.monotonic() - sponsor_started_at,
+            len(sponsor_bounds),
+        )
+        candidate_cutoff = max(
+            (
+                bounds[3]
+                for bounds in (
+                    cta_bounds
+                    if cta_bounds
+                    else sponsor_bounds
+                )
+            ),
+            default=0,
+        )
+
+        raw_playable_started_at = time.monotonic()
+        raw_playable_candidates = self._extract_result_candidates_from_page_source_sync()
+        logger.info(
+            "sponsor_fallback_step: query=%s step=raw_playable seconds=%.2f count=%s",
+            query,
+            time.monotonic() - raw_playable_started_at,
+            len(raw_playable_candidates),
+        )
+        raw_text_started_at = time.monotonic()
+        raw_text_candidates = self._extract_text_result_candidates_from_page_source_sync(query)
+        logger.info(
+            "sponsor_fallback_step: query=%s step=raw_text seconds=%.2f count=%s",
+            query,
+            time.monotonic() - raw_text_started_at,
+            len(raw_text_candidates),
+        )
+        logger.info(
+            "sponsor_fallback_scan: query=%s cutoff=%s cta_bounds=%s sponsor_bounds=%s raw_playable=%s raw_text=%s",
+            query,
+            candidate_cutoff,
+            cta_bounds[:4],
+            sponsor_bounds[:4],
+            [
+                (candidate.title, candidate.bounds, candidate.is_sponsored, candidate.is_short)
+                for candidate in raw_playable_candidates[:4]
+            ],
+            [
+                (candidate.title, candidate.bounds, candidate.is_sponsored, candidate.is_short)
+                for candidate in raw_text_candidates[:4]
+            ],
+        )
+
+        candidates: list[NativeResultCandidate] = []
+        relaxed_cutoff_used = False
+        seen: set[tuple[str, tuple[int, int, int, int]]] = set()
+        for candidate in (
+            *raw_playable_candidates,
+            *raw_text_candidates,
+        ):
+            key = (candidate.title, candidate.bounds)
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.is_short:
+                continue
+            if self._should_skip_result_title_for_query_sync(candidate.title, query):
+                continue
+            title_overlap = self._titles_overlap_sync(candidate.title, query)
+            title_score = self._score_result_title_for_query_sync(candidate.title, query)
+            if not title_overlap and title_score < 5.0:
+                continue
+            if candidate.bounds[1] <= candidate_cutoff + 24:
+                continue
+            candidates.append(candidate)
+
+        if any(not candidate.is_sponsored for candidate in candidates):
+            candidates = [candidate for candidate in candidates if not candidate.is_sponsored]
+
+        if not candidates and not cta_bounds:
+            relaxed_candidates: list[NativeResultCandidate] = []
+            seen_relaxed: set[tuple[str, tuple[int, int, int, int]]] = set()
+            for candidate in (
+                *raw_playable_candidates,
+                *raw_text_candidates,
+            ):
+                key = (candidate.title, candidate.bounds)
+                if key in seen_relaxed:
+                    continue
+                seen_relaxed.add(key)
+                if candidate.is_short or candidate.is_sponsored:
+                    continue
+                if self._should_skip_result_title_for_query_sync(candidate.title, query):
+                    continue
+                title_overlap = self._titles_overlap_sync(candidate.title, query)
+                title_score = self._score_result_title_for_query_sync(candidate.title, query)
+                if not title_overlap and title_score < 5.0:
+                    continue
+                relaxed_candidates.append(candidate)
+            if relaxed_candidates:
+                logger.info(
+                    "sponsor_fallback_relaxed_cutoff: query=%s cutoff=%s candidates=%s",
+                    query,
+                    candidate_cutoff,
+                    [
+                        (candidate.title, candidate.bounds)
+                        for candidate in relaxed_candidates[:4]
+                    ],
+                )
+                candidates = relaxed_candidates
+                relaxed_cutoff_used = True
+
+        logger.info(
+            "sponsor_fallback_filtered: query=%s candidates=%s",
+            query,
+            [
+                (candidate.title, candidate.bounds)
+                for candidate in candidates[:4]
+            ],
+        )
+        candidates.sort(
+            key=lambda item: (
+                -self._score_result_title_for_query_sync(item.title, query),
+                item.bounds[1],
+                item.bounds[0],
+            )
+        )
+        for candidate in candidates:
+            logger.info(
+                "sponsor_fallback: query=%s cutoff=%s candidate=%s bounds=%s",
+                query,
+                candidate_cutoff,
+                candidate.title,
+                candidate.bounds,
+            )
+            opened_title = self._tap_result_candidate_hotspots_sync(
+                candidate,
+                query,
+                prefer_center_first=relaxed_cutoff_used and not candidate.is_sponsored,
+            )
+            if opened_title is not None:
+                return opened_title
+        return None
+
+    def _tap_result_candidate_hotspots_sync(
+        self,
+        candidate: NativeResultCandidate,
+        query: str,
+        *,
+        prefer_center_first: bool = False,
+    ) -> str | None:
+        self._last_tapped_result_title = candidate.title
+        self._last_tapped_result_is_short = candidate.is_short
+
+        left, top, right, bottom = candidate.bounds
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        tap_points: list[tuple[int, int]] = []
+        if prefer_center_first:
+            tap_points.append((int(left + width * 0.45), int(top + height * 0.35)))
+        tap_points.extend([
+            (int(left + width * 0.28), int(top + height * 0.22)),
+            (int(left + width * 0.72), int(top + height * 0.22)),
+            (int(left + width * 0.34), int(top + height * 0.76)),
+            (int(left + width * 0.66), int(top + height * 0.76)),
+            (int(left + width * 0.50), int(top + height * 0.32)),
+        ])
+        seen_points: set[tuple[int, int]] = set()
+        for x, y in tap_points:
+            point = (x, y)
+            if point in seen_points:
+                continue
+            seen_points.add(point)
+            logger.info(
+                "sponsor_fallback_tap_attempt: title=%s point=(%s,%s)",
+                candidate.title,
+                x,
+                y,
+            )
+            tap_sent = self._tap_via_adb_sync(x, y)
+            logger.info(
+                "sponsor_fallback_tap_sent: title=%s point=(%s,%s) sent=%s",
+                candidate.title,
+                x,
+                y,
+                tap_sent,
+            )
+            if not tap_sent:
+                continue
+            opened = self._await_watch_open_after_tap_sync(query=query, timeout_seconds=7.5)
+            logger.info(
+                "sponsor_fallback_tap: title=%s point=(%s,%s) opened=%s",
+                candidate.title,
+                x,
+                y,
+                opened,
+            )
+            if opened:
+                if self._reject_reel_watch_surface_sync():
+                    self._recover_results_surface_sync(query)
+                    time.sleep(0.8)
+                    continue
+                resolved_title = (
+                    self._extract_current_watch_title_for_query_sync(query)
+                    or self._extract_current_watch_title_sync()
+                )
+                if (
+                    query
+                    and resolved_title
+                    and not self._titles_overlap_sync(resolved_title, query)
+                    and not self._is_reasonable_topic_video_title_sync(resolved_title, query)
+                ):
+                    logger.info(
+                        "sponsor_fallback_reject_opened: candidate=%s resolved=%s",
+                        candidate.title,
+                        resolved_title,
+                    )
+                    self._recover_results_surface_sync(query)
+                    time.sleep(0.8)
+                    continue
+                return resolved_title or candidate.title
+            if not self._has_results_surface_sync():
+                self._recover_results_surface_sync(query)
+                time.sleep(0.8)
+            else:
+                time.sleep(0.6)
         return None
 
     def _describe_surface_sync(self) -> tuple[str | None, str | None, int]:
@@ -1385,12 +1797,13 @@ class AndroidYouTubeNavigator:
                 return self._last_tapped_result_title
         return None
 
-    def _dismiss_possible_dialogs_sync(self) -> bool:
+    def _dismiss_possible_dialogs_sync(self, *, allow_heavy_adb: bool = True) -> bool:
         handled_any = False
         for _ in range(4):
+            self._check_sync_deadline()
             handled = False
-            handled = self._dismiss_system_dialog_sync() or handled
-            if self._has_system_dialog_overlay_via_adb_sync():
+            handled = self._dismiss_system_dialog_sync(allow_heavy_adb=allow_heavy_adb) or handled
+            if allow_heavy_adb and self._has_system_dialog_overlay_via_adb_sync():
                 if handled:
                     handled_any = True
                     time.sleep(0.8)
@@ -1403,12 +1816,12 @@ class AndroidYouTubeNavigator:
             time.sleep(0.8)
         return handled_any
 
-    def _dismiss_system_dialog_sync(self) -> bool:
-        if self._dismiss_system_dialogs_via_adb_sync():
+    def _dismiss_system_dialog_sync(self, *, allow_heavy_adb: bool = True) -> bool:
+        if allow_heavy_adb and self._dismiss_system_dialogs_via_adb_sync():
             return True
-        if self._has_system_dialog_overlay_via_adb_sync():
+        if allow_heavy_adb and self._has_system_dialog_overlay_via_adb_sync():
             return False
-        if self._adb_serial:
+        if self._adb_serial and allow_heavy_adb:
             return False
         for candidate_id in selectors.SYSTEM_DIALOG_WAIT_IDS:
             try:
@@ -1436,11 +1849,11 @@ class AndroidYouTubeNavigator:
                 except Exception:
                     continue
         if not self._has_system_dialog_overlay_sync():
-            return self._dismiss_system_dialogs_via_adb_sync()
+            return self._dismiss_system_dialogs_via_adb_sync() if allow_heavy_adb else False
         if self._tap_system_dialog_wait_via_adb_sync():
             time.sleep(0.8)
             return True
-        if self._tap_system_dialog_wait_via_adb_dump_sync():
+        if allow_heavy_adb and self._tap_system_dialog_wait_via_adb_dump_sync():
             time.sleep(0.8)
             return True
         return False
@@ -2243,6 +2656,16 @@ class AndroidYouTubeNavigator:
             text=True,
             timeout=30,
         )
+        if result.returncode != 0:
+            logger.info(
+                "adb_tap_failed: serial=%s point=(%s,%s) code=%s stdout=%s stderr=%s",
+                self._adb_serial,
+                x,
+                y,
+                result.returncode,
+                (result.stdout or "").strip()[:240],
+                (result.stderr or "").strip()[:240],
+            )
         return result.returncode == 0
 
     def _find_video_result_cards_sync(self) -> list[object]:
@@ -2473,6 +2896,8 @@ class AndroidYouTubeNavigator:
                     break
             except Exception:
                 continue
+        if not has_results_container and self._extract_results_bounds_sync() is not None:
+            has_results_container = True
         if has_search_context and self._has_openable_result_sync():
             return True
         if self._has_watch_surface_sync():
@@ -3229,7 +3654,25 @@ class AndroidYouTubeNavigator:
         query: str | None,
         timeout_seconds: float,
     ) -> bool:
-        if self._wait_for_watch_surface_sync(query=query, timeout_seconds=timeout_seconds):
+        logger.info(
+            "await_watch_open_after_tap:start query=%s timeout=%.2f",
+            query,
+            timeout_seconds,
+        )
+        started_at = time.monotonic()
+        watch_opened = self._wait_for_watch_surface_sync(
+            query=query,
+            timeout_seconds=timeout_seconds,
+            allow_heavy_dialog_recovery=False,
+        )
+        wait_elapsed = time.monotonic() - started_at
+        logger.info(
+            "await_watch_open_after_tap:after_wait query=%s watch_opened=%s elapsed=%.2f",
+            query,
+            watch_opened,
+            wait_elapsed,
+        )
+        if watch_opened:
             return True
         if not query:
             return False
@@ -3245,6 +3688,11 @@ class AndroidYouTubeNavigator:
             query,
             timeout_seconds=min(4.0, max(1.6, timeout_seconds * 0.5)),
         )
+        logger.info(
+            "await_watch_open_after_tap:after_title query=%s delayed_title=%s",
+            query,
+            delayed_title,
+        )
         return bool(delayed_title)
 
     def _reject_reel_watch_surface_sync(self) -> bool:
@@ -3259,15 +3707,83 @@ class AndroidYouTubeNavigator:
         self._dismiss_miniplayer_on_results_sync()
         return True
 
-    def _wait_for_watch_surface_sync(self, query: str | None = None, timeout_seconds: float = 7.5) -> bool:
-        deadline = time.monotonic() + timeout_seconds
+    def _wait_for_watch_surface_sync(
+        self,
+        query: str | None = None,
+        timeout_seconds: float = 7.5,
+        *,
+        allow_heavy_dialog_recovery: bool = True,
+    ) -> bool:
+        hard_deadline = getattr(self._thread_local, "hard_deadline", float("inf"))
+        started_at = time.monotonic()
+        deadline = min(started_at + timeout_seconds, hard_deadline)
         settle_deadline: float | None = None
         while time.monotonic() < deadline:
-            handled_dialog = self._dismiss_possible_dialogs_sync()
+            self._check_sync_deadline()
+            handled_dialog = self._dismiss_possible_dialogs_sync(
+                allow_heavy_adb=allow_heavy_dialog_recovery,
+            )
             if handled_dialog:
-                deadline = max(deadline, time.monotonic() + 2.0)
-            if self._safe_current_package_sync() != self._config.youtube_package:
+                deadline = min(max(deadline, time.monotonic() + 2.0), hard_deadline)
+            current_package = self._safe_current_package_sync()
+            if current_package != self._config.youtube_package:
                 return False
+            if not allow_heavy_dialog_recovery:
+                current_activity = self._safe_current_activity_sync()
+                try:
+                    page_source = self._driver.page_source or ""
+                except Exception:
+                    page_source = ""
+                has_search_input = self._source_has_search_input_markup_sync(page_source)
+                has_search_context = has_search_input or self._source_has_search_context_markup_sync(
+                    page_source,
+                )
+                has_results = self._source_has_results_surface_markup_sync(page_source)
+                has_watch = self._source_has_watch_surface_markup_sync(page_source)
+                if query:
+                    if self._source_has_reel_watch_surface_markup_sync(page_source):
+                        return False
+                    if self._has_playerless_watch_shell_sync(page_source):
+                        time.sleep(0.4)
+                        continue
+                    if has_search_input or self._source_is_voice_search_surface_sync(
+                        page_source,
+                        current_activity,
+                    ):
+                        return False
+                    if has_watch and not has_search_context and not has_results:
+                        return True
+                    lowered_activity = (current_activity or "").casefold()
+                    if (
+                        not has_search_context
+                        and not has_results
+                        and not self._last_tapped_result_is_short
+                        and (
+                            "watchwhile" in lowered_activity
+                            or "internalmainactivity" in lowered_activity
+                        )
+                    ):
+                        return True
+                    if has_watch and (has_search_context or has_results):
+                        if settle_deadline is None:
+                            settle_deadline = min(deadline, time.monotonic() + 1.2)
+                        if time.monotonic() < settle_deadline:
+                            time.sleep(0.35)
+                            continue
+                else:
+                    if (
+                        has_watch
+                        and not has_search_context
+                        and not has_results
+                        and not self._has_playerless_watch_shell_sync(page_source)
+                        and not self._source_has_reel_watch_surface_markup_sync(page_source)
+                        and not self._source_is_voice_search_surface_sync(page_source, current_activity)
+                    ):
+                        return True
+                    if has_search_input:
+                        return False
+                time.sleep(0.4)
+                continue
             if query:
                 if self._is_reel_watch_surface_sync() or self._is_reel_watch_surface_via_adb_sync():
                     return False
@@ -3289,6 +3805,15 @@ class AndroidYouTubeNavigator:
             if self._is_voice_search_surface_sync() or self._is_search_input_visible_sync():
                 return False
             time.sleep(0.4)
+        elapsed = time.monotonic() - started_at
+        if elapsed > max(timeout_seconds + 2.0, timeout_seconds * 1.5):
+            logger.warning(
+                "wait_for_watch_surface:slow query=%s timeout=%.2f elapsed=%.2f heavy_dialog=%s",
+                query,
+                timeout_seconds,
+                elapsed,
+                allow_heavy_dialog_recovery,
+            )
         return False
 
     def _extract_title_result_candidates_from_page_source_sync(self) -> list[NativeResultCandidate]:
@@ -3416,6 +3941,28 @@ class AndroidYouTubeNavigator:
         candidates.sort(key=lambda item: (item.bounds[1], item.bounds[0]))
         return candidates
 
+    @staticmethod
+    def _normalize_playable_candidate_bounds_sync(
+        bounds: tuple[int, int, int, int],
+        results_bounds: tuple[int, int, int, int] | None,
+    ) -> tuple[int, int, int, int]:
+        if results_bounds is None:
+            return bounds
+        left, top, right, bottom = bounds
+        results_left, results_top, results_right, results_bottom = results_bounds
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        min_useful_height = 96
+        min_useful_width = int((results_right - results_left) * 0.55)
+        if height >= min_useful_height and width >= min_useful_width:
+            return bounds
+        return (
+            results_left,
+            max(results_top, top - max(180, height * 12)),
+            results_right,
+            min(results_bottom, bottom + max(220, height * 18)),
+        )
+
     def _extract_short_result_bounds_sync(self) -> list[tuple[int, int, int, int]]:
         return [
             candidate.bounds
@@ -3466,9 +4013,10 @@ class AndroidYouTubeNavigator:
             title = desc.split(" - ", 1)[0].strip()
             if not title or self._is_placeholder_result_title(title):
                 continue
+            candidate_bounds = self._normalize_playable_candidate_bounds_sync(bounds, results_bounds)
             candidate = NativeResultCandidate(
                 title=title,
-                bounds=bounds,
+                bounds=candidate_bounds,
                 is_short="play short" in lowered,
                 is_sponsored=("sponsored" in lowered or "sponsor" in lowered or "спонс" in lowered) or any(
                     self._bounds_overlap_sync(bounds, sponsor)
@@ -3952,41 +4500,58 @@ class AndroidYouTubeNavigator:
 
     def _extract_sponsored_bounds_sync(self, root: object) -> list[tuple[int, int, int, int]]:
         sponsored_bounds: list[tuple[int, int, int, int]] = []
+        cta_labels = {label.casefold() for label in selectors.AD_CTA_DESCRIPTIONS}
         for node in root.iter():
             text = (node.attrib.get("text") or "").strip().casefold()
             content_desc = (node.attrib.get("content-desc") or "").strip().casefold()
-            if not (
+            has_sponsored_label = (
                 "sponsored" in text
                 or "sponsored" in content_desc
                 or "спонс" in text
                 or "спонс" in content_desc
                 or "реклама" in text
-            ):
+            )
+            has_cta_label = any(value in cta_labels for value in (text, content_desc) if value)
+            if not has_sponsored_label and not has_cta_label:
                 continue
             bounds = self._parse_bounds_sync(node.attrib.get("bounds"))
             if bounds is not None:
                 left, top, right, bottom = bounds
-                width = max(0, right - left)
-                height = max(0, bottom - top)
-                is_large_card = width >= 700 or height >= 260
-                if is_large_card:
-                    expand_top = 48
-                    expand_bottom = 32
-                    expand_left = 0
-                    expand_right = 0
-                else:
-                    expand_top = 220
-                    expand_bottom = 120
-                    expand_left = 48
-                    expand_right = 48
-                sponsored_bounds.append(
-                    (
-                        max(0, left - expand_left),
-                        max(0, top - expand_top),
-                        max(right + expand_right, 1080),
-                        bottom + expand_bottom,
+                if has_cta_label:
+                    # Search-result ads often omit a visible "Sponsored" label in Appium XML,
+                    # but reliably expose CTA buttons like "Visit site" / "Learn more".
+                    # Expand that CTA region upward to cover the full ad card so result taps
+                    # below it can skip the sponsored block.
+                    sponsored_bounds.append(
+                        (
+                            0,
+                            max(0, top - 860),
+                            1080,
+                            bottom + 140,
+                        )
                     )
-                )
+                else:
+                    width = max(0, right - left)
+                    height = max(0, bottom - top)
+                    is_large_card = width >= 700 or height >= 260
+                    if is_large_card:
+                        expand_top = 48
+                        expand_bottom = 32
+                        expand_left = 0
+                        expand_right = 0
+                    else:
+                        expand_top = 220
+                        expand_bottom = 120
+                        expand_left = 48
+                        expand_right = 48
+                    sponsored_bounds.append(
+                        (
+                            max(0, left - expand_left),
+                            max(0, top - expand_top),
+                            max(right + expand_right, 1080),
+                            bottom + expand_bottom,
+                        )
+                    )
         return sponsored_bounds
 
     def _extract_sponsor_cta_bounds_sync(self) -> list[tuple[int, int, int, int]]:

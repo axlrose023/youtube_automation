@@ -98,6 +98,24 @@ function getAnalysisLabel(result: string | null, status?: string | null) {
   return "Нет анализа";
 }
 
+function formatWatchTiming(
+  watchedSeconds: number | null | undefined,
+  targetSeconds: number | null | undefined,
+) {
+  const watched = typeof watchedSeconds === "number" && Number.isFinite(watchedSeconds)
+    ? watchedSeconds
+    : 0;
+  const target = typeof targetSeconds === "number" && Number.isFinite(targetSeconds)
+    ? targetSeconds
+    : null;
+
+  if (target === null) {
+    return `${watched.toFixed(1)}с факт`;
+  }
+
+  return `${watched.toFixed(1)}с факт / ${target.toFixed(1)}с план`;
+}
+
 function formatCaptureStatus(status: string | null | undefined) {
   switch (status) {
     case "completed":
@@ -1050,10 +1068,10 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                   {liveStatus.current_watch.search_keyword || "без ключевого запроса"}
                 </div>
                 <div className="text-sm text-[var(--muted)]">
-                  {liveStatus.current_watch.watched_seconds.toFixed(1)}с факт
-                  {liveStatus.current_watch.target_seconds
-                    ? ` / ${liveStatus.current_watch.target_seconds.toFixed(1)}с план`
-                    : ""}
+                  {formatWatchTiming(
+                    liveStatus.current_watch.watched_seconds,
+                    liveStatus.current_watch.target_seconds,
+                  )}
                 </div>
               </div>
             ) : (
@@ -1153,8 +1171,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                         <div className="text-sm font-medium text-[var(--ink)]">{video.title}</div>
                         <div className="mt-0.5 text-xs text-[var(--muted)]">
                           {video.search_keyword || "без поискового запроса"} ·{" "}
-                          {video.watched_seconds.toFixed(1)}с факт /{" "}
-                          {video.target_seconds.toFixed(1)}с план
+                          {formatWatchTiming(video.watched_seconds, video.target_seconds)}
                         </div>
                       </div>
                       <Badge tone={video.runtime ? "info" : video.completed ? "success" : "warning"}>

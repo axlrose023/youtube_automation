@@ -9,7 +9,7 @@ from app.services.mobile_app.android.runner import (
     AndroidYouTubeProbeRunner,
     AndroidYouTubeSessionRunner,
 )
-from app.services.mobile_app.models import AndroidWatchSample
+from app.services.mobile_app.models import AndroidSessionTopicResult, AndroidWatchSample
 from app.services.mobile_app.android.youtube.watcher import AndroidWatchResult
 
 
@@ -124,8 +124,16 @@ async def test_continue_main_watch_uses_timeout_above_watcher_internal_budget(
         return await awaitable
 
     class FakeWatcher:
-        async def watch_current(self, *, watch_seconds: int):
+        async def watch_current(
+            self,
+            *,
+            watch_seconds: int,
+            sample_interval_seconds: int | None = None,
+            deadline: float | None = None,
+        ):
             assert watch_seconds == 12
+            assert sample_interval_seconds == 2
+            assert isinstance(deadline, float)
             return AndroidWatchResult(
                 verified=True,
                 samples=[
@@ -160,6 +168,16 @@ async def test_continue_main_watch_uses_timeout_above_watcher_internal_budget(
     assert note == "main_watch_extended:12"
     assert extension_result is not None
     assert next_result.samples[-1].offset_seconds == 13
+
+
+def test_opened_title_matches_topic_accepts_forex_strategy_without_literal_forex() -> None:
+    assert (
+        AndroidYouTubeSessionRunner._opened_title_matches_topic(
+            "This Simple Trading Strategy got me 80% Win Rate",
+            "forex trading strategy",
+        )
+        is True
+    )
 
 
 def test_topic_has_meaningful_progress_for_opened_title() -> None:
@@ -208,6 +226,73 @@ def test_should_retry_topic_attempt_skips_when_session_nearly_done(
     )
 
     assert should_retry is False
+
+
+def test_next_topic_start_buffer_keeps_full_budget_before_first_topic() -> None:
+    runner = AndroidYouTubeSessionRunner.__new__(AndroidYouTubeSessionRunner)
+    runner._config = SimpleNamespace(
+        android_app=SimpleNamespace(session_topic_start_buffer_seconds=180)
+    )
+
+    buffer_seconds = runner._next_topic_start_buffer_seconds(
+        topics=["quantum ai trading", "forex trading strategy", "ai trading bot"],
+        topic_results=[],
+        topics_cycled_once=False,
+    )
+
+    assert buffer_seconds == 180.0
+
+
+def test_next_topic_start_buffer_shrinks_after_progress() -> None:
+    runner = AndroidYouTubeSessionRunner.__new__(AndroidYouTubeSessionRunner)
+    runner._config = SimpleNamespace(
+        android_app=SimpleNamespace(session_topic_start_buffer_seconds=180)
+    )
+
+    buffer_seconds = runner._next_topic_start_buffer_seconds(
+        topics=["quantum ai trading", "forex trading strategy", "ai trading bot"],
+        topic_results=[
+            AndroidSessionTopicResult(topic="quantum ai trading", watch_verified=True)
+        ],
+        topics_cycled_once=False,
+    )
+
+    assert buffer_seconds == 105.0
+
+
+def test_next_topic_start_buffer_allows_last_uncovered_topic() -> None:
+    runner = AndroidYouTubeSessionRunner.__new__(AndroidYouTubeSessionRunner)
+    runner._config = SimpleNamespace(
+        android_app=SimpleNamespace(session_topic_start_buffer_seconds=180)
+    )
+
+    buffer_seconds = runner._next_topic_start_buffer_seconds(
+        topics=["quantum ai trading", "forex trading strategy", "ai trading bot"],
+        topic_results=[
+            AndroidSessionTopicResult(topic="quantum ai trading", watch_verified=True),
+            AndroidSessionTopicResult(topic="forex trading strategy", watch_verified=True),
+        ],
+        topics_cycled_once=False,
+    )
+
+    assert buffer_seconds == 75.0
+
+
+def test_next_topic_start_buffer_uses_repeat_cycle_floor() -> None:
+    runner = AndroidYouTubeSessionRunner.__new__(AndroidYouTubeSessionRunner)
+    runner._config = SimpleNamespace(
+        android_app=SimpleNamespace(session_topic_start_buffer_seconds=180)
+    )
+
+    buffer_seconds = runner._next_topic_start_buffer_seconds(
+        topics=["quantum ai trading", "forex trading strategy", "ai trading bot"],
+        topic_results=[
+            AndroidSessionTopicResult(topic="quantum ai trading", watch_verified=True)
+        ],
+        topics_cycled_once=True,
+    )
+
+    assert buffer_seconds == 60.0
 
 
 @pytest.mark.asyncio

@@ -422,6 +422,10 @@ class AppiumSessionProvider:
             )
             command_executor = AppiumConnection(
                 remote_server_addr=self._config.appium_server_url,
+                init_args_for_pool_manager={
+                    "maxsize": 8,
+                    "block": False,
+                },
                 client_config=client_config,
             )
             return webdriver.Remote(command_executor=command_executor, options=options)

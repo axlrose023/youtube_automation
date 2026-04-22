@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -34,6 +35,12 @@ class AndroidYouTubeWatcher:
         self._driver = driver
         self._config = config
         self._adb_serial = adb_serial
+        self._thread_local = threading.local()
+
+    def _check_sync_deadline(self) -> None:
+        deadline = getattr(self._thread_local, "hard_deadline", float("inf"))
+        if time.monotonic() > deadline:
+            raise AndroidUiError("watch sync operation hard deadline exceeded")
 
     async def watch_current(
         self,
@@ -41,20 +48,43 @@ class AndroidYouTubeWatcher:
         watch_seconds: int,
         timeout_grace_seconds: float = 35.0,
         timeout_floor_seconds: float = 45.0,
+        sample_interval_seconds: int | None = None,
+        deadline: float | None = None,
     ) -> AndroidWatchResult:
         timeout_seconds = max(
             float(watch_seconds) + float(timeout_grace_seconds),
             float(timeout_floor_seconds),
         )
-        with anyio.move_on_after(timeout_seconds) as scope:
+        started_at = time.monotonic()
+        effective_timeout_seconds = timeout_seconds
+        if deadline is not None:
+            effective_timeout_seconds = min(
+                timeout_seconds,
+                max(1.0, deadline - started_at + 0.5),
+            )
+        hard_deadline = min(
+            deadline if deadline is not None else float("inf"),
+            started_at + effective_timeout_seconds,
+        )
+
+        def _run() -> AndroidWatchResult:
+            self._thread_local.hard_deadline = hard_deadline
+            try:
+                return self._watch_current_sync(
+                    watch_seconds,
+                    sample_interval_seconds=sample_interval_seconds,
+                )
+            finally:
+                self._thread_local.hard_deadline = float("inf")
+
+        with anyio.move_on_after(effective_timeout_seconds) as scope:
             result = await anyio.to_thread.run_sync(
-                self._watch_current_sync,
-                watch_seconds,
+                _run,
                 abandon_on_cancel=True,
             )
         if scope.cancel_called:
             raise AndroidUiError(
-                f"Timed out collecting watch samples after {int(timeout_seconds)}s"
+                f"Timed out collecting watch samples after {int(effective_timeout_seconds)}s"
             )
         return result
 
@@ -88,8 +118,17 @@ class AndroidYouTubeWatcher:
             raise AndroidUiError("Timed out restoring primary watch surface")
         return result
 
-    def _watch_current_sync(self, watch_seconds: int) -> AndroidWatchResult:
-        interval = max(1, self._config.probe_watch_sample_interval_seconds)
+    def _watch_current_sync(
+        self,
+        watch_seconds: int,
+        *,
+        sample_interval_seconds: int | None = None,
+    ) -> AndroidWatchResult:
+        self._check_sync_deadline()
+        interval = max(
+            1,
+            sample_interval_seconds or self._config.probe_watch_sample_interval_seconds,
+        )
         sample_offsets = list(range(0, max(watch_seconds, 1), interval))
         if not sample_offsets or sample_offsets[-1] != watch_seconds:
             sample_offsets.append(watch_seconds)
@@ -101,9 +140,11 @@ class AndroidYouTubeWatcher:
         best_ad_page_source_score = -1
 
         for offset in sample_offsets:
+            self._check_sync_deadline()
             remaining = started + offset - time.monotonic()
             if remaining > 0:
                 time.sleep(remaining)
+            self._check_sync_deadline()
             sample, sample_page_source = self._collect_sample_sync(offset)
             samples.append(sample)
             if sample.ad_detected and sample_page_source:
@@ -114,6 +155,7 @@ class AndroidYouTubeWatcher:
             if sample.is_reel_surface:
                 break
             if nudged_playback_count < 2 and self._should_nudge_playback(samples):
+                self._check_sync_deadline()
                 if self._nudge_playback_sync():
                     nudged_playback_count += 1
                     time.sleep(1.0)
@@ -126,6 +168,7 @@ class AndroidYouTubeWatcher:
         )
 
     def _collect_sample_sync(self, offset_seconds: int) -> tuple[AndroidWatchSample, str | None]:
+        self._check_sync_deadline()
         self._dismiss_system_dialog_sync()
         page_source = self._safe_page_source_sync()
         package = self._safe_driver_attr_sync("current_package")
@@ -384,6 +427,7 @@ class AndroidYouTubeWatcher:
         return not (player_visible or watch_panel_visible or results_visible)
 
     def _dismiss_system_dialog_sync(self) -> bool:
+        self._check_sync_deadline()
         page_source = self._safe_page_source_sync()
         lowered = page_source.casefold()
         has_dialog_hint = any(
@@ -453,6 +497,7 @@ class AndroidYouTubeWatcher:
         return False
 
     def _dump_ui_hierarchy_via_adb_sync(self, *, timeout_seconds: float = 6.0) -> str | None:
+        self._check_sync_deadline()
         if not self._adb_serial:
             return None
         adb_bin = require_tool_path("adb")
@@ -495,11 +540,13 @@ class AndroidYouTubeWatcher:
         return cat_result.stdout or None
 
     def _wait_for_adb_device_sync(self, *, timeout_seconds: float) -> bool:
+        self._check_sync_deadline()
         if not self._adb_serial:
             return False
         adb_bin = require_tool_path("adb")
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
+            self._check_sync_deadline()
             result = subprocess.run(
                 [
                     adb_bin,
@@ -519,6 +566,7 @@ class AndroidYouTubeWatcher:
         return False
 
     def _safe_page_source_sync(self) -> str:
+        self._check_sync_deadline()
         try:
             return self._driver.page_source or ""
         except Exception as exc:
@@ -527,6 +575,7 @@ class AndroidYouTubeWatcher:
             return ""
 
     def _safe_driver_attr_sync(self, name: str) -> str | None:
+        self._check_sync_deadline()
         try:
             return getattr(self._driver, name)
         except Exception as exc:
@@ -536,6 +585,7 @@ class AndroidYouTubeWatcher:
 
     def _has_any_id_sync(self, candidate_ids: tuple[str, ...]) -> bool:
         for candidate_id in candidate_ids:
+            self._check_sync_deadline()
             try:
                 if self._driver.find_elements("id", candidate_id):
                     return True
@@ -549,6 +599,7 @@ class AndroidYouTubeWatcher:
 
     def _read_first_text_by_ids_sync(self, candidate_ids: tuple[str, ...]) -> str | None:
         for candidate_id in candidate_ids:
+            self._check_sync_deadline()
             try:
                 elements = self._driver.find_elements("id", candidate_id)
             except Exception:

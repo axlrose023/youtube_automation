@@ -2219,15 +2219,24 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                     break
                 if deadline is not None:
                     remaining_seconds = deadline - time.monotonic()
-                    # On repeat cycles use a lower threshold so we can squeeze in one more topic.
-                    _topic_buffer = (
-                        60.0
-                        if topics_cycled_once
-                        else self._config.android_app.session_topic_start_buffer_seconds
+                    topic_buffer = self._next_topic_start_buffer_seconds(
+                        topics=resolved_topics,
+                        topic_results=topic_results,
+                        topics_cycled_once=topics_cycled_once,
                     )
-                    if remaining_seconds <= _topic_buffer:
+                    if remaining_seconds <= topic_buffer:
+                        pending_uncovered = len(
+                            [
+                                candidate
+                                for candidate in resolved_topics
+                                if candidate not in self._covered_topics(topic_results)
+                            ]
+                        )
                         print(
-                            f"[android-session] stop:no_time_for_next_topic remaining_seconds={max(0, int(remaining_seconds))}",
+                            "[android-session] stop:no_time_for_next_topic "
+                            f"remaining_seconds={max(0, int(remaining_seconds))} "
+                            f"topic_buffer={int(topic_buffer)} "
+                            f"pending_uncovered={pending_uncovered}",
                             flush=True,
                         )
                         break
@@ -2331,6 +2340,23 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 log_prefix="[android-session]",
                             )
                         )
+                        print("[android-session] stage:reset_to_home_initial", flush=True)
+                        try:
+                            await self._reset_to_home_with_timeout(
+                                navigator=navigator,
+                                topic_notes=acquire_notes,
+                                stage_label="reset_to_home_initial",
+                                launcher_tripwire=launcher_tripwire,
+                                timeout_seconds=20.0,
+                            )
+                        except Exception as exc:
+                            acquire_notes.append(
+                                f"reset_to_home_initial_failed:{type(exc).__name__}"
+                            )
+                            print(
+                                f"[android-session] acquire_note:reset_to_home_initial_failed {type(exc).__name__}:{exc}",
+                                flush=True,
+                            )
                         if _initial_rx_bytes == 0:
                             _initial_rx_bytes = await _read_rx_bytes()
                         print(
@@ -3788,7 +3814,13 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                 # watch/ad overlays don't break the next submit_search flow.
                 if navigator is not None:
                     try:
-                        await asyncio.wait_for(navigator.reset_to_home(), timeout=45)
+                        await self._reset_to_home_with_timeout(
+                            navigator=navigator,
+                            topic_notes=topic_notes,
+                            stage_label="topic_post_reset",
+                            launcher_tripwire=launcher_tripwire,
+                            timeout_seconds=15.0,
+                        )
                         print("[android-session] topic:post_reset:home", flush=True)
                     except Exception as exc:
                         print(
@@ -4370,7 +4402,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         topic_notes: list[str],
         stage_label: str,
         launcher_tripwire: asyncio.Event | None,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 50.0,
     ) -> str | None:
         started_at = time.monotonic()
         self._raise_if_launcher_tripwire_set(
@@ -4432,6 +4464,38 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                 tripwire_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception, TimeoutError):
                     await asyncio.wait_for(asyncio.shield(tripwire_task), timeout=0.5)
+
+    async def _reset_to_home_with_timeout(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        topic_notes: list[str],
+        stage_label: str,
+        launcher_tripwire: asyncio.Event | None,
+        timeout_seconds: float = 15.0,
+    ) -> None:
+        started_at = time.monotonic()
+        self._raise_if_launcher_tripwire_set(
+            launcher_tripwire=launcher_tripwire,
+            stage_label=stage_label,
+        )
+        try:
+            await navigator.reset_to_home(deadline=time.monotonic() + timeout_seconds)
+            topic_notes.append(f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}")
+            return
+        except AndroidUiError as exc:
+            if "hard deadline exceeded" not in str(exc):
+                raise
+        topic_notes.append(f"{stage_label}_timeout")
+        recovered = await self._recover_from_launcher_anr_with_timeout(
+            navigator=navigator,
+        )
+        topic_notes.append(f"{stage_label}_launcher_recovery:{str(recovered).lower()}")
+        self._raise_if_launcher_tripwire_set(
+            launcher_tripwire=launcher_tripwire,
+            stage_label=stage_label,
+        )
+        raise AndroidUiError(f"{stage_label} timed out")
 
     async def _drain_cancelled_stage_task(
         self,
@@ -4839,6 +4903,36 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         elapsed = max(time.monotonic() - started_at, 0.0)
         return max(total - elapsed, 0.0)
 
+    def _next_topic_start_buffer_seconds(
+        self,
+        *,
+        topics: list[str],
+        topic_results: list[AndroidSessionTopicResult],
+        topics_cycled_once: bool,
+    ) -> float:
+        if topics_cycled_once:
+            return 60.0
+
+        configured_buffer = float(
+            self._config.android_app.session_topic_start_buffer_seconds
+        )
+        if not topic_results:
+            return configured_buffer
+
+        pending_uncovered = max(
+            len(
+                [
+                    candidate
+                    for candidate in topics
+                    if candidate not in self._covered_topics(topic_results)
+                ]
+            ),
+            1,
+        )
+        # Once the session has already made progress, keep enough time for a
+        # search/open cycle without discarding the tail of short runs.
+        return min(configured_buffer, 45.0 + pending_uncovered * 30.0)
+
     @staticmethod
     def _topic_has_meaningful_progress(
         *,
@@ -4976,6 +5070,12 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         internal_timeout = max(float(watch_seconds) + 35.0, 45.0)
         return internal_timeout + 5.0
 
+    def _main_watch_sample_interval_seconds(self, watch_seconds: int) -> int:
+        base_interval = max(1, self._config.android_app.probe_watch_sample_interval_seconds)
+        if watch_seconds >= 10 and base_interval < 2:
+            return 2
+        return base_interval
+
     async def _continue_main_watch_if_needed(
         self,
         *,
@@ -4996,10 +5096,16 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         last_extra_result = None
         while remaining >= 6:
             chunk_seconds = min(remaining, 12)
+            chunk_timeout = self._main_watch_chunk_timeout_seconds(chunk_seconds)
+            sample_interval_seconds = self._main_watch_sample_interval_seconds(chunk_seconds)
             try:
                 extra_result = await asyncio.wait_for(
-                    watcher.watch_current(watch_seconds=chunk_seconds),
-                    timeout=self._main_watch_chunk_timeout_seconds(chunk_seconds),
+                    watcher.watch_current(
+                        watch_seconds=chunk_seconds,
+                        sample_interval_seconds=sample_interval_seconds,
+                        deadline=time.monotonic() + max(1.0, chunk_timeout - 1.0),
+                    ),
+                    timeout=chunk_timeout,
                 )
             except (asyncio.TimeoutError, AndroidUiError) as exc:
                 if isinstance(exc, AndroidUiError) and "Timed out collecting watch samples" not in str(exc):
@@ -5419,6 +5525,11 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
             )
             for anchor_token in anchor_tokens
         ):
+            if anchor_tokens == {"forex"}:
+                return AndroidYouTubeSessionRunner._is_reasonable_topic_video_title(
+                    title_tokens=title_tokens,
+                    topic_tokens=topic_tokens,
+                )
             return False
         if len(matched_topic_tokens) >= 2:
             return True
@@ -5435,6 +5546,10 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         title_tokens: set[str],
         topic_tokens: set[str],
     ) -> bool:
+        if "forex" in topic_tokens and "trad" in title_tokens and any(
+            token in title_tokens for token in {"analysis", "beginner", "guide", "market", "setup", "strategy"}
+        ):
+            return True
         finance_tokens = {
             "automat",
             "bitcoin",
