@@ -389,6 +389,22 @@ class AndroidYouTubeProbeRunner:
                             except Exception as exc:
                                 runtime_notes.append(f"post_ad_watch_failed:{type(exc).__name__}")
                                 post_ad_watch = None
+                            if post_ad_watch is not None:
+                                watch_result = replace(
+                                    watch_result,
+                                    verified=bool(
+                                        getattr(watch_result, "verified", False)
+                                        or getattr(post_ad_watch, "verified", False)
+                                    ),
+                                    samples=self._merge_watch_samples(
+                                        list(getattr(watch_result, "samples", []) or []),
+                                        list(getattr(post_ad_watch, "samples", []) or []),
+                                    ),
+                                    ad_debug_page_source=self._preferred_ad_debug_page_source(
+                                        post_ad_watch,
+                                        watch_result,
+                                    ),
+                                )
                             if (
                                 self._config.android_app.session_engagement_enabled
                                 and post_ad_watch is not None
