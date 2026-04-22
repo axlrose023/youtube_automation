@@ -15,6 +15,8 @@ from .ads import AndroidAdCtaProbeResult
 from . import selectors
 
 logger = logging.getLogger(__name__)
+_MAX_RELIABLE_AD_DURATION_SECONDS = 600.0
+_MAX_FALLBACK_SEEKBAR_AD_DURATION_SECONDS = 300.0
 
 _DISPLAY_URL_PATTERN = re.compile(
     r"(?i)\b((?:https?://)?(?:www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s]*)?)"
@@ -71,6 +73,7 @@ _PRESERVED_GENERIC_VISIBLE_LINES = {
     "visit advertiser",
     "visit site",
 }
+_MAX_SCREENRECORD_FLOOR_FIRST_AD_OFFSET_SECONDS = 12.0
 _GENERIC_VISIBLE_SUBSTRINGS = (
     "minutes of",
     "minute of",
@@ -437,11 +440,23 @@ def build_watched_ad_record(
         first.ad_duration_seconds,
         _extract_ad_duration_seconds(ad_text_hints),
     )
-    # Sanity-check: YouTube ads are never longer than ~10 minutes.
-    # Values above 600s indicate a parse artefact (e.g. a seekbar showing the full
-    # video duration instead of the ad) — discard them so they don't inflate
+    # Values above ~10 minutes are always junk. A lower threshold is applied
+    # separately when the timing came from the main content seekbar fallback.
+    # Discard them so they don't inflate
     # watched_seconds or the remaining-time sleep.
-    if isinstance(ad_duration_seconds, float) and ad_duration_seconds > 600.0:
+    if (
+        isinstance(ad_duration_seconds, float)
+        and ad_duration_seconds > _MAX_RELIABLE_AD_DURATION_SECONDS
+    ):
+        ad_duration_seconds = None
+    if (
+        isinstance(ad_duration_seconds, float)
+        and ad_duration_seconds > _MAX_FALLBACK_SEEKBAR_AD_DURATION_SECONDS
+        and (
+            any(getattr(sample, "ad_timing_from_main_seekbar", False) for sample in ad_samples)
+            or debug_metadata.get("ad_timing_from_fallback_seekbar")
+        )
+    ):
         ad_duration_seconds = None
     watched_seconds = _estimate_ad_watched_seconds(
         ad_samples=ad_samples,
@@ -648,9 +663,18 @@ def _parse_debug_watch_metadata(path: Path | None) -> dict[str, Any]:
     display_url = _read_first_text_by_resource_ids(root, selectors.AD_DISPLAY_URL_IDS)
     cta_text = _read_first_text_by_resource_ids(root, selectors.AD_CTA_TEXT_IDS)
     ad_seekbar_description = _read_seekbar_description_by_resource_ids(root, selectors.AD_TIME_BAR_IDS)
+    ad_timing_from_fallback_seekbar = False
     if ad_seekbar_description is None:
+        ad_timing_from_fallback_seekbar = True
         ad_seekbar_description = _find_ad_seekbar_description(root)
     ad_progress_seconds, ad_duration_seconds = _parse_seekbar_progress(ad_seekbar_description)
+    if (
+        isinstance(ad_duration_seconds, float)
+        and ad_duration_seconds > _MAX_FALLBACK_SEEKBAR_AD_DURATION_SECONDS
+        and ad_timing_from_fallback_seekbar
+    ):
+        ad_progress_seconds = None
+        ad_duration_seconds = None
     visible_lines = _collect_visible_lines(root)
     sponsor_label = sponsor_label or _extract_sponsor_label(visible_lines)
     cta_text = cta_text or _choose_primary_cta(_extract_cta_candidates(visible_lines))
@@ -664,6 +688,7 @@ def _parse_debug_watch_metadata(path: Path | None) -> dict[str, Any]:
         "ad_duration_seconds": ad_duration_seconds or _extract_ad_duration_seconds(
             [sponsor_label, *(visible_lines[:12])]
         ),
+        "ad_timing_from_fallback_seekbar": ad_timing_from_fallback_seekbar,
     }
 
 
@@ -923,6 +948,7 @@ def _estimate_ad_watched_seconds(
         for sample in ad_samples
         if isinstance(sample.offset_seconds, (int, float))
     ]
+    first_sample_offset = min(sample_offsets) if sample_offsets else None
 
     observed_window: float | None = None
     if sample_offsets:
@@ -978,6 +1004,10 @@ def _estimate_ad_watched_seconds(
     if (
         recorded_video_duration_seconds is not None
         and recorded_video_duration_seconds > watched_seconds
+        and (
+            first_sample_offset is None
+            or first_sample_offset <= _MAX_SCREENRECORD_FLOOR_FIRST_AD_OFFSET_SECONDS
+        )
         and (
             ad_duration_seconds is None
             or recorded_video_duration_seconds <= ad_duration_seconds + 5.0

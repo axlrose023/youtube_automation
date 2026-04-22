@@ -374,6 +374,31 @@ def test_build_watched_ad_record_does_not_treat_absolute_progress_as_watched_dur
     assert record["ad_completion_reason"] == "observed_window"
 
 
+def test_build_watched_ad_record_discards_implausible_long_content_seekbar_duration() -> None:
+    record = build_watched_ad_record(
+        watch_samples=[
+            AndroidWatchSample(
+                offset_seconds=0,
+                ad_detected=True,
+                skip_available=True,
+                ad_progress_seconds=18,
+                ad_duration_seconds=522,
+                ad_timing_from_main_seekbar=True,
+                ad_headline_text="Moodle als leeromgeving",
+                ad_visible_lines=["Sponsored", "Moodle als leeromgeving", "Skip"],
+            ),
+        ],
+        watch_debug_screen_path=None,
+        watch_debug_page_source_path=None,
+        ad_cta_result=None,
+        recorded_video_path="android_probe/video/ad.mp4",
+        recorded_video_duration_seconds=50.080511,
+    )
+
+    assert record is not None
+    assert record["ad_duration_seconds"] is None
+
+
 def test_build_watched_ad_record_does_not_mix_landing_text_into_overlay_full_text(
     tmp_path: Path,
 ) -> None:

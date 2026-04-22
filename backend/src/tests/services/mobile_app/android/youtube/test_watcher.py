@@ -69,6 +69,27 @@ def _adb_watch_page_source() -> str:
     """
 
 
+def _lead_form_ad_page_source() -> str:
+    return """
+    <hierarchy>
+      <android.widget.FrameLayout resource-id="com.google.android.youtube:id/watch_player" />
+      <android.view.ViewGroup resource-id="com.google.android.youtube:id/watch_panel" />
+      <android.view.ViewGroup resource-id="com.google.android.youtube:id/watch_while_time_bar_view">
+        <android.widget.SeekBar
+          class="android.widget.SeekBar"
+          content-desc="0 minutes 18 seconds of 8 minutes 42 seconds" />
+      </android.view.ViewGroup>
+      <android.widget.FrameLayout resource-id="com.google.android.youtube:id/skip_ad_button" />
+      <android.widget.LinearLayout
+        resource-id="com.google.android.youtube:id/skip_ad_button_container"
+        content-desc="Skip ad" />
+      <android.widget.TextView
+        resource-id="com.google.android.youtube:id/title"
+        text="Moodle als leeromgeving" />
+    </hierarchy>
+    """
+
+
 def test_dismiss_system_dialog_skips_adb_probe_when_page_has_no_dialog_hints() -> None:
     watcher = _WatcherWithCounters(_FakeDriver(page_source=_clean_watch_page_source()), AndroidAppConfig())
 
@@ -109,3 +130,22 @@ def test_collect_sample_sync_uses_adb_fallback_when_page_source_missing() -> Non
     assert sample.progress_seconds == 9
     assert sample.duration_seconds == 222
     assert sample.ad_detected is False
+
+
+def test_collect_sample_sync_discards_long_main_seekbar_fallback_for_ad_timing() -> None:
+    watcher = _WatcherWithoutDialogProbe(
+        _FakeDriver(page_source=_lead_form_ad_page_source()),
+        AndroidAppConfig(),
+    )
+
+    sample, _page_source = watcher._collect_sample_sync(0)
+
+    assert sample.player_visible is True
+    assert sample.watch_panel_visible is True
+    assert sample.progress_seconds == 18
+    assert sample.duration_seconds == 522
+    assert sample.skip_available is True
+    assert sample.ad_detected is True
+    assert sample.ad_timing_from_main_seekbar is True
+    assert sample.ad_progress_seconds is None
+    assert sample.ad_duration_seconds is None

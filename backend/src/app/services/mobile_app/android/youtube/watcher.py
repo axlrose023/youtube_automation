@@ -25,6 +25,9 @@ class AndroidWatchResult:
 
 
 class AndroidYouTubeWatcher:
+    _MAX_RELIABLE_AD_DURATION_SECONDS = 600
+    _MAX_MAIN_SEEKBAR_FALLBACK_AD_DURATION_SECONDS = 300
+
     def __init__(
         self,
         driver: object,
@@ -184,6 +187,7 @@ class AndroidYouTubeWatcher:
         ad_seekbar_description = None
         ad_progress_seconds = None
         ad_duration_seconds = None
+        ad_timing_from_main_seekbar = False
         ad_signal_labels: list[str] = []
         ad_cta_labels: list[str] = []
         ad_visible_lines: list[str] = []
@@ -364,9 +368,17 @@ class AndroidYouTubeWatcher:
         # watch_while_time_bar_view seekbar to show the ad's progress. Fall back to the
         # video seekbar description as the ad seekbar so remaining-time math works.
         if skip_available and not ad_seekbar_description and seekbar_description:
+            ad_timing_from_main_seekbar = True
             ad_seekbar_description = seekbar_description
             ad_progress_seconds = progress_seconds
             ad_duration_seconds = duration_seconds
+        ad_progress_seconds, ad_duration_seconds = self._sanitize_ad_timing(
+            ad_progress_seconds,
+            ad_duration_seconds,
+            fallback_from_main_seekbar=ad_timing_from_main_seekbar,
+        )
+        if ad_timing_from_main_seekbar and ad_progress_seconds is None and ad_duration_seconds is None:
+            ad_seekbar_description = None
 
         ad_detected = bool(
             skip_available
@@ -393,6 +405,7 @@ class AndroidYouTubeWatcher:
             ad_seekbar_description=ad_seekbar_description,
             ad_progress_seconds=ad_progress_seconds,
             ad_duration_seconds=ad_duration_seconds,
+            ad_timing_from_main_seekbar=ad_timing_from_main_seekbar,
             ad_detected=ad_detected,
             skip_available=skip_available,
             skip_clicked=False,
@@ -683,6 +696,27 @@ class AndroidYouTubeWatcher:
         if len(numbers) >= 2:
             return numbers[0], numbers[1]
         return None, None
+
+    @classmethod
+    def _sanitize_ad_timing(
+        cls,
+        progress_seconds: int | None,
+        duration_seconds: int | None,
+        *,
+        fallback_from_main_seekbar: bool,
+    ) -> tuple[int | None, int | None]:
+        if not isinstance(duration_seconds, int):
+            return progress_seconds, duration_seconds
+        if duration_seconds <= 0 or duration_seconds > cls._MAX_RELIABLE_AD_DURATION_SECONDS:
+            return None, None
+        if (
+            fallback_from_main_seekbar
+            and duration_seconds > cls._MAX_MAIN_SEEKBAR_FALLBACK_AD_DURATION_SECONDS
+        ):
+            return None, None
+        if isinstance(progress_seconds, int) and progress_seconds < 0:
+            return None, None
+        return progress_seconds, duration_seconds
 
     @staticmethod
     def _normalize_label(value: str | None) -> str:

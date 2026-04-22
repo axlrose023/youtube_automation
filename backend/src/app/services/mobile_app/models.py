@@ -28,6 +28,7 @@ class AndroidWatchSample:
     ad_seekbar_description: str | None = None
     ad_progress_seconds: int | None = None
     ad_duration_seconds: int | None = None
+    ad_timing_from_main_seekbar: bool = False
     ad_detected: bool = False
     skip_available: bool = False
     skip_clicked: bool = False

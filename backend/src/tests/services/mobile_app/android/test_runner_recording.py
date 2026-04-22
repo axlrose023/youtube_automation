@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -81,3 +82,27 @@ def test_recorder_wait_cap_keeps_standard_limit_for_sample_backed_ad_timing() ->
     )
 
     assert cap_seconds == 45.0
+
+
+def test_remaining_current_ad_seconds_from_debug_xml_ignores_implausible_duration(
+    tmp_path: Path,
+) -> None:
+    xml_path = tmp_path / "watch.xml"
+    xml_path.write_text(
+        """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy>
+  <android.widget.TextView text="Sponsored" />
+  <android.widget.SeekBar content-desc="0 minutes 18 seconds of 8 minutes 42 seconds" />
+  <android.widget.TextView text="Visit advertiser" />
+</hierarchy>
+""",
+        encoding="utf-8",
+    )
+
+    remaining, progress, duration = (
+        AndroidYouTubeProbeRunner._remaining_current_ad_seconds_from_debug_xml(xml_path)
+    )
+
+    assert remaining is None
+    assert progress == 18.0
+    assert duration is None

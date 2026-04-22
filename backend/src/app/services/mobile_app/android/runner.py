@@ -15,6 +15,8 @@ import random
 import time
 
 logger = logging.getLogger(__name__)
+_MAX_RELIABLE_AD_DURATION_SECONDS = 600.0
+_MAX_FALLBACK_SEEKBAR_AD_DURATION_SECONDS = 300.0
 
 from app.services.emulation.config import (
     COVERAGE_CAP_BUDGET_FRACTION,
@@ -1552,6 +1554,13 @@ class AndroidYouTubeProbeRunner:
         if not isinstance(progress_seconds, (int, float)):
             return None, None, duration_seconds if isinstance(duration_seconds, (int, float)) else None
         if not isinstance(duration_seconds, (int, float)):
+            return None, float(progress_seconds), None
+        if float(duration_seconds) > _MAX_RELIABLE_AD_DURATION_SECONDS:
+            return None, float(progress_seconds), None
+        if (
+            metadata.get("ad_timing_from_fallback_seekbar")
+            and float(duration_seconds) > _MAX_FALLBACK_SEEKBAR_AD_DURATION_SECONDS
+        ):
             return None, float(progress_seconds), None
         remaining_seconds = float(duration_seconds) - float(progress_seconds)
         if remaining_seconds < 0.0:
