@@ -8,7 +8,6 @@ import {
   PlayCircle,
   RefreshCw,
   Search,
-  TrendingUp,
   X,
   CheckCircle,
   XCircle,
@@ -39,6 +38,46 @@ type AnalysisFilter = "all" | "relevant" | "not_relevant" | "pending";
 type SortKey = "date" | "duration" | "domain";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const _REDIRECT_HOSTS = new Set([
+  "googleadservices.com", "www.googleadservices.com",
+  "google.com", "www.google.com",
+  "doubleclick.net", "www.doubleclick.net", "googleads.g.doubleclick.net",
+  "consent.youtube.com",
+]);
+
+function extractCleanDomain(url: string | null | undefined): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url.includes("://") ? url : `https://${url}`);
+    let host = u.hostname.replace(/^www\./, "");
+    if (_REDIRECT_HOSTS.has(u.hostname)) return null;
+    // play.google.com → extract app id
+    if (host === "play.google.com") {
+      const id = u.searchParams.get("id");
+      return id ? id.split(".").slice(-2).join(".") : null;
+    }
+    return host || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveAdIdentity(ad: AdEntry): { name: string; domain: string | null } {
+  const summaryName = ad.analysis_summary?.["advertiser"] as string | undefined;
+  const domain =
+    extractCleanDomain(ad.advertiser_domain) ??
+    extractCleanDomain(ad.display_url) ??
+    extractCleanDomain(ad.landing_url) ??
+    null;
+
+  // Reject YouTube-channel headlines like "Subscribe to X."
+  const headline = ad.headline_text ?? "";
+  const isChannelHeadline = /^(subscribe to|подпишитесь на)/i.test(headline.trim());
+
+  const name = summaryName ?? domain ?? (isChannelHeadline ? "" : headline) ?? "Неизвестный рекламодатель";
+  return { name: name || "Неизвестный рекламодатель", domain };
+}
 
 function buildMediaPath(value: string | null | undefined) {
   if (!value) return null;
@@ -151,8 +190,7 @@ function ResultPill({ ad }: { ad: AdEntry }) {
 // ─── Ad Card ─────────────────────────────────────────────────────────────────
 
 function AdCard({ ad, onClick }: { ad: AdEntry; onClick: () => void }) {
-  const domain = ad.advertiser_domain ?? ad.display_url ?? null;
-  const advertiser = (ad.analysis_summary?.["advertiser"] as string | undefined) ?? domain ?? "Неизвестный рекламодатель";
+  const { name: advertiser, domain } = resolveAdIdentity(ad);
   const category = ad.analysis_summary?.["category"] as string | undefined;
 
   return (
@@ -216,8 +254,7 @@ function VideoPlayerModal({ videoFile }: { videoFile: string | null | undefined 
 function AdModal({ ad, onClose }: { ad: AdEntry; onClose: () => void }) {
   const overlayRef = useRef<HTMLDivElement>(null);
   const result = getAnalysisResult(ad);
-  const domain = ad.advertiser_domain ?? ad.display_url ?? null;
-  const advertiser = (ad.analysis_summary?.["advertiser"] as string | undefined) ?? domain ?? "Неизвестный рекламодатель";
+  const { name: advertiser, domain } = resolveAdIdentity(ad);
   const reason = ad.analysis_summary?.["reason"] as string | undefined;
   const category = ad.analysis_summary?.["category"] as string | undefined;
   const hasVideo = Boolean(ad.video_file && ad.video_status === "completed");
@@ -442,7 +479,9 @@ export function AdsScreen() {
   const topDomains = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const ad of allAds) {
-      const key = ad.advertiser_domain ?? ad.display_url ?? "unknown";
+      const { domain } = resolveAdIdentity(ad);
+      const key = domain ?? "unknown";
+      if (key === "unknown") continue;
       counts[key] = (counts[key] ?? 0) + 1;
     }
     return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 6);
@@ -452,13 +491,15 @@ export function AdsScreen() {
     let result = allAds;
     if (search.trim()) {
       const q = search.toLowerCase();
-      result = result.filter(
-        (a) =>
-          (a.advertiser_domain ?? "").toLowerCase().includes(q) ||
+      result = result.filter((a) => {
+        const { name, domain } = resolveAdIdentity(a);
+        return (
+          name.toLowerCase().includes(q) ||
+          (domain ?? "").toLowerCase().includes(q) ||
           (a.headline_text ?? "").toLowerCase().includes(q) ||
-          (a.display_url ?? "").toLowerCase().includes(q) ||
-          a.session_topics.some((t) => t.toLowerCase().includes(q)),
-      );
+          a.session_topics.some((t) => t.toLowerCase().includes(q))
+        );
+      });
     }
     if (analysisFilter !== "all") {
       result = result.filter((a) => {
