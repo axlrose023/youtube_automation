@@ -1471,8 +1471,8 @@ class AndroidYouTubeNavigator:
         candidates.sort(key=lambda item: (item.bounds[1], item.bounds[0]))
         candidates.sort(
             key=lambda item: (
-                -self._score_result_title_for_query_sync(item.title, query),
                 item.bounds[1],
+                -self._score_result_title_for_query_sync(item.title, query),
                 item.bounds[0],
             )
         )
