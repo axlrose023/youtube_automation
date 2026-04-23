@@ -1657,7 +1657,7 @@ class AndroidYouTubeNavigator:
                 candidate,
                 query,
                 prefer_center_first=relaxed_cutoff_used and not candidate.is_sponsored,
-                allow_offtopic_result=relaxed_cutoff_used,
+                allow_offtopic_result=True,
                 allow_reel_result=relaxed_cutoff_used and candidate.is_short,
             )
             if opened_title is not None:
