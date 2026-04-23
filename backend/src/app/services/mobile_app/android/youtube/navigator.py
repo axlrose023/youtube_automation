@@ -1080,9 +1080,14 @@ class AndroidYouTubeNavigator:
         if query and not self._has_query_ready_surface_sync(query):
             self._recover_results_surface_sync(query)
         if query:
-            resolved_watch_title = self._resolve_current_watch_title_sync(query, timeout_seconds=1.6)
-            if resolved_watch_title:
-                return resolved_watch_title
+            on_ready_results_surface = (
+                self._has_results_surface_sync()
+                and self._has_search_context_sync()
+            )
+            if not on_ready_results_surface:
+                resolved_watch_title = self._resolve_current_watch_title_sync(query, timeout_seconds=1.6)
+                if resolved_watch_title:
+                    return resolved_watch_title
             if (
                 self._safe_current_package_sync() == self._config.youtube_package
                 and self._is_watchwhile_activity_sync()
@@ -1166,9 +1171,14 @@ class AndroidYouTubeNavigator:
                     )
             self._dismiss_miniplayer_on_results_sync()
             if query:
-                resolved_watch_title = self._resolve_current_watch_title_sync(query, timeout_seconds=1.2)
-                if resolved_watch_title:
-                    return resolved_watch_title
+                on_ready_results_surface = (
+                    self._has_results_surface_sync()
+                    and self._has_search_context_sync()
+                )
+                if not on_ready_results_surface:
+                    resolved_watch_title = self._resolve_current_watch_title_sync(query, timeout_seconds=1.2)
+                    if resolved_watch_title:
+                        return resolved_watch_title
                 if self._has_stale_previous_watch_surface_sync(query):
                     logger.info(
                         "open_first_result: query=%s attempt=%s branch=stale_previous_watch",
