@@ -884,6 +884,11 @@ class AndroidYouTubeNavigator:
         self._escape_reel_surface_for_query_sync(query)
         if query:
             self._recover_results_surface_sync(query)
+        # Fast path: surface already ready before entering the poll loop.
+        if query and self._has_query_ready_surface_sync(query):
+            return
+        if self._has_results_surface_sync() and self._has_openable_result_sync():
+            return
         text_fallback_attempted = False
         hard_home_recovery_attempted = False
         hard_cap = min(time.monotonic() + 45, getattr(self._thread_local, "hard_deadline", float("inf")))
@@ -1058,7 +1063,9 @@ class AndroidYouTubeNavigator:
         self._dismiss_possible_dialogs_sync()
         self._dismiss_miniplayer_on_results_sync()
         self._escape_reel_surface_for_query_sync(query)
-        if query:
+        # Only recover results surface if we're not already on a ready surface —
+        # the unconditional recover call was adding 1-3s on every open attempt.
+        if query and not self._has_query_ready_surface_sync(query):
             self._recover_results_surface_sync(query)
         if query:
             resolved_watch_title = self._resolve_current_watch_title_sync(query, timeout_seconds=1.6)

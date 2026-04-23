@@ -1758,6 +1758,78 @@ class AndroidYouTubeProbeRunner:
         )
         return recorded_video_path, recorded_video_duration_seconds
 
+    @staticmethod
+    def _normalize_watched_ad_identity_value(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = " ".join(value.strip().casefold().split())
+        return normalized or None
+
+    def _watched_ad_identity_key(
+        self, ad: dict[str, object] | None,
+    ) -> str | None:
+        from urllib.parse import parse_qs, urlsplit
+
+        _REDIRECT_HOSTS = {
+            "googleadservices.com", "www.googleadservices.com",
+            "google.com", "www.google.com",
+            "doubleclick.net", "www.doubleclick.net", "googleads.g.doubleclick.net",
+        }
+
+        if not isinstance(ad, dict):
+            return None
+
+        capture = ad.get("capture") if isinstance(ad.get("capture"), dict) else {}
+
+        def _host_path_key(url: object) -> str | None:
+            if not isinstance(url, str) or not url.strip():
+                return None
+            try:
+                parts = urlsplit(url.strip() if "://" in url else f"https://{url}")
+            except Exception:
+                return None
+            host = (parts.netloc or "").lower()
+            if host.startswith("www."):
+                host = host[4:]
+            if not host or host in _REDIRECT_HOSTS:
+                return None
+            return f"url:{host}{parts.path or ''}"
+
+        def _ai_key(url: object) -> str | None:
+            if not isinstance(url, str) or not url.strip():
+                return None
+            try:
+                parts = urlsplit(url.strip())
+                ai = (parse_qs(parts.query).get("ai") or [""])[0]
+            except Exception:
+                return None
+            return f"ai:{ai}" if ai else None
+
+        url_candidates = (
+            ad.get("display_url"),
+            ad.get("landing_url"),
+            capture.get("landing_scrape_url"),
+            capture.get("pre_click_display_url"),
+        )
+        for candidate in url_candidates:
+            key = _host_path_key(candidate)
+            if key:
+                return key
+        for candidate in url_candidates:
+            key = _ai_key(candidate)
+            if key:
+                return key
+
+        advertiser = self._normalize_watched_ad_identity_value(
+            ad.get("advertiser_domain")
+        )
+        headline = self._normalize_watched_ad_identity_value(
+            ad.get("headline_text") or capture.get("headline_text")
+        )
+        if advertiser or headline:
+            return f"meta:{advertiser or '-'}|{headline or '-'}"
+        return None
+
     def _dedupe_watched_ads(
         self, watched_ads: list[dict[str, object]],
     ) -> None:
@@ -1765,47 +1837,12 @@ class AndroidYouTubeProbeRunner:
 
         YouTube frequently replays the same ad across topic runs; our per-topic
         dedup inside the midroll loop doesn't catch those. We identify the same
-        creative by the aclk 'ai' query param (which encodes creative+campaign)
-        or by a normalized display_url host+path. Duplicates are removed from
-        watched_ads in place, keeping the first occurrence."""
-        from urllib.parse import urlsplit, parse_qs
-        _REDIRECT_HOSTS = {
-            "googleadservices.com", "www.googleadservices.com",
-            "google.com", "www.google.com",
-            "doubleclick.net", "www.doubleclick.net", "googleads.g.doubleclick.net",
-        }
-        def _creative_key(ad: dict[str, object]) -> str | None:
-            if not isinstance(ad, dict):
-                return None
-            display_url = ad.get("display_url")
-            if isinstance(display_url, str) and display_url.strip():
-                try:
-                    parts = urlsplit(display_url.strip() if "://" in display_url else f"https://{display_url}")
-                    host = (parts.netloc or "").lower()
-                    if host.startswith("www."):
-                        host = host[4:]
-                    path = parts.path or ""
-                    if host and host not in _REDIRECT_HOSTS:
-                        return f"url:{host}{path}"
-                except Exception:
-                    pass
-            for url_key in ("landing_url", "display_url"):
-                url = ad.get(url_key)
-                if not isinstance(url, str) or not url.strip():
-                    continue
-                try:
-                    parts = urlsplit(url.strip())
-                    q = parse_qs(parts.query)
-                    ai = (q.get("ai") or [""])[0]
-                    if ai:
-                        return f"ai:{ai}"
-                except Exception:
-                    pass
-            return None
+        creative by a stable watched-ad identity key and keep only the first
+        occurrence in the session-level summary."""
         seen: dict[str, int] = {}
         to_remove: list[int] = []
         for idx, ad in enumerate(watched_ads):
-            key = _creative_key(ad)
+            key = self._watched_ad_identity_key(ad)
             if not key:
                 continue
             if key in seen:
@@ -2119,16 +2156,11 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         resolved_topics = [topic.strip() for topic in topics if topic.strip()]
         if not resolved_topics:
             raise ValueError("Android session runner requires at least one topic")
-        # Cap topics to what's realistically achievable in the session duration.
-        # Each topic needs ~3-4 min (search + navigation + watch + CTA).
-        # Reserve ~3 min for emulator boot/teardown overhead.
-        if duration_minutes and duration_minutes > 0:
-            _usable_minutes = max(duration_minutes - 3, 1)
-            _max_topics = max(1, int(_usable_minutes // 3))
-            if len(resolved_topics) > _max_topics:
-                import random as _random
-                _random.shuffle(resolved_topics)
-                resolved_topics = resolved_topics[:_max_topics]
+        # Topic count is now governed by the hard cap inside the main loop
+        # (max(1, (duration_minutes - 2) // 5)) which stops starting new topics
+        # once the budget is exhausted. The old upfront trim is removed because
+        # it used a different formula, shuffled topic order unpredictably, and
+        # ran in parallel with the new cap — making behaviour non-deterministic.
 
         resolved_avd_name = avd_name or self._config.android_app.default_avd_name
         snapshot_name = (
@@ -2265,6 +2297,33 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             flush=True,
                         )
                         break
+                # Soft cap: first cover a realistic number of topics for the duration,
+                # then keep using the remaining time if there is enough budget for a
+                # useful extra watch. We avoid stopping early on short sessions; the cap
+                # only prevents starting a new bootstrap when the remaining time is too
+                # small to turn into meaningful watch time.
+                if duration_minutes is not None and topic_results:
+                    topics_cap = max(1, (duration_minutes - 2) // 5)
+                    topics_started_count = len(topic_results)
+                    if topics_started_count >= topics_cap:
+                        all_covered = all(
+                            candidate in self._covered_topics(topic_results)
+                            for candidate in resolved_topics[:topics_cap]
+                        )
+                        remaining_for_extra = (deadline - time.monotonic()) if deadline is not None else 9999.0
+                        allow_extra_topic = (
+                            all_covered
+                            and remaining_for_extra >= 240.0
+                        )
+                        if not allow_extra_topic:
+                            print(
+                                "[android-session] stop:topic_cap_reached "
+                                f"topics_started={topics_started_count} "
+                                f"cap={topics_cap} "
+                                f"duration_minutes={duration_minutes}",
+                                flush=True,
+                            )
+                            break
                 if session is None or device is None or navigator is None or watcher is None:
                     print("[android-session] device_or_session:acquire", flush=True)
                     try:
@@ -2679,6 +2738,8 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 f"[android-session] stage:no_result_opened_first_attempt_ad_done total_ads={len(watched_ads)}",
                                 flush=True,
                             )
+                        retry_open_attempted = False
+                        retry_surface_ad_captured = False
                         delayed_opened_title = None
                         if not unaccepted_surface_ad_captured:
                             delayed_opened_title = await self._await_current_watch_title_with_hard_timeout(
@@ -2701,6 +2762,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 topic_notes.append("topic_retry_skipped:budget")
                                 topic_notes.append("open_first_result_retry_skipped:budget")
                             else:
+                                retry_open_attempted = True
                                 retry_results_ready_confirmed = True
                                 print("[android-session] stage:submit_search_retry", flush=True)
                                 await self._submit_search_with_timeout(
@@ -2735,7 +2797,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                         "[android-session] topic:wait_for_results_failed attempt=2",
                                         flush=True,
                                     )
-                                    wait_results_retry_ad_captured = (
+                                    retry_surface_ad_captured = (
                                         await self._probe_unaccepted_watch_surface_for_ad(
                                             driver=session.driver if session is not None else None,
                                             navigator=navigator,
@@ -2751,7 +2813,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                             notify_ad_captured=_notify_ad_captured,
                                         )
                                     )
-                                    if wait_results_retry_ad_captured:
+                                    if retry_surface_ad_captured:
                                         print(
                                             f"[android-session] stage:wait_for_results_retry_ad_done total_ads={len(watched_ads)}",
                                             flush=True,
@@ -2829,27 +2891,40 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 else:
                                     opened_title = None
                     if not opened_title:
-                        final_unaccepted_surface_ad_captured = (
-                            await self._probe_unaccepted_watch_surface_for_ad(
-                                driver=session.driver if session is not None else None,
-                                navigator=navigator,
-                                watcher=watcher,
-                                adb_serial=device.adb_serial if device is not None else None,
-                                topic=topic,
-                                stage_label="no_result_opened_final",
-                                topic_notes=topic_notes,
-                                ad_analysis=ad_analysis,
-                                landing_scraper=landing_scraper,
-                                watched_ads=watched_ads,
-                                topic_watched_ads=topic_watched_ads,
-                                notify_ad_captured=_notify_ad_captured,
-                            )
+                        should_probe_final_unaccepted_surface = (
+                            retry_open_attempted
+                            and not unaccepted_surface_ad_captured
+                            and not retry_surface_ad_captured
                         )
-                        if final_unaccepted_surface_ad_captured:
-                            print(
-                                f"[android-session] stage:no_result_opened_final_ad_done total_ads={len(watched_ads)}",
-                                flush=True,
+                        if should_probe_final_unaccepted_surface:
+                            final_unaccepted_surface_ad_captured = (
+                                await self._probe_unaccepted_watch_surface_for_ad(
+                                    driver=session.driver if session is not None else None,
+                                    navigator=navigator,
+                                    watcher=watcher,
+                                    adb_serial=device.adb_serial if device is not None else None,
+                                    topic=topic,
+                                    stage_label="no_result_opened_final",
+                                    topic_notes=topic_notes,
+                                    ad_analysis=ad_analysis,
+                                    landing_scraper=landing_scraper,
+                                    watched_ads=watched_ads,
+                                    topic_watched_ads=topic_watched_ads,
+                                    notify_ad_captured=_notify_ad_captured,
+                                )
                             )
+                            if final_unaccepted_surface_ad_captured:
+                                print(
+                                    f"[android-session] stage:no_result_opened_final_ad_done total_ads={len(watched_ads)}",
+                                    flush=True,
+                                )
+                        else:
+                            if not retry_open_attempted:
+                                topic_notes.append("no_result_opened_final_skipped:no_retry")
+                            elif unaccepted_surface_ad_captured or retry_surface_ad_captured:
+                                topic_notes.append("no_result_opened_final_skipped:ad_already_captured")
+                            else:
+                                topic_notes.append("no_result_opened_final_skipped:not_needed")
                         topic_notes.append("no_result_opened")
                         print("[android-session] topic:no_result_opened attempt=2", flush=True)
                         if session is not None:
@@ -3177,8 +3252,25 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     except Exception as exc:
                                         topic_notes.append(f"post_ad_watch_failed:{type(exc).__name__}")
                                         if self._should_skip_post_ad_settle(built_ad):
-                                            skip_main_watch_after_ad = True
-                                            topic_notes.append("post_ad_watch_handoff:completed_ad")
+                                            topic_notes.append("post_ad_watch_recover:completed_ad")
+                                            try:
+                                                if await watcher.restore_primary_watch_surface():
+                                                    topic_notes.append(
+                                                        "post_ad_surface:restored_after_failure"
+                                                    )
+                                            except Exception as restore_exc:
+                                                topic_notes.append(
+                                                    f"post_ad_surface_restore_failed:{type(restore_exc).__name__}"
+                                                )
+                                            try:
+                                                if await watcher.ensure_playing():
+                                                    topic_notes.append(
+                                                        "post_ad_playback:resume_after_failure"
+                                                    )
+                                            except Exception as playback_exc:
+                                                topic_notes.append(
+                                                    f"post_ad_playback_resume_failed:{type(playback_exc).__name__}"
+                                                )
                                     if post_ad_watch is not None:
                                         watch_result = replace(
                                             watch_result,
@@ -3201,8 +3293,27 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                                 time.monotonic()
                                             )
                                     elif self._should_skip_post_ad_settle(built_ad):
-                                        skip_main_watch_after_ad = True
-                                        topic_notes.append("post_ad_watch_handoff:completed_ad")
+                                        topic_notes.append(
+                                            "post_ad_watch_recover:completed_ad_no_result"
+                                        )
+                                        try:
+                                            if await watcher.restore_primary_watch_surface():
+                                                topic_notes.append(
+                                                    "post_ad_surface:restored_after_no_result"
+                                                )
+                                        except Exception as restore_exc:
+                                            topic_notes.append(
+                                                f"post_ad_surface_restore_failed:{type(restore_exc).__name__}"
+                                            )
+                                        try:
+                                            if await watcher.ensure_playing():
+                                                topic_notes.append(
+                                                    "post_ad_playback:resume_after_no_result"
+                                                )
+                                        except Exception as playback_exc:
+                                            topic_notes.append(
+                                                f"post_ad_playback_resume_failed:{type(playback_exc).__name__}"
+                                            )
                             except Exception as exc:
                                 topic_notes.append(f"ad_flow_failed:{type(exc).__name__}:{exc}")
                                 print(
@@ -3225,6 +3336,8 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
 
                         # ── main watch loop: watch → catch mid-roll ads → resume → repeat ──
                         _max_midroll_rounds = 10
+                        _midroll_continuation_duplicate_rounds = 0
+                        _midroll_residual_return_rounds = 0
                         for _midroll_round in range(_max_midroll_rounds):
                             watch_gate_reason = self._engagement_gate_reason(
                                 list(getattr(watch_result, "samples", []) or [])
@@ -3323,6 +3436,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     previous_ad=topic_watched_ads[-1],
                                     extension_samples=_mr_new_samples,
                                 )
+                                _midroll_continuation_duplicate_rounds += 1
                                 topic_notes.append(
                                     f"midroll_ad_skip_duplicate:round{_midroll_round + 1}:continuation"
                                 )
@@ -3330,7 +3444,18 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     f"[android-session] stage:midroll_ad_skip_duplicate round={_midroll_round + 1} reason=continuation",
                                     flush=True,
                                 )
+                                if _midroll_continuation_duplicate_rounds > 3:
+                                    topic_notes.append(
+                                        "midroll_ad_skip_duplicate_cap_reached:continuation"
+                                    )
+                                    print(
+                                        "[android-session] stage:midroll_ad_skip_duplicate "
+                                        f"round={_midroll_round + 1} reason=continuation_cap",
+                                        flush=True,
+                                    )
+                                    break
                                 continue
+                            _midroll_continuation_duplicate_rounds = 0
                             _mr_raw_hints: list[str] = []
                             for _s in _mr_new_samples:
                                 if getattr(_s, "ad_detected", False):
@@ -3467,6 +3592,12 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     recorded_video_path=_mr_video_path,
                                     recorded_video_duration_seconds=_mr_video_dur,
                                 )
+                                _mr_identity_matches_previous = bool(
+                                    _mr_built_ad is not None
+                                    and topic_watched_ads
+                                    and self._watched_ad_identity_key(_mr_built_ad)
+                                    == self._watched_ad_identity_key(topic_watched_ads[-1])
+                                )
                                 if _mr_built_ad is not None:
                                     await self._trim_recording_tail_to_ad(
                                         built_ad=_mr_built_ad,
@@ -3490,6 +3621,14 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                             watcher=watcher, built_ad=_mr_built_ad,
                                         )
                                         topic_notes.extend(_mr_post_notes)
+                                        _midroll_residual_detected = any(
+                                            note == "post_ad_residual_detected:returning_for_midroll"
+                                            for note in _mr_post_notes
+                                        )
+                                        if _midroll_residual_detected:
+                                            _midroll_residual_return_rounds += 1
+                                        else:
+                                            _midroll_residual_return_rounds = 0
                                         if _mr_post_ad is not None:
                                             watch_result = replace(
                                                 watch_result,
@@ -3503,6 +3642,37 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                                 ),
                                             )
                                             if self._result_has_ad_samples(_mr_post_ad):
+                                                if (
+                                                    _mr_identity_matches_previous
+                                                    and _midroll_residual_detected
+                                                ):
+                                                    topic_notes.append(
+                                                        f"midroll_repeat_identity_cap_reached:round{_midroll_round + 1}"
+                                                    )
+                                                    print(
+                                                        "[android-session] stage:midroll_repeat_identity_cap "
+                                                        f"round={_midroll_round + 1}",
+                                                        flush=True,
+                                                    )
+                                                    if await watcher.restore_primary_watch_surface():
+                                                        topic_notes.append(
+                                                            "post_ad_surface:restored_midroll_identity_cap"
+                                                        )
+                                                    break
+                                                if _midroll_residual_return_rounds >= 3:
+                                                    topic_notes.append(
+                                                        f"post_ad_residual_cap_reached:round{_midroll_round + 1}"
+                                                    )
+                                                    print(
+                                                        "[android-session] stage:post_ad_residual_cap "
+                                                        f"round={_midroll_round + 1}",
+                                                        flush=True,
+                                                    )
+                                                    if await watcher.restore_primary_watch_surface():
+                                                        topic_notes.append(
+                                                            "post_ad_surface:restored_midroll_residual_cap"
+                                                        )
+                                                    break
                                                 pending_midroll_result = _mr_post_ad
                                                 pending_midroll_samples_ended_monotonic = (
                                                     time.monotonic()
@@ -3844,7 +4014,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             topic_notes=topic_notes,
                             stage_label="topic_post_reset",
                             launcher_tripwire=launcher_tripwire,
-                            timeout_seconds=15.0,
+                            timeout_seconds=35.0,
                         )
                         print("[android-session] topic:post_reset:home", flush=True)
                     except Exception as exc:
@@ -4271,7 +4441,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         topic_notes: list[str],
         stage_label: str,
         launcher_tripwire: asyncio.Event | None,
-        timeout_seconds: float = 25.0,
+        timeout_seconds: float = 35.0,
     ) -> None:
         started_at = time.monotonic()
         self._raise_if_launcher_tripwire_set(
@@ -4497,7 +4667,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         topic_notes: list[str],
         stage_label: str,
         launcher_tripwire: asyncio.Event | None,
-        timeout_seconds: float = 15.0,
+        timeout_seconds: float = 25.0,
     ) -> None:
         started_at = time.monotonic()
         self._raise_if_launcher_tripwire_set(
@@ -4779,6 +4949,11 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         base_dir.mkdir(parents=True, exist_ok=True)
         if artifact_path is None:
             artifact_path = self._build_session_artifact_path()
+        summary = self._build_session_summary(
+            topic_results=topic_results,
+            watched_ads=watched_ads,
+            elapsed_seconds=elapsed_seconds,
+        )
         payload = {
             "avd_name": avd_name,
             "adb_serial": adb_serial,
@@ -4797,6 +4972,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
             "watched_ads_count": len(watched_ads),
             "ad_analysis_done": self._count_ad_analysis_done(watched_ads),
             "ad_analysis_terminal": self._count_ad_analysis_terminal(watched_ads),
+            "session_summary": summary,
             "notes": notes,
             "recorded_at": datetime.now(UTC).isoformat(),
         }
@@ -4805,6 +4981,132 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
             encoding="utf-8",
         )
         return artifact_path
+
+    @staticmethod
+    def _build_session_summary(
+        *,
+        topic_results: list[AndroidSessionTopicResult],
+        watched_ads: list[dict[str, object]],
+        elapsed_seconds: int,
+    ) -> dict[str, object]:
+        """Aggregate per-topic stage timings into a session-level efficiency summary.
+
+        Reads existing *_seconds:N.N notes written by each stage and produces
+        counters that make run-to-run comparison easy without manual log parsing.
+        """
+        def _sum_notes(notes: list[str], prefix: str) -> float:
+            total = 0.0
+            for n in notes:
+                if n.startswith(prefix) and ":" in n:
+                    try:
+                        total += float(n.rsplit(":", 1)[1])
+                    except (ValueError, IndexError):
+                        pass
+            return total
+
+        def _count_tag(notes: list[str], tag: str) -> int:
+            return sum(1 for n in notes if n == tag)
+
+        def _count_prefix(notes: list[str], prefix: str) -> int:
+            return sum(1 for n in notes if n.startswith(prefix))
+
+        video_watch_seconds = 0.0
+        bootstrap_overhead_seconds = 0.0
+        post_reset_overhead_seconds = 0.0
+        ad_flow_overhead_seconds = 0.0
+        submit_search_seconds = 0.0
+        wait_for_results_seconds = 0.0
+        open_first_result_seconds = 0.0
+        topics_started = len(topic_results)
+        topics_completed = sum(1 for tr in topic_results if tr.watch_verified)
+        topic_reset_attempts = 0
+        topic_reset_timeouts = 0
+        wait_for_results_timeouts = 0
+        search_cycles = topics_started
+
+        for tr in topic_results:
+            notes = tr.notes or []
+            if tr.watch_seconds:
+                video_watch_seconds += tr.watch_seconds
+            # Sum first-attempt and retry timings together — both contribute to
+            # real wall-clock overhead and must be included for accurate per-topic
+            # bootstrap cost.
+            s = _sum_notes(notes, "submit_search_seconds:") + _sum_notes(notes, "submit_search_retry_seconds:")
+            w = _sum_notes(notes, "wait_for_results_seconds:") + _sum_notes(notes, "wait_for_results_retry_seconds:")
+            o = _sum_notes(notes, "open_first_result_seconds:") + _sum_notes(notes, "open_first_result_retry_seconds:")
+            r = _sum_notes(notes, "topic_post_reset_seconds:")
+            submit_search_seconds += s
+            wait_for_results_seconds += w
+            open_first_result_seconds += o
+            bootstrap_overhead_seconds += s + w + o
+            post_reset_overhead_seconds += r
+            # ad_flow_overhead: these notes are not yet written by the runner;
+            # kept as placeholders for when Iteration C adds cta/landing timing notes.
+            ad_flow_overhead_seconds += _sum_notes(notes, "cta_seconds:")
+            ad_flow_overhead_seconds += _sum_notes(notes, "landing_seconds:")
+            ad_flow_overhead_seconds += _sum_notes(notes, "ad_return_seconds:")
+            topic_reset_attempts += _count_tag(notes, "topic_post_reset_timeout") + (
+                1 if any(n.startswith("topic_post_reset_seconds:") for n in notes) else 0
+            )
+            topic_reset_timeouts += _count_tag(notes, "topic_post_reset_timeout")
+            wait_for_results_timeouts += (
+                _count_tag(notes, "wait_for_results_timeout")
+                + _count_tag(notes, "wait_for_results_failed:first_attempt")
+                + _count_tag(notes, "wait_for_results_failed:retry")
+            )
+            # Each wait_for_results_retry_seconds:N.N note marks one retry cycle,
+            # regardless of whether that retry succeeded or failed.
+            search_cycles += _count_prefix(notes, "wait_for_results_retry_seconds:")
+
+        # Use recorded_video_duration_seconds (actual file length after trimming)
+        # rather than ad_duration_seconds (estimated from seekbar) — the latter
+        # can be inflated by false detections and doesn't reflect what was saved.
+        # Fallback chain: capture.recorded_video_duration_seconds →
+        #   ad.recorded_video_duration_seconds → ad.ad_duration_seconds.
+        # capture dict does NOT have ad_duration_seconds, so never look there.
+        recorded_ad_seconds = 0.0
+        for ad in watched_ads:
+            if not isinstance(ad, dict):
+                continue
+            capture = ad.get("capture")
+            dur = capture.get("recorded_video_duration_seconds") if isinstance(capture, dict) else None
+            if not isinstance(dur, (int, float)) or dur <= 0:
+                dur = ad.get("recorded_video_duration_seconds")
+            if not isinstance(dur, (int, float)) or dur <= 0:
+                dur = ad.get("ad_duration_seconds")
+            if isinstance(dur, (int, float)) and dur > 0:
+                recorded_ad_seconds += float(dur)
+
+        pure_media_seconds = round(video_watch_seconds + recorded_ad_seconds, 1)
+        total_overhead_seconds = max(0, elapsed_seconds - pure_media_seconds)
+        bootstrap_overhead_per_topic = (
+            round(bootstrap_overhead_seconds / topics_started, 1)
+            if topics_started > 0 else 0.0
+        )
+
+        return {
+            "pure_media_seconds": pure_media_seconds,
+            "video_watch_seconds": round(video_watch_seconds, 1),
+            "recorded_ad_seconds": round(recorded_ad_seconds, 1),
+            "total_overhead_seconds": round(total_overhead_seconds, 1),
+            "bootstrap_overhead_seconds": round(bootstrap_overhead_seconds, 1),
+            "bootstrap_overhead_per_topic": bootstrap_overhead_per_topic,
+            "post_reset_overhead_seconds": round(post_reset_overhead_seconds, 1),
+            "ad_flow_overhead_seconds": round(ad_flow_overhead_seconds, 1),
+            "submit_search_seconds": round(submit_search_seconds, 1),
+            "wait_for_results_seconds": round(wait_for_results_seconds, 1),
+            "open_first_result_seconds": round(open_first_result_seconds, 1),
+            "topics_started": topics_started,
+            "topics_completed": topics_completed,
+            "search_cycles": search_cycles,
+            "topic_reset_attempts": topic_reset_attempts,
+            "topic_reset_timeouts": topic_reset_timeouts,
+            "wait_for_results_timeouts": wait_for_results_timeouts,
+            # Populated by future iterations (cluster reuse, endgame, ad identity):
+            "same_cluster_reuses": 0,
+            "endgame_abort_new_topic": 0,
+            "mixed_identity_detected_count": 0,
+        }
 
     @staticmethod
     def _flatten_watched_ad_summary(ad_record: dict[str, object]) -> dict[str, object]:

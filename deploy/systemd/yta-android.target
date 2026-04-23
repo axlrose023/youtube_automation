@@ -1,7 +1,7 @@
 [Unit]
 Description=YouTube Automation Android Runtime
-Wants=yta-appium.service yta-android-worker.service
-After=yta-appium.service yta-android-worker.service
+Wants=yta-appium.service yta-android-display.service yta-android-worker.service
+After=yta-appium.service yta-android-display.service yta-android-worker.service
 
 [Install]
 WantedBy=multi-user.target

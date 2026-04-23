@@ -1,0 +1,21 @@
+[Unit]
+Description=YouTube Automation Android Display Stack
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/youtube_automation/deploy/android.env
+ConditionPathExists=/opt/youtube_automation/ops/android-bootstrap-ui.sh
+PartOf=yta-android.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/youtube_automation
+EnvironmentFile=/opt/youtube_automation/deploy/android.env
+Environment=YTA_ANDROID_BOOTSTRAP_START_EMULATOR=0
+ExecStart=/usr/bin/env bash /opt/youtube_automation/ops/android-bootstrap-ui.sh start
+ExecStop=/usr/bin/env bash /opt/youtube_automation/ops/android-bootstrap-ui.sh stop
+RemainAfterExit=yes
+TimeoutStartSec=120
+TimeoutStopSec=60
+
+[Install]
+WantedBy=yta-android.target

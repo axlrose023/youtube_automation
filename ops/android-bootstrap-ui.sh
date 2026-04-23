@@ -23,6 +23,7 @@ BOOTSTRAP_AVD_NAME="${APP__ANDROID_APP__BOOTSTRAP_AVD_NAME:-${APP__ANDROID_APP__
 GPU_MODE="${APP__ANDROID_APP__BOOTSTRAP_EMULATOR_GPU_MODE:-swiftshader_indirect}"
 ACCEL_MODE="${APP__ANDROID_APP__BOOTSTRAP_EMULATOR_ACCEL_MODE:-auto}"
 SNAPSHOT_NAME="${APP__ANDROID_APP__RUNTIME_SNAPSHOT_NAME:-youtube_warm_updated}"
+START_EMULATOR="${YTA_ANDROID_BOOTSTRAP_START_EMULATOR:-1}"
 
 mkdir -p "$STATE_DIR"
 
@@ -135,14 +136,18 @@ start_stack() {
   ensure_command websockify
   ensure_command xdpyinfo
   ensure_command adb
-  ensure_command emulator
+  if [[ "$START_EMULATOR" != "0" ]]; then
+    ensure_command emulator
+  fi
 
-  if [[ -z "$BOOTSTRAP_AVD_NAME" ]]; then
+  if [[ "$START_EMULATOR" != "0" && -z "$BOOTSTRAP_AVD_NAME" ]]; then
     echo "Android bootstrap AVD name is not configured." >&2
     exit 1
   fi
 
-  upsert_properties_value "$(avd_config_path "$BOOTSTRAP_AVD_NAME")" "hw.keyboard" "yes"
+  if [[ "$START_EMULATOR" != "0" ]]; then
+    upsert_properties_value "$(avd_config_path "$BOOTSTRAP_AVD_NAME")" "hw.keyboard" "yes"
+  fi
   ensure_vnc_password_file
 
   export DISPLAY
@@ -193,22 +198,26 @@ start_stack() {
 
   adb start-server >/dev/null 2>&1 || true
 
-  if ! require_pid_running "$STATE_DIR/emulator.pid"; then
-    spawn_detached \
-      "$STATE_DIR/emulator.pid" \
-      "$STATE_DIR/emulator.log" \
-      emulator \
-      -avd "$BOOTSTRAP_AVD_NAME" \
-      -gpu "$GPU_MODE" \
-      -accel "$ACCEL_MODE" \
-      -no-boot-anim
-  fi
+  if [[ "$START_EMULATOR" != "0" ]]; then
+    if ! require_pid_running "$STATE_DIR/emulator.pid"; then
+      spawn_detached \
+        "$STATE_DIR/emulator.pid" \
+        "$STATE_DIR/emulator.log" \
+        emulator \
+        -avd "$BOOTSTRAP_AVD_NAME" \
+        -gpu "$GPU_MODE" \
+        -accel "$ACCEL_MODE" \
+        -no-boot-anim
+    fi
 
-  local serial=""
-  if serial="$(wait_for_boot)"; then
-    echo "Android emulator booted: $serial"
+    local serial=""
+    if serial="$(wait_for_boot)"; then
+      echo "Android emulator booted: $serial"
+    else
+      echo "Android emulator start initiated, but boot completion timed out." >&2
+    fi
   else
-    echo "Android emulator start initiated, but boot completion timed out." >&2
+    echo "Android display stack started without booting an emulator."
   fi
 
   local base_url
@@ -220,8 +229,10 @@ start_stack() {
     echo "VNC password: disabled"
   fi
   echo "State dir: $STATE_DIR"
-  echo "After manual Google login + YouTube update run:"
-  echo "  $ROOT_DIR/ops/android-bootstrap-ui.sh save-snapshot"
+  if [[ "$START_EMULATOR" != "0" ]]; then
+    echo "After manual Google login + YouTube update run:"
+    echo "  $ROOT_DIR/ops/android-bootstrap-ui.sh save-snapshot"
+  fi
 }
 
 save_snapshot() {
