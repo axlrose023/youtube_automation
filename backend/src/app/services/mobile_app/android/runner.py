@@ -2262,6 +2262,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
             )
             topic_cursor = 0
             topics_cycled_once = False  # True after first full pass through all topics
+            topic_cap_logged = False
             last_adb_serial: str | None = None
             last_server_url: str | None = None
             last_reused_running_device = False
@@ -2272,22 +2273,34 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
             )
 
             while True:
+                active_topics = self._active_topic_pool(
+                    topics=resolved_topics,
+                    duration_minutes=duration_minutes,
+                )
+                if len(active_topics) < len(resolved_topics) and not topic_cap_logged:
+                    topic_cap_logged = True
+                    print(
+                        "[android-session] topic_pool:capped "
+                        f"active={len(active_topics)} requested={len(resolved_topics)} "
+                        f"duration_minutes={duration_minutes}",
+                        flush=True,
+                    )
                 if deadline is not None and topic_results and time.monotonic() >= deadline:
                     break
                 if deadline is not None:
                     remaining_seconds = deadline - time.monotonic()
                     topic_buffer = self._next_topic_start_buffer_seconds(
-                        topics=resolved_topics,
+                        topics=active_topics,
                         topic_results=topic_results,
                         topics_cycled_once=topics_cycled_once,
                     )
                     if remaining_seconds <= topic_buffer:
                         pending_uncovered = len(
-                            [
-                                candidate
-                                for candidate in resolved_topics
-                                if candidate not in self._covered_topics(topic_results)
-                            ]
+                                [
+                                    candidate
+                                    for candidate in active_topics
+                                    if candidate not in self._covered_topics(topic_results)
+                                ]
                         )
                         print(
                             "[android-session] stop:no_time_for_next_topic "
@@ -2297,28 +2310,6 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             flush=True,
                         )
                         break
-                # Topic cap: limit how many distinct topics we start so each
-                # gets a meaningful watch budget. The cap is a soft ceiling —
-                # we stop only when time is running low (< 240s remaining).
-                # A failed topic (no_result_opened, verified=False) still
-                # counts toward topics_started but must NOT trigger an early
-                # stop while there is still time left; the session should keep
-                # going until the deadline rather than quit after two bad runs.
-                if duration_minutes is not None and topic_results:
-                    topics_cap = max(1, (duration_minutes - 2) // 5)
-                    topics_started_count = len(topic_results)
-                    if topics_started_count >= topics_cap:
-                        remaining_for_extra = (deadline - time.monotonic()) if deadline is not None else 9999.0
-                        if remaining_for_extra < 240.0:
-                            print(
-                                "[android-session] stop:topic_cap_reached "
-                                f"topics_started={topics_started_count} "
-                                f"cap={topics_cap} "
-                                f"remaining={remaining_for_extra:.0f}s "
-                                f"duration_minutes={duration_minutes}",
-                                flush=True,
-                            )
-                            break
                 if session is None or device is None or navigator is None or watcher is None:
                     print("[android-session] device_or_session:acquire", flush=True)
                     try:
@@ -2497,9 +2488,9 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             break
                         await asyncio.sleep(2)
                         continue
-                topic = resolved_topics[topic_cursor % len(resolved_topics)]
+                topic = active_topics[topic_cursor % len(active_topics)]
                 topic_cursor += 1
-                if topic_cursor >= len(resolved_topics):
+                if topic_cursor >= len(active_topics):
                     topics_cycled_once = True
                 print(
                     f"[android-session] topic:start idx={len(topic_results) + 1} topic={topic}",
@@ -3003,7 +2994,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
 
                         target_watch_seconds = self._decide_session_target_watch_seconds(
                             topic=topic,
-                            topics=resolved_topics,
+                            topics=active_topics,
                             topic_results=topic_results,
                             watch_samples=list(getattr(watch_result, "samples", []) or []),
                             started_at=started_at,
@@ -3909,7 +3900,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                 if target_watch_seconds <= 0.0:
                     target_watch_seconds = self._decide_session_target_watch_seconds(
                         topic=topic,
-                        topics=resolved_topics,
+                        topics=active_topics,
                         topic_results=topic_results,
                         watch_samples=[],
                         started_at=started_at,
@@ -4019,8 +4010,19 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                     break
                 if deadline is not None and time.monotonic() >= deadline:
                     break
-                # Return to a clean home surface before the next topic so stale
-                # watch/ad overlays don't break the next submit_search flow.
+                remaining_after_topic = (
+                    deadline - time.monotonic()
+                    if deadline is not None
+                    else float("inf")
+                )
+                if remaining_after_topic > 75.0:
+                    # The next submit_search uses a fast YouTube results deeplink
+                    # from the current watch surface. Avoid the expensive home reset
+                    # path here; it was timing out on the server after every topic.
+                    topic_notes.append("topic_post_reset_skipped:next_search_deeplink")
+                    continue
+                # Near the end, return to a clean home surface only if there is
+                # not enough time to start another useful search/watch cycle.
                 if navigator is not None:
                     try:
                         await self._reset_to_home_with_timeout(
@@ -5225,6 +5227,20 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         return None
 
     @staticmethod
+    def _active_topic_pool(
+        *,
+        topics: list[str],
+        duration_minutes: int | None,
+    ) -> list[str]:
+        if not topics:
+            return []
+        if duration_minutes is None or duration_minutes <= 0:
+            return topics
+        distinct_cap = max(1, (duration_minutes - 2) // 5)
+        distinct_cap = min(len(topics), distinct_cap)
+        return topics[:distinct_cap]
+
+    @staticmethod
     def _covered_topics(topic_results: list[AndroidSessionTopicResult]) -> set[str]:
         return {
             (item.topic or "").strip()
@@ -5351,7 +5367,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
             budget = max(remaining_seconds - pending_count * COVERAGE_SEARCH_OVERHEAD_S, 0.0)
             dynamic_cap = max(
                 COVERAGE_CAP_MIN_S,
-                (budget / max(pending_count + 1, 1)) * COVERAGE_CAP_BUDGET_FRACTION,
+                (budget / max(pending_count, 1)) * COVERAGE_CAP_BUDGET_FRACTION,
             )
             target = min(target, min(default_cap, dynamic_cap))
 

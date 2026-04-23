@@ -1121,7 +1121,7 @@ class AndroidYouTubeNavigator:
             self._press_back_sync()
             time.sleep(1.0)
         for attempt_idx in range(8):
-            sponsor_bounds = self._extract_current_sponsored_bounds_sync()
+            sponsor_bounds: list[tuple[int, int, int, int]] | None = None
             if query and self._recover_results_after_system_dialog_sync(query):
                 logger.info(
                     "open_first_result: query=%s attempt=%s branch=recover_after_system_dialog",
@@ -1276,6 +1276,8 @@ class AndroidYouTubeNavigator:
                 )
                 time.sleep(0.8)
                 continue
+            if sponsor_bounds is None:
+                sponsor_bounds = self._extract_current_sponsored_bounds_sync()
 
             for overlap_only in (True, False):
                 for candidate in self._rank_result_candidates_sync(
