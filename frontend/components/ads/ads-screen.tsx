@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  ChevronLeft,
   ChevronRight,
   CheckCircle,
   XCircle,
@@ -16,6 +15,7 @@ import {
   Search,
   X,
   BarChart3,
+  ChevronDown,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -35,10 +35,15 @@ type AdEntry = EmulationAdCapture & {
   _index: number;
 };
 
+type SessionGroup = {
+  session_id: string;
+  session_started_at: string | null;
+  session_topics: string[];
+  ads: AdEntry[];
+};
+
 type AnalysisFilter = "all" | "relevant" | "not_relevant" | "pending";
 type SortKey = "date" | "duration";
-
-const PAGE_SIZE = 12;
 
 // ─── Domain helpers ──────────────────────────────────────────────────────────
 
@@ -200,10 +205,64 @@ function AdCard({ ad, onClick }: { ad: AdEntry; onClick: () => void }) {
             )}
           </div>
         </div>
-
-        <div className="text-[11px] text-[var(--muted)]">{formatDate(ad.session_started_at ?? "")}</div>
       </div>
     </button>
+  );
+}
+
+// ─── Session group block ──────────────────────────────────────────────────────
+
+function SessionGroupBlock({ group, onAdClick }: { group: SessionGroup; onAdClick: (ad: AdEntry) => void }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const relevant = group.ads.filter((a) => getAnalysisResult(a) === "relevant").length;
+  const total = group.ads.length;
+
+  return (
+    <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel-soft)] overflow-hidden">
+      {/* Session header */}
+      <button
+        onClick={() => setCollapsed((v) => !v)}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-[var(--panel-soft)] transition"
+      >
+        <Globe size={14} className="shrink-0 text-[var(--muted)]" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold text-[var(--ink)]">{formatDate(group.session_started_at ?? "")}</span>
+            <span className="font-mono text-[11px] text-[var(--muted)]">{group.session_id.slice(0, 8)}</span>
+          </div>
+          {group.session_topics.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {group.session_topics.map((t) => (
+                <span key={t} className="rounded-md bg-white border border-[var(--line)] px-2 py-0.5 text-[11px] text-[var(--ink-secondary)]">{t}</span>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700">{relevant} рел.</span>
+          <span className="rounded-full bg-[var(--panel-soft)] border border-[var(--line)] px-2.5 py-0.5 text-[11px] text-[var(--muted)]">{total} всего</span>
+          <ChevronDown
+            size={15}
+            className={`text-[var(--muted)] transition-transform ${collapsed ? "-rotate-90" : ""}`}
+          />
+        </div>
+      </button>
+
+      {/* Ads grid */}
+      {!collapsed && (
+        <div className="border-t border-[var(--line)] bg-white p-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            {group.ads.map((ad) => (
+              <AdCard
+                key={`${ad.session_id}-${ad.ad_position}-${ad._index}`}
+                ad={ad}
+                onClick={() => onAdClick(ad)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -361,44 +420,6 @@ function FilterPill({ active, count, onClick, children }: { active: boolean; cou
   );
 }
 
-// ─── Pagination ───────────────────────────────────────────────────────────────
-
-function Pagination({ page, total, pageSize, onChange }: { page: number; total: number; pageSize: number; onChange: (p: number) => void }) {
-  const pages = Math.ceil(total / pageSize);
-  if (pages <= 1) return null;
-  return (
-    <div className="flex items-center justify-center gap-2 pt-2">
-      <button
-        disabled={page === 1}
-        onClick={() => onChange(page - 1)}
-        className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--muted)] disabled:opacity-30 hover:border-[var(--brand)] hover:text-[var(--brand)] transition"
-      >
-        <ChevronLeft size={15} />
-      </button>
-      {Array.from({ length: pages }, (_, i) => i + 1).map((p) => (
-        <button
-          key={p}
-          onClick={() => onChange(p)}
-          className={`flex h-8 w-8 items-center justify-center rounded-lg border text-xs font-medium transition ${
-            p === page
-              ? "border-[var(--brand)] bg-[var(--brand)] text-white"
-              : "border-[var(--line)] text-[var(--muted)] hover:border-[var(--brand)] hover:text-[var(--brand)]"
-          }`}
-        >
-          {p}
-        </button>
-      ))}
-      <button
-        disabled={page === pages}
-        onClick={() => onChange(page + 1)}
-        className="flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--muted)] disabled:opacity-30 hover:border-[var(--brand)] hover:text-[var(--brand)] transition"
-      >
-        <ChevronRight size={15} />
-      </button>
-    </div>
-  );
-}
-
 // ─── Main screen ─────────────────────────────────────────────────────────────
 
 export function AdsScreen() {
@@ -410,7 +431,6 @@ export function AdsScreen() {
   const [search, setSearch] = useState("");
   const [analysisFilter, setAnalysisFilter] = useState<AnalysisFilter>("relevant");
   const [sortBy, setSortBy] = useState<SortKey>("date");
-  const [page, setPage] = useState(1);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -473,19 +493,36 @@ export function AdsScreen() {
         return r === analysisFilter;
       });
     }
-    return [...result].sort((a, b) => {
-      if (sortBy === "duration") return (b.ad_duration_seconds ?? 0) - (a.ad_duration_seconds ?? 0);
-      return (b.session_started_at ?? "").localeCompare(a.session_started_at ?? "");
-    });
-  }, [allAds, search, analysisFilter, sortBy]);
+    return result;
+  }, [allAds, search, analysisFilter]);
 
-  // Reset page when filters change
-  useEffect(() => { setPage(1); }, [search, analysisFilter, sortBy]);
-
-  const paginated = useMemo(() => {
-    const start = (page - 1) * PAGE_SIZE;
-    return filtered.slice(start, start + PAGE_SIZE);
-  }, [filtered, page]);
+  // Group by session, sorted by session date desc
+  const grouped: SessionGroup[] = useMemo(() => {
+    const map = new Map<string, SessionGroup>();
+    for (const ad of filtered) {
+      if (!map.has(ad.session_id)) {
+        map.set(ad.session_id, {
+          session_id: ad.session_id,
+          session_started_at: ad.session_started_at,
+          session_topics: ad.session_topics,
+          ads: [],
+        });
+      }
+      map.get(ad.session_id)!.ads.push(ad);
+    }
+    const groups = Array.from(map.values());
+    if (sortBy === "date") {
+      groups.sort((a, b) => (b.session_started_at ?? "").localeCompare(a.session_started_at ?? ""));
+    } else {
+      // by total duration within session desc
+      groups.sort((a, b) => {
+        const sumA = a.ads.reduce((s, ad) => s + (ad.ad_duration_seconds ?? 0), 0);
+        const sumB = b.ads.reduce((s, ad) => s + (ad.ad_duration_seconds ?? 0), 0);
+        return sumB - sumA;
+      });
+    }
+    return groups;
+  }, [filtered, sortBy]);
 
   if (loading) return <Loader label="Загрузка реклам…" />;
   if (error) return (
@@ -629,35 +666,26 @@ export function AdsScreen() {
 
             {/* Count */}
             {filtered.length !== allAds.length && (
-              <p className="text-xs text-[var(--muted)]">Показано {filtered.length} из {allAds.length}</p>
+              <p className="text-xs text-[var(--muted)]">Показано {filtered.length} из {allAds.length} · {grouped.length} сессий</p>
             )}
 
-            {/* Grid */}
-            {filtered.length === 0 ? (
+            {/* Groups */}
+            {grouped.length === 0 ? (
               <EmptyState
                 title="Рекламы не найдены"
                 description={allAds.length === 0 ? "Запустите эмуляцию — захваченные рекламы появятся здесь" : "Нет реклам по текущим фильтрам"}
                 action={allAds.length > 0 ? <Button onClick={() => { setSearch(""); setAnalysisFilter("all"); }}>Сбросить фильтры</Button> : undefined}
               />
             ) : (
-              <>
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                  {paginated.map((ad) => (
-                    <AdCard
-                      key={`${ad.session_id}-${ad.ad_position}-${ad._index}`}
-                      ad={ad}
-                      onClick={() => setSelectedAd(ad)}
-                    />
-                  ))}
-                </div>
-
-                <Pagination
-                  page={page}
-                  total={filtered.length}
-                  pageSize={PAGE_SIZE}
-                  onChange={(p) => { setPage(p); window.scrollTo({ top: 0, behavior: "smooth" }); }}
-                />
-              </>
+              <div className="space-y-4">
+                {grouped.map((group) => (
+                  <SessionGroupBlock
+                    key={group.session_id}
+                    group={group}
+                    onAdClick={setSelectedAd}
+                  />
+                ))}
+              </div>
             )}
           </div>
         </div>
