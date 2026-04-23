@@ -1657,6 +1657,7 @@ class AndroidYouTubeNavigator:
                 candidate,
                 query,
                 prefer_center_first=relaxed_cutoff_used and not candidate.is_sponsored,
+                allow_offtopic_result=relaxed_cutoff_used,
             )
             if opened_title is not None:
                 return opened_title
@@ -1668,6 +1669,7 @@ class AndroidYouTubeNavigator:
         query: str,
         *,
         prefer_center_first: bool = False,
+        allow_offtopic_result: bool = False,
     ) -> str | None:
         self._last_tapped_result_title = candidate.title
         self._last_tapped_result_is_short = candidate.is_short
@@ -1727,6 +1729,7 @@ class AndroidYouTubeNavigator:
                 if (
                     query
                     and resolved_title
+                    and not allow_offtopic_result
                     and not self._titles_overlap_sync(resolved_title, query)
                     and not self._is_reasonable_topic_video_title_sync(resolved_title, query)
                 ):
