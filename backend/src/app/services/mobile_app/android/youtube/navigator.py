@@ -882,9 +882,13 @@ class AndroidYouTubeNavigator:
         self._dismiss_possible_dialogs_sync()
         self._dismiss_miniplayer_on_results_sync()
         self._escape_reel_surface_for_query_sync(query)
+        # Fast path: surface already ready before entering the poll loop.
+        if query and self._has_query_ready_surface_sync(query):
+            return
+        if query and self._has_any_search_result_candidate_sync(query):
+            return
         if query:
             self._recover_results_surface_sync(query)
-        # Fast path: surface already ready before entering the poll loop.
         if query and self._has_query_ready_surface_sync(query):
             return
         if query and self._has_any_search_result_candidate_sync(query):
