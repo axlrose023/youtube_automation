@@ -3448,7 +3448,17 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                         f"round={_midroll_round + 1} reason=continuation_cap",
                                         flush=True,
                                     )
-                                    break
+                                    with contextlib.suppress(Exception):
+                                        await watcher.restore_primary_watch_surface()
+                                    with contextlib.suppress(Exception):
+                                        await watcher.dismiss_residual_ad_if_present()
+                                    with contextlib.suppress(Exception):
+                                        await watcher.ensure_playing()
+                                    _midroll_continuation_duplicate_rounds = 0
+                                    topic_notes.append(
+                                        f"midroll_duplicate_cap_continue_watch:round{_midroll_round + 1}"
+                                    )
+                                    continue
                                 continue
                             _midroll_continuation_duplicate_rounds = 0
                             _mr_raw_hints: list[str] = []
@@ -3502,7 +3512,16 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     f"[android-session] stage:midroll_ad_skip_duplicate round={_midroll_round + 1}",
                                     flush=True,
                                 )
-                                break  # same banner — stop looping
+                                with contextlib.suppress(Exception):
+                                    await watcher.restore_primary_watch_surface()
+                                with contextlib.suppress(Exception):
+                                    await watcher.dismiss_residual_ad_if_present()
+                                with contextlib.suppress(Exception):
+                                    await watcher.ensure_playing()
+                                topic_notes.append(
+                                    f"midroll_duplicate_continue_watch:round{_midroll_round + 1}"
+                                )
+                                continue  # same banner — clear it and keep filling watch target
 
                             topic_notes.append(f"midroll_ad_catch:round{_midroll_round + 1}")
                             print(

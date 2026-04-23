@@ -887,6 +887,8 @@ class AndroidYouTubeNavigator:
         # Fast path: surface already ready before entering the poll loop.
         if query and self._has_query_ready_surface_sync(query):
             return
+        if query and self._has_any_search_result_candidate_sync(query):
+            return
         if self._has_results_surface_sync() and self._has_openable_result_sync():
             return
         text_fallback_attempted = False
@@ -966,12 +968,16 @@ class AndroidYouTubeNavigator:
                     continue
             if query and self._has_query_ready_surface_sync(query):
                 return
+            if query and self._has_any_search_result_candidate_sync(query):
+                return
             if self._advance_past_short_only_results_sync(query):
                 deadline = min(max(deadline, time.monotonic() + 6), hard_cap)
                 continue
             if query:
                 self._recover_results_surface_sync(query)
             if query and self._has_query_ready_surface_sync(query):
+                return
+            if query and self._has_any_search_result_candidate_sync(query):
                 return
             if self._is_watch_surface_for_query_sync(query):
                 return
@@ -992,6 +998,8 @@ class AndroidYouTubeNavigator:
                 if handled_dialog:
                     second_deadline = max(second_deadline, time.monotonic() + 6)
                 if query and self._has_query_ready_surface_sync(query):
+                    return
+                if query and self._has_any_search_result_candidate_sync(query):
                     return
                 if self._advance_past_short_only_results_sync(query):
                     second_deadline = max(second_deadline, time.monotonic() + 6)
@@ -3109,6 +3117,40 @@ class AndroidYouTubeNavigator:
             title = self._extract_result_title_sync(element)
             if title and not self._is_placeholder_result_title(title):
                 return True
+        return False
+
+    def _has_any_search_result_candidate_sync(self, query: str | None = None) -> bool:
+        if not self._has_search_context_sync() and self._extract_results_bounds_sync() is None:
+            return False
+
+        def _usable_title(raw_title: str | None) -> bool:
+            title = (raw_title or "").strip()
+            if not title or self._is_placeholder_result_title(title):
+                return False
+            return not self._should_skip_result_title_for_query_sync(title, query)
+
+        for candidate in self._extract_result_candidates_from_page_source_sync():
+            if _usable_title(candidate.title):
+                return True
+        for candidate in self._extract_title_result_candidates_from_page_source_sync():
+            if _usable_title(candidate.title):
+                return True
+        for candidate in self._extract_text_result_candidates_from_page_source_sync(query):
+            if _usable_title(candidate.title):
+                return True
+
+        for candidate_id in selectors.RESULT_TITLE_IDS:
+            try:
+                elements = self._driver.find_elements("id", candidate_id)
+            except Exception:
+                elements = []
+            for element in elements:
+                try:
+                    text = (getattr(element, "text", "") or "").strip()
+                except Exception:
+                    continue
+                if _usable_title(text):
+                    return True
         return False
 
     def _has_short_only_results_sync(self) -> bool:
