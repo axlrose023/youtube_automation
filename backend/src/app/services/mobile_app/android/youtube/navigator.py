@@ -1779,12 +1779,37 @@ class AndroidYouTubeNavigator:
                     self._extract_current_watch_title_for_query_sync(query)
                     or self._extract_current_watch_title_sync()
                 )
+                resolved_title_matches_query = bool(
+                    query
+                    and resolved_title
+                    and (
+                        self._titles_overlap_sync(resolved_title, query)
+                        or self._is_reasonable_topic_video_title_sync(resolved_title, query)
+                    )
+                )
+                candidate_title_matches_query = bool(
+                    query
+                    and (
+                        self._titles_overlap_sync(candidate.title, query)
+                        or self._is_reasonable_topic_video_title_sync(candidate.title, query)
+                    )
+                )
+                if (
+                    resolved_title
+                    and not resolved_title_matches_query
+                    and candidate_title_matches_query
+                ):
+                    logger.info(
+                        "sponsor_fallback_keep_candidate_title: candidate=%s resolved=%s",
+                        candidate.title,
+                        resolved_title,
+                    )
+                    return candidate.title
                 if (
                     query
                     and resolved_title
                     and not allow_offtopic_result
-                    and not self._titles_overlap_sync(resolved_title, query)
-                    and not self._is_reasonable_topic_video_title_sync(resolved_title, query)
+                    and not resolved_title_matches_query
                 ):
                     logger.info(
                         "sponsor_fallback_reject_opened: candidate=%s resolved=%s",
