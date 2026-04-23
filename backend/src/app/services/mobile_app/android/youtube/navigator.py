@@ -1641,6 +1641,40 @@ class AndroidYouTubeNavigator:
                 candidates = surface_candidates
                 relaxed_cutoff_used = True
 
+        if not candidates:
+            any_search_candidates: list[NativeResultCandidate] = []
+            seen_any_search: set[tuple[str, tuple[int, int, int, int]]] = set()
+            for candidate in (
+                *raw_playable_candidates,
+                *raw_text_candidates,
+            ):
+                key = (candidate.title, candidate.bounds)
+                if key in seen_any_search:
+                    continue
+                seen_any_search.add(key)
+                if self._should_skip_result_title_for_query_sync(candidate.title, query):
+                    continue
+                any_search_candidates.append(candidate)
+            if any_search_candidates:
+                any_search_candidates.sort(
+                    key=lambda item: (
+                        item.is_short,
+                        item.is_sponsored,
+                        item.bounds[1],
+                        item.bounds[0],
+                    )
+                )
+                logger.info(
+                    "sponsor_fallback_any_search: query=%s candidates=%s",
+                    query,
+                    [
+                        (candidate.title, candidate.bounds, candidate.is_sponsored, candidate.is_short)
+                        for candidate in any_search_candidates[:4]
+                    ],
+                )
+                candidates = any_search_candidates
+                relaxed_cutoff_used = True
+
         logger.info(
             "sponsor_fallback_filtered: query=%s candidates=%s",
             query,
