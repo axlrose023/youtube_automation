@@ -1227,6 +1227,17 @@ class AndroidYouTubeNavigator:
                 )
                 if titled_organic_opened is not None:
                     return titled_organic_opened
+                top_region_started_at = time.monotonic()
+                top_region_opened = self._tap_top_result_region_sync(query)
+                logger.info(
+                    "open_first_result: query=%s attempt=%s branch=post_top_region seconds=%.2f opened=%s",
+                    query,
+                    attempt_idx + 1,
+                    time.monotonic() - top_region_started_at,
+                    top_region_opened,
+                )
+                if top_region_opened is not None:
+                    return top_region_opened
             if self._advance_past_short_only_results_sync(query):
                 logger.info(
                     "open_first_result: query=%s attempt=%s branch=advance_past_nonorganic",
