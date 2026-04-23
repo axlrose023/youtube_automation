@@ -1612,13 +1612,13 @@ class AndroidYouTubeNavigator:
                 if key in seen_surface:
                     continue
                 seen_surface.add(key)
-                if candidate.is_short or candidate.is_sponsored:
+                if candidate.is_sponsored:
                     continue
                 if self._should_skip_result_title_for_query_sync(candidate.title, query):
                     continue
                 surface_candidates.append(candidate)
             if surface_candidates:
-                surface_candidates.sort(key=lambda item: (item.bounds[1], item.bounds[0]))
+                surface_candidates.sort(key=lambda item: (item.is_short, item.bounds[1], item.bounds[0]))
                 logger.info(
                     "sponsor_fallback_surface_order: query=%s candidates=%s",
                     query,
@@ -1658,6 +1658,7 @@ class AndroidYouTubeNavigator:
                 query,
                 prefer_center_first=relaxed_cutoff_used and not candidate.is_sponsored,
                 allow_offtopic_result=relaxed_cutoff_used,
+                allow_reel_result=relaxed_cutoff_used and candidate.is_short,
             )
             if opened_title is not None:
                 return opened_title
@@ -1670,6 +1671,7 @@ class AndroidYouTubeNavigator:
         *,
         prefer_center_first: bool = False,
         allow_offtopic_result: bool = False,
+        allow_reel_result: bool = False,
     ) -> str | None:
         self._last_tapped_result_title = candidate.title
         self._last_tapped_result_is_short = candidate.is_short
@@ -1718,6 +1720,12 @@ class AndroidYouTubeNavigator:
                 opened,
             )
             if opened:
+                is_reel_result = (
+                    self._is_reel_watch_surface_sync()
+                    or self._is_reel_watch_surface_via_adb_sync()
+                )
+                if is_reel_result and allow_reel_result:
+                    return candidate.title
                 if self._reject_reel_watch_surface_sync():
                     self._recover_results_surface_sync(query)
                     time.sleep(0.8)
