@@ -28,6 +28,10 @@ router = APIRouter(
     route_class=DishkaRoute,
     dependencies=[Depends(AuthenticateMainRoles())],
 )
+
+# Public router — no auth required for serving artifact files (screenshots, videos).
+# Mounted at the same /emulation prefix but without the auth dependency.
+public_router = APIRouter(route_class=DishkaRoute)
 @router.post("/start")
 async def start_emulation(
     request: StartEmulationRequest,
@@ -148,7 +152,7 @@ async def get_emulation_captures(
     )
 
 
-@router.get("/media/{media_path:path}")
+@public_router.get("/media/{media_path:path}")
 async def get_emulation_media(
     media_path: str,
 ) -> FileResponse:
