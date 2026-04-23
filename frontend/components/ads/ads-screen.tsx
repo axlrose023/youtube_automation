@@ -133,11 +133,18 @@ function AdThumbnail({ ad }: { ad: AdEntry }) {
   const firstShot = ad.screenshot_paths[0];
   const shotUrl = firstShot ? buildMediaPath(firstShot.file_path) : null;
   const hasVideo = Boolean(ad.video_file && ad.video_status === "completed");
+  const [failed, setFailed] = useState(false);
 
-  if (shotUrl) {
+  if (shotUrl && !failed) {
     return (
       <div className="relative w-full overflow-hidden rounded-xl bg-[var(--panel-soft)]" style={{ aspectRatio: "16/9" }}>
-        <img src={shotUrl} alt="" className="h-full w-full object-cover" loading="lazy" />
+        <img
+          src={shotUrl}
+          alt=""
+          className="h-full w-full object-cover"
+          loading="lazy"
+          onError={() => setFailed(true)}
+        />
         {hasVideo && (
           <div className="absolute bottom-2 right-2 flex items-center gap-1 rounded-lg bg-black/70 px-2 py-1 text-[10px] font-semibold text-white backdrop-blur-sm">
             <Film size={10} /> Видео
@@ -401,7 +408,7 @@ export function AdsScreen() {
   const [selectedAd, setSelectedAd] = useState<AdEntry | null>(null);
 
   const [search, setSearch] = useState("");
-  const [analysisFilter, setAnalysisFilter] = useState<AnalysisFilter>("all");
+  const [analysisFilter, setAnalysisFilter] = useState<AnalysisFilter>("relevant");
   const [sortBy, setSortBy] = useState<SortKey>("date");
   const [page, setPage] = useState(1);
 
