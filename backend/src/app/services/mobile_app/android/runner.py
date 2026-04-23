@@ -2297,29 +2297,24 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             flush=True,
                         )
                         break
-                # Soft cap: first cover a realistic number of topics for the duration,
-                # then keep using the remaining time if there is enough budget for a
-                # useful extra watch. We avoid stopping early on short sessions; the cap
-                # only prevents starting a new bootstrap when the remaining time is too
-                # small to turn into meaningful watch time.
+                # Topic cap: limit how many distinct topics we start so each
+                # gets a meaningful watch budget. The cap is a soft ceiling —
+                # we stop only when time is running low (< 240s remaining).
+                # A failed topic (no_result_opened, verified=False) still
+                # counts toward topics_started but must NOT trigger an early
+                # stop while there is still time left; the session should keep
+                # going until the deadline rather than quit after two bad runs.
                 if duration_minutes is not None and topic_results:
                     topics_cap = max(1, (duration_minutes - 2) // 5)
                     topics_started_count = len(topic_results)
                     if topics_started_count >= topics_cap:
-                        all_covered = all(
-                            candidate in self._covered_topics(topic_results)
-                            for candidate in resolved_topics[:topics_cap]
-                        )
                         remaining_for_extra = (deadline - time.monotonic()) if deadline is not None else 9999.0
-                        allow_extra_topic = (
-                            all_covered
-                            and remaining_for_extra >= 240.0
-                        )
-                        if not allow_extra_topic:
+                        if remaining_for_extra < 240.0:
                             print(
                                 "[android-session] stop:topic_cap_reached "
                                 f"topics_started={topics_started_count} "
                                 f"cap={topics_cap} "
+                                f"remaining={remaining_for_extra:.0f}s "
                                 f"duration_minutes={duration_minutes}",
                                 flush=True,
                             )
