@@ -1556,7 +1556,7 @@ class AndroidYouTubeNavigator:
             if key in seen:
                 continue
             seen.add(key)
-            if candidate.is_short:
+            if candidate.is_short or candidate.is_sponsored:
                 continue
             if self._should_skip_result_title_for_query_sync(candidate.title, query):
                 continue
@@ -1564,12 +1564,9 @@ class AndroidYouTubeNavigator:
             title_score = self._score_result_title_for_query_sync(candidate.title, query)
             if not title_overlap and title_score < 5.0:
                 continue
-            if candidate.bounds[1] <= candidate_cutoff + 24:
+            if cta_bounds and candidate.bounds[1] <= candidate_cutoff + 24:
                 continue
             candidates.append(candidate)
-
-        if any(not candidate.is_sponsored for candidate in candidates):
-            candidates = [candidate for candidate in candidates if not candidate.is_sponsored]
 
         if not candidates and not cta_bounds:
             relaxed_candidates: list[NativeResultCandidate] = []
@@ -1602,6 +1599,35 @@ class AndroidYouTubeNavigator:
                     ],
                 )
                 candidates = relaxed_candidates
+                relaxed_cutoff_used = True
+
+        if not candidates and not cta_bounds:
+            surface_candidates: list[NativeResultCandidate] = []
+            seen_surface: set[tuple[str, tuple[int, int, int, int]]] = set()
+            for candidate in (
+                *raw_playable_candidates,
+                *raw_text_candidates,
+            ):
+                key = (candidate.title, candidate.bounds)
+                if key in seen_surface:
+                    continue
+                seen_surface.add(key)
+                if candidate.is_short or candidate.is_sponsored:
+                    continue
+                if self._should_skip_result_title_for_query_sync(candidate.title, query):
+                    continue
+                surface_candidates.append(candidate)
+            if surface_candidates:
+                surface_candidates.sort(key=lambda item: (item.bounds[1], item.bounds[0]))
+                logger.info(
+                    "sponsor_fallback_surface_order: query=%s candidates=%s",
+                    query,
+                    [
+                        (candidate.title, candidate.bounds)
+                        for candidate in surface_candidates[:4]
+                    ],
+                )
+                candidates = surface_candidates
                 relaxed_cutoff_used = True
 
         logger.info(
@@ -4020,11 +4046,24 @@ class AndroidYouTubeNavigator:
             title = desc.split(" - ", 1)[0].strip()
             if not title or self._is_placeholder_result_title(title):
                 continue
-            candidate_bounds = self._normalize_playable_candidate_bounds_sync(bounds, results_bounds)
+            is_short = "play short" in lowered
+            left, top, right, bottom = bounds
+            raw_width = max(0, right - left)
+            raw_height = max(0, bottom - top)
+            if not is_short and (raw_height < 48 or raw_width < 160):
+                # YouTube sometimes exposes a "play video" accessibility node with
+                # a 1-4px height above the real result card. Tapping its normalized
+                # area misses the card and causes open_first_result timeouts.
+                continue
+            candidate_bounds = (
+                bounds
+                if is_short
+                else self._normalize_playable_candidate_bounds_sync(bounds, results_bounds)
+            )
             candidate = NativeResultCandidate(
                 title=title,
                 bounds=candidate_bounds,
-                is_short="play short" in lowered,
+                is_short=is_short,
                 is_sponsored=("sponsored" in lowered or "sponsor" in lowered or "спонс" in lowered) or any(
                     self._bounds_overlap_sync(bounds, sponsor)
                     for sponsor in sponsor_bounds
