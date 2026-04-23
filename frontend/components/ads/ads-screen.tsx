@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ChevronRight,
+  ChevronLeft,
   CheckCircle,
   XCircle,
   Clock,
@@ -15,7 +16,6 @@ import {
   Search,
   X,
   BarChart3,
-  ChevronDown,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -165,7 +165,9 @@ function AdThumbnail({ ad }: { ad: AdEntry }) {
   );
 }
 
-// ─── Ad Card ─────────────────────────────────────────────────────────────────
+// ─── Ad Card (fixed width for horizontal scroll) ──────────────────────────────
+
+const CARD_WIDTH = 260;
 
 function AdCard({ ad, onClick }: { ad: AdEntry; onClick: () => void }) {
   const { name: advertiser, domain } = resolveAdIdentity(ad);
@@ -174,6 +176,7 @@ function AdCard({ ad, onClick }: { ad: AdEntry; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
+      style={{ width: CARD_WIDTH, minWidth: CARD_WIDTH }}
       className="group flex flex-col overflow-hidden rounded-2xl border border-[var(--line)] bg-white text-left transition-all hover:border-[var(--brand)] hover:shadow-lg"
     >
       <div className="p-3 pb-0">
@@ -210,58 +213,77 @@ function AdCard({ ad, onClick }: { ad: AdEntry; onClick: () => void }) {
   );
 }
 
-// ─── Session group block ──────────────────────────────────────────────────────
+// ─── Session row (horizontal scroll) ─────────────────────────────────────────
 
-function SessionGroupBlock({ group, onAdClick }: { group: SessionGroup; onAdClick: (ad: AdEntry) => void }) {
-  const [collapsed, setCollapsed] = useState(false);
+function SessionRow({ group, onAdClick }: { group: SessionGroup; onAdClick: (ad: AdEntry) => void }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
   const relevant = group.ads.filter((a) => getAnalysisResult(a) === "relevant").length;
-  const total = group.ads.length;
+
+  const scroll = (dir: "left" | "right") => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollBy({ left: dir === "right" ? CARD_WIDTH * 2 + 16 : -(CARD_WIDTH * 2 + 16), behavior: "smooth" });
+  };
 
   return (
-    <div className="rounded-2xl border border-[var(--line)] bg-[var(--panel-soft)] overflow-hidden">
-      {/* Session header */}
-      <button
-        onClick={() => setCollapsed((v) => !v)}
-        className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-[var(--panel-soft)] transition"
-      >
-        <Globe size={14} className="shrink-0 text-[var(--muted)]" />
+    <div>
+      {/* Row header */}
+      <div className="mb-3 flex items-center gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-[var(--ink)]">{formatDate(group.session_started_at ?? "")}</span>
             <span className="font-mono text-[11px] text-[var(--muted)]">{group.session_id.slice(0, 8)}</span>
+            {group.session_topics.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {group.session_topics.map((t) => (
+                  <span key={t} className="rounded-md bg-[var(--panel-soft)] border border-[var(--line)] px-2 py-0.5 text-[11px] text-[var(--ink-secondary)]">{t}</span>
+                ))}
+              </div>
+            )}
           </div>
-          {group.session_topics.length > 0 && (
-            <div className="mt-1 flex flex-wrap gap-1">
-              {group.session_topics.map((t) => (
-                <span key={t} className="rounded-md bg-white border border-[var(--line)] px-2 py-0.5 text-[11px] text-[var(--ink-secondary)]">{t}</span>
-              ))}
-            </div>
-          )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <span className="rounded-full bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700">{relevant} рел.</span>
-          <span className="rounded-full bg-[var(--panel-soft)] border border-[var(--line)] px-2.5 py-0.5 text-[11px] text-[var(--muted)]">{total} всего</span>
-          <ChevronDown
-            size={15}
-            className={`text-[var(--muted)] transition-transform ${collapsed ? "-rotate-90" : ""}`}
-          />
+          <span className="text-[11px] text-[var(--muted)]">{group.ads.length} всего</span>
+          <Link
+            to={`/sessions/${group.session_id}`}
+            className="flex items-center gap-1 text-[11px] text-[var(--brand)] hover:underline"
+          >
+            <PlayCircle size={11} /> Сессия
+          </Link>
+          {group.ads.length > 3 && (
+            <div className="flex gap-1">
+              <button
+                onClick={() => scroll("left")}
+                className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--muted)] hover:border-[var(--brand)] hover:text-[var(--brand)] transition"
+              >
+                <ChevronLeft size={13} />
+              </button>
+              <button
+                onClick={() => scroll("right")}
+                className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--line)] text-[var(--muted)] hover:border-[var(--brand)] hover:text-[var(--brand)] transition"
+              >
+                <ChevronRight size={13} />
+              </button>
+            </div>
+          )}
         </div>
-      </button>
+      </div>
 
-      {/* Ads grid */}
-      {!collapsed && (
-        <div className="border-t border-[var(--line)] bg-white p-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {group.ads.map((ad) => (
-              <AdCard
-                key={`${ad.session_id}-${ad.ad_position}-${ad._index}`}
-                ad={ad}
-                onClick={() => onAdClick(ad)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Horizontal scroll track */}
+      <div
+        ref={scrollRef}
+        className="flex gap-3 overflow-x-auto pb-2"
+        style={{ scrollbarWidth: "none" }}
+      >
+        {group.ads.map((ad) => (
+          <AdCard
+            key={`${ad.session_id}-${ad.ad_position}-${ad._index}`}
+            ad={ad}
+            onClick={() => onAdClick(ad)}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -297,7 +319,6 @@ function AdModal({ ad, onClose }: { ad: AdEntry; onClose: () => void }) {
       onClick={(e) => { if (e.target === overlayRef.current) onClose(); }}
     >
       <div className="relative flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
-        {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
           <div className="min-w-0">
             <div className="truncate font-semibold text-[var(--ink)]">{advertiser}</div>
@@ -313,7 +334,6 @@ function AdModal({ ad, onClose }: { ad: AdEntry; onClose: () => void }) {
           </button>
         </div>
 
-        {/* Body */}
         <div className="flex-1 overflow-y-auto">
           <div className="space-y-4 p-5">
             {result && (
@@ -377,7 +397,6 @@ function AdModal({ ad, onClose }: { ad: AdEntry; onClose: () => void }) {
           </div>
         </div>
 
-        {/* Footer */}
         <div className="flex items-center gap-2 border-t border-[var(--line)] px-5 py-3">
           {ad.landing_url && (
             <a href={ad.landing_url} target="_blank" rel="noreferrer" className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-3 py-1.5 text-xs text-[var(--ink-secondary)] hover:bg-[var(--panel-soft)] transition">
@@ -496,7 +515,6 @@ export function AdsScreen() {
     return result;
   }, [allAds, search, analysisFilter]);
 
-  // Group by session, sorted by session date desc
   const grouped: SessionGroup[] = useMemo(() => {
     const map = new Map<string, SessionGroup>();
     for (const ad of filtered) {
@@ -514,7 +532,6 @@ export function AdsScreen() {
     if (sortBy === "date") {
       groups.sort((a, b) => (b.session_started_at ?? "").localeCompare(a.session_started_at ?? ""));
     } else {
-      // by total duration within session desc
       groups.sort((a, b) => {
         const sumA = a.ads.reduce((s, ad) => s + (ad.ad_duration_seconds ?? 0), 0);
         const sumB = b.ads.reduce((s, ad) => s + (ad.ad_duration_seconds ?? 0), 0);
@@ -552,10 +569,8 @@ export function AdsScreen() {
           {/* ── Sidebar ── */}
           <aside className="hidden w-56 shrink-0 lg:block">
             <div className="sticky top-6 max-h-[calc(100vh-5rem)] overflow-y-auto space-y-3 pr-1">
-              {/* Stats */}
               <div className="rounded-2xl border border-[var(--line)] bg-white p-4 space-y-3">
                 <div className="text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Статистика</div>
-
                 <div className="flex items-center justify-between text-sm">
                   <span className="flex items-center gap-2 text-[var(--ink-secondary)]"><Megaphone size={13} className="text-[var(--brand)]" /> Всего</span>
                   <span className="font-bold text-[var(--ink)]">{stats.total}</span>
@@ -574,7 +589,6 @@ export function AdsScreen() {
                     <span className="font-bold text-[var(--ink)]">{stats.pending}</span>
                   </div>
                 )}
-
                 {stats.total > 0 && (
                   <>
                     <div className="h-px bg-[var(--line)]" />
@@ -591,7 +605,6 @@ export function AdsScreen() {
                 )}
               </div>
 
-              {/* Sort */}
               <div className="rounded-2xl border border-[var(--line)] bg-white p-4 space-y-1">
                 <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Сортировка</div>
                 {([["date", "По дате"], ["duration", "По длительности"]] as [SortKey, string][]).map(([s, label]) => (
@@ -607,7 +620,6 @@ export function AdsScreen() {
                 ))}
               </div>
 
-              {/* Sessions */}
               <div className="rounded-2xl border border-[var(--line)] bg-white p-4">
                 <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-[var(--muted)]">Сессии</div>
                 <div className="space-y-1 max-h-48 overflow-y-auto">
@@ -633,7 +645,6 @@ export function AdsScreen() {
 
           {/* ── Main ── */}
           <div className="min-w-0 flex-1 space-y-4">
-            {/* Search */}
             <div className="relative">
               <Search size={15} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--muted)]" />
               <input
@@ -649,7 +660,6 @@ export function AdsScreen() {
               )}
             </div>
 
-            {/* Filter pills */}
             <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
               <FilterPill active={analysisFilter === "all"} count={stats.total} onClick={() => setAnalysisFilter("all")}>Все</FilterPill>
               <FilterPill active={analysisFilter === "relevant"} count={stats.relevant} onClick={() => setAnalysisFilter("relevant")}><CheckCircle size={11} /> Релевантные</FilterPill>
@@ -664,12 +674,10 @@ export function AdsScreen() {
               )}
             </div>
 
-            {/* Count */}
             {filtered.length !== allAds.length && (
               <p className="text-xs text-[var(--muted)]">Показано {filtered.length} из {allAds.length} · {grouped.length} сессий</p>
             )}
 
-            {/* Groups */}
             {grouped.length === 0 ? (
               <EmptyState
                 title="Рекламы не найдены"
@@ -677,9 +685,9 @@ export function AdsScreen() {
                 action={allAds.length > 0 ? <Button onClick={() => { setSearch(""); setAnalysisFilter("all"); }}>Сбросить фильтры</Button> : undefined}
               />
             ) : (
-              <div className="space-y-4">
+              <div className="space-y-8">
                 {grouped.map((group) => (
-                  <SessionGroupBlock
+                  <SessionRow
                     key={group.session_id}
                     group={group}
                     onAdClick={setSelectedAd}
