@@ -11,6 +11,7 @@ import { SessionsPage } from "@/src/pages/SessionsPage";
 import { SessionDetailPage } from "@/src/pages/SessionDetailPage";
 import { ProxiesPage } from "@/src/pages/ProxiesPage";
 import { UsersPage } from "@/src/pages/UsersPage";
+import { SetupPage } from "@/src/pages/SetupPage";
 import { DashboardLayout } from "@/src/router/DashboardLayout";
 
 export function App() {
@@ -41,6 +42,7 @@ export function App() {
             <Route path="ads" element={<AdsPage />} />
             <Route path="proxies" element={<ProxiesPage />} />
             <Route path="users" element={<UsersPage />} />
+            <Route path="setup" element={<SetupPage />} />
           </Route>
           <Route path="*" element={<NotFoundPage />} />
         </Routes>

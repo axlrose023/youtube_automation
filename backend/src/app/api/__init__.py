@@ -13,3 +13,7 @@ def register_routers(router: APIRouter) -> None:
     router.include_router(emulation_public_router, prefix="/emulation", tags=["Emulation"])
     router.include_router(emulation_router, prefix="/emulation", tags=["Emulation"])
     router.include_router(proxies_router, prefix="/proxies", tags=["Proxies"])
+
+    from app.api.modules.setup.routes import router as setup_router
+
+    router.include_router(setup_router, prefix="/setup", tags=["Setup"])

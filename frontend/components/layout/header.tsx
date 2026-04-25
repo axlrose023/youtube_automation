@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { Globe, LayoutDashboard, LogOut, Megaphone, Menu, PlayCircle, ShieldUser, Tv2, UserCircle2, X } from "lucide-react";
+import { Globe, LayoutDashboard, LogOut, Megaphone, Menu, Monitor, PlayCircle, ShieldUser, Tv2, UserCircle2, X } from "lucide-react";
 import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 
@@ -18,7 +18,11 @@ export function Header() {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const finalItems = user?.is_admin
-    ? [...items, { href: "/users", label: "Пользователи", icon: ShieldUser }]
+    ? [
+        ...items,
+        { href: "/users", label: "Пользователи", icon: ShieldUser },
+        { href: "/setup", label: "Настройка", icon: Monitor },
+      ]
     : items;
 
   return (
