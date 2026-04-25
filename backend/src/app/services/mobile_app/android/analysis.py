@@ -91,10 +91,10 @@ def _build_ad_video_focus_window(
         start_seconds = max(0.0, first_ad_offset_seconds - 2.0)
 
     if ad_duration_seconds and ad_duration_seconds > 0:
-        window_seconds = min(ad_duration_seconds + 4.0, 30.0)
+        window_seconds = min(ad_duration_seconds + 4.0, 120.0)
     else:
         observed_seconds = max(watched_seconds or 0.0, 12.0)
-        window_seconds = min(observed_seconds + 6.0, 30.0)
+        window_seconds = min(observed_seconds + 6.0, 120.0)
 
     if recorded_video_duration_seconds is not None:
         remaining_seconds = max(0.0, recorded_video_duration_seconds - start_seconds)

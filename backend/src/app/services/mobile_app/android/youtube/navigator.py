@@ -1924,6 +1924,47 @@ class AndroidYouTubeNavigator:
                 candidates = surface_candidates
                 relaxed_cutoff_used = True
 
+        if not candidates and cta_bounds:
+            # Sponsored block covers most of the screen — scroll past it, then
+            # rebuild candidates from the freshly loaded page.
+            logger.info(
+                "sponsor_fallback_scroll_past: query=%s cta_cutoff=%s",
+                query,
+                candidate_cutoff,
+            )
+            self._scroll_results_feed_once_sync()
+            time.sleep(0.8)
+            scrolled_playable = self._extract_result_candidates_from_page_source_sync()
+            scrolled_text = self._extract_text_result_candidates_from_page_source_sync(query)
+            scrolled_cta = self._extract_sponsor_cta_bounds_sync()
+            scrolled_cutoff = max(
+                (b[3] for b in scrolled_cta),
+                default=0,
+            )
+            seen_scroll: set[tuple[str, tuple[int, int, int, int]]] = set()
+            for candidate in (*scrolled_playable, *scrolled_text):
+                key = (candidate.title, candidate.bounds)
+                if key in seen_scroll:
+                    continue
+                seen_scroll.add(key)
+                if candidate.is_short or candidate.is_sponsored:
+                    continue
+                if self._should_skip_result_title_for_query_sync(candidate.title, query):
+                    continue
+                title_overlap = self._titles_overlap_sync(candidate.title, query)
+                title_score = self._score_result_title_for_query_sync(candidate.title, query)
+                if not title_overlap and title_score < 5.0:
+                    continue
+                if scrolled_cta and candidate.bounds[1] <= scrolled_cutoff + 24:
+                    continue
+                candidates.append(candidate)
+            logger.info(
+                "sponsor_fallback_scroll_past_result: query=%s scrolled_cutoff=%s candidates=%s",
+                query,
+                scrolled_cutoff,
+                [(c.title, c.bounds) for c in candidates[:4]],
+            )
+
         if not candidates:
             any_search_candidates: list[NativeResultCandidate] = []
             seen_any_search: set[tuple[str, tuple[int, int, int, int]]] = set()
@@ -1936,6 +1977,10 @@ class AndroidYouTubeNavigator:
                     continue
                 seen_any_search.add(key)
                 if self._should_skip_result_title_for_query_sync(candidate.title, query):
+                    continue
+                # When a sponsored CTA block is present, enforce the cutoff so we
+                # never tap a candidate whose top edge sits inside the ad block.
+                if cta_bounds and candidate.bounds[1] <= candidate_cutoff + 24:
                     continue
                 any_search_candidates.append(candidate)
             if any_search_candidates:

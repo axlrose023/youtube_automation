@@ -11,7 +11,7 @@ def test_build_ad_video_focus_window_for_preroll_prefers_head_clip() -> None:
         recorded_video_duration_seconds=178.7,
     )
 
-    assert window == (0.0, 30.0)
+    assert window == (0.0, 61.0)
 
 
 def test_build_ad_video_focus_window_for_late_ad_clamps_to_remaining_video() -> None:
@@ -22,7 +22,7 @@ def test_build_ad_video_focus_window_for_late_ad_clamps_to_remaining_video() -> 
         recorded_video_duration_seconds=47.1,
     )
 
-    assert window == (23.0, 24.1)
+    assert window == (25.0, 22.1)
 
 
 def test_build_ad_video_focus_window_returns_none_without_ad_offset() -> None:
