@@ -20,10 +20,27 @@ show_runtime_status() {
   "$BOOTSTRAP_SCRIPT" status
 }
 
+NOVNC_PORT="${YTA_ANDROID_BOOTSTRAP_NOVNC_PORT:-6080}"
+
+open_novnc_port() {
+  if command -v ufw >/dev/null 2>&1; then
+    ufw allow "${NOVNC_PORT}/tcp" >/dev/null 2>&1 || true
+    echo "Firewall: opened port ${NOVNC_PORT}"
+  fi
+}
+
+close_novnc_port() {
+  if command -v ufw >/dev/null 2>&1; then
+    ufw delete allow "${NOVNC_PORT}/tcp" >/dev/null 2>&1 || true
+    echo "Firewall: closed port ${NOVNC_PORT}"
+  fi
+}
+
 start_manual_ui() {
   echo "Stopping Android runtime target to free the emulator"
   systemctl stop yta-android.target || true
   echo
+  open_novnc_port
   echo "Starting manual Android UI"
   "$BOOTSTRAP_SCRIPT" start
 }
@@ -31,6 +48,7 @@ start_manual_ui() {
 stop_manual_ui() {
   echo "Stopping manual Android UI"
   "$BOOTSTRAP_SCRIPT" stop
+  close_novnc_port
   if [[ "$RESTART_RUNTIME_ON_STOP" != "0" ]]; then
     echo
     echo "Starting Android runtime target"
