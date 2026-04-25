@@ -10,8 +10,18 @@ from app.api.common.auth import AuthenticateMainRoles
 
 router = APIRouter(dependencies=[Depends(AuthenticateMainRoles())])
 
-_ROOT_DIR = Path(__file__).resolve().parents[6]
-_ANDROID_UI_SCRIPT = _ROOT_DIR / "ops" / "android-ui.sh"
+def _find_script() -> Path:
+    # Env override
+    if env := os.environ.get("YTA_ANDROID_UI_SCRIPT"):
+        return Path(env)
+    # Docker: ops/ mounted at /app/ops
+    docker_path = Path("/app/ops/android-ui.sh")
+    if docker_path.exists():
+        return docker_path
+    # Local dev: derive from source tree
+    return Path(__file__).resolve().parents[6] / "ops" / "android-ui.sh"
+
+_ANDROID_UI_SCRIPT = _find_script()
 
 
 class AndroidUiStartResponse(BaseModel):
