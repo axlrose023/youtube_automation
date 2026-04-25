@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Monitor, Save } from "lucide-react";
+import { ExternalLink, Monitor, Save } from "lucide-react";
 
 import { apiClient } from "@/lib/api-client";
 
@@ -17,8 +17,10 @@ export function SetupScreen() {
       const { data } = await apiClient.post<{ novnc_url: string; status: string }>(
         "/setup/android-ui/start",
       );
-      setNovncUrl(data.novnc_url);
+      const url = data.novnc_url;
+      setNovncUrl(url);
       setPhase("active");
+      window.open(url, "_blank", "noopener,noreferrer");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Ошибка запуска";
       setError(msg);
@@ -40,12 +42,11 @@ export function SetupScreen() {
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-4 py-8 md:px-6">
+    <div className="mx-auto max-w-2xl space-y-6 px-4 py-8 md:px-6">
       <div className="space-y-1">
         <h1 className="text-xl font-semibold text-[var(--ink)]">Настройка аккаунта</h1>
         <p className="text-sm text-[var(--muted)]">
-          Запустите Android-эмулятор для ручной настройки аккаунта Google / YouTube, затем
-          сохраните снэпшот.
+          Запустите Android-эмулятор, настройте аккаунт Google / YouTube, затем сохраните снэпшот.
         </p>
       </div>
 
@@ -68,42 +69,42 @@ export function SetupScreen() {
 
       {(phase === "active" || phase === "saving") && novncUrl && (
         <div className="space-y-4">
-          <div className="overflow-hidden rounded-xl border border-[var(--line)] bg-black">
-            <iframe
-              src={novncUrl}
-              className="h-[600px] w-full"
-              title="Android noVNC"
-              allow="clipboard-read; clipboard-write"
-            />
-          </div>
-          <div className="flex items-center gap-3">
+          <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] px-5 py-4">
+            <p className="mb-3 text-sm text-[var(--ink-secondary)]">
+              Эмулятор запущен. Окно должно было открыться автоматически — если нет, откройте вручную:
+            </p>
             <a
               href={novncUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-sm text-[var(--brand)] underline-offset-2 hover:underline"
+              className="inline-flex items-center gap-2 rounded-lg border border-[var(--brand)] px-4 py-2 text-sm font-medium text-[var(--brand)] transition hover:bg-[var(--brand-soft)]"
             >
-              Открыть в новой вкладке
+              <ExternalLink size={14} />
+              Открыть эмулятор
             </a>
-            <span className="text-[var(--line)]">|</span>
-            <button
-              onClick={handleSaveAndStop}
-              disabled={phase === "saving"}
-              className="inline-flex items-center gap-2 rounded-lg bg-[var(--success,#16a34a)] px-5 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-60"
-            >
-              {phase === "saving" ? (
-                <>
-                  <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                  Сохраняем…
-                </>
-              ) : (
-                <>
-                  <Save size={15} />
-                  Сохранить и завершить
-                </>
-              )}
-            </button>
           </div>
+
+          <p className="text-sm text-[var(--muted)]">
+            Когда закончите настройку — нажмите кнопку ниже чтобы сохранить снэпшот и остановить эмулятор.
+          </p>
+
+          <button
+            onClick={handleSaveAndStop}
+            disabled={phase === "saving"}
+            className="inline-flex items-center gap-2 rounded-lg bg-[#16a34a] px-5 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-60"
+          >
+            {phase === "saving" ? (
+              <>
+                <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                Сохраняем…
+              </>
+            ) : (
+              <>
+                <Save size={15} />
+                Сохранить и завершить
+              </>
+            )}
+          </button>
         </div>
       )}
 

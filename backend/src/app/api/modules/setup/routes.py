@@ -55,9 +55,19 @@ def _extract_novnc_url(output: str) -> str | None:
 
 @router.post("/android-ui/start", response_model=AndroidUiStartResponse)
 async def start_android_ui() -> AndroidUiStartResponse:
-    await _run_script("start", timeout=240.0)
-    # Always use the nginx-proxied path so it works over HTTPS without mixed-content issues
-    novnc_url = "/novnc/vnc.html"
+    output = await _run_script("start", timeout=240.0)
+    # Extract URL from script output, fall back to env-derived direct URL
+    import re
+    m = re.search(r"noVNC:\s*(\S+)", output)
+    if m:
+        novnc_url = m.group(1)
+    else:
+        public_url = os.environ.get("YTA_PUBLIC_URL", "").rstrip("/")
+        novnc_port = os.environ.get("YTA_ANDROID_BOOTSTRAP_NOVNC_PORT", "6080")
+        if public_url:
+            novnc_url = f"{public_url}:{novnc_port}/vnc.html"
+        else:
+            novnc_url = f"http://localhost:{novnc_port}/vnc.html"
     return AndroidUiStartResponse(novnc_url=novnc_url, status="started")
 
 
