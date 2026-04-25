@@ -3226,6 +3226,12 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                         recorded_video_path = None
                         recorded_video_duration_seconds = None
                         try:
+                            # Dismiss any engagement/landing panel that may be
+                            # covering the player right after video opens.
+                            with contextlib.suppress(Exception):
+                                await watcher.dismiss_residual_ad_if_present()
+                            with contextlib.suppress(Exception):
+                                await watcher.restore_primary_watch_surface()
                             if self._config.android_app.probe_screenrecord_enabled:
                                 (
                                     recorder,
