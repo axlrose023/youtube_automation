@@ -1154,7 +1154,7 @@ class AndroidYouTubeNavigator:
         if not normalized_query:
             return False
         for _ in range(3):
-            hierarchy = self._dump_ui_hierarchy_via_adb_sync()
+            hierarchy = self._safe_page_source_sync()
             if not hierarchy:
                 time.sleep(0.5)
                 continue
@@ -1588,14 +1588,18 @@ class AndroidYouTubeNavigator:
         # relevance — better to watch something than to report no_result_opened.
         if self._has_results_surface_sync():
             logger.info("open_first_result_last_resort: query=%s trying any organic", query)
-            any_opened = self._tap_first_playable_candidate_below_sponsor_sync(None)
-            if any_opened is not None:
-                logger.info("open_first_result_last_resort: query=%s opened=%s", query, any_opened)
-                return any_opened
-            top_opened = self._tap_top_result_region_sync(None)
-            if top_opened is not None:
-                logger.info("open_first_result_last_resort: query=%s top_region opened=%s", query, top_opened)
-                return top_opened
+            # Scroll down a couple of times to get past ads/channel cards at top
+            for _scroll_idx in range(3):
+                any_opened = self._tap_first_playable_candidate_below_sponsor_sync(None)
+                if any_opened is not None:
+                    logger.info("open_first_result_last_resort: query=%s opened=%s scroll=%s", query, any_opened, _scroll_idx)
+                    return any_opened
+                top_opened = self._tap_top_result_region_sync(None)
+                if top_opened is not None:
+                    logger.info("open_first_result_last_resort: query=%s top_region opened=%s scroll=%s", query, top_opened, _scroll_idx)
+                    return top_opened
+                self._scroll_results_feed_once_sync()
+                time.sleep(0.8)
 
         return None
 
@@ -2044,6 +2048,9 @@ class AndroidYouTubeNavigator:
             )
         )
         for candidate in candidates:
+            # Skip candidates too small to tap reliably (partially off-screen)
+            if (candidate.bounds[3] - candidate.bounds[1]) < 120:
+                continue
             self._check_sync_deadline()
             logger.info(
                 "sponsor_fallback: query=%s cutoff=%s candidate=%s bounds=%s",
@@ -2079,11 +2086,16 @@ class AndroidYouTubeNavigator:
         width = max(1, right - left)
         height = max(1, bottom - top)
         primary_y_ratio = 0.46 if candidate.is_short else 0.38
+        is_grid_card = width < 600
         tap_points: list[tuple[int, int]] = [
             (int(left + width * 0.50), int(top + height * primary_y_ratio)),
             (int(left + width * 0.34), int(top + height * 0.28)),
             (int(left + width * 0.66), int(top + height * 0.28)),
         ]
+        if is_grid_card:
+            # Grid thumbnails: tap title text area below the image (~75-85% height)
+            tap_points.insert(0, (int(left + width * 0.50), int(top + height * 0.78)))
+            tap_points.insert(1, (int(left + width * 0.50), int(top + height * 0.68)))
         if prefer_center_first:
             tap_points.insert(
                 1,
@@ -2112,7 +2124,7 @@ class AndroidYouTubeNavigator:
             )
             if not tap_sent:
                 continue
-            opened = self._await_watch_open_after_tap_sync(query=query, timeout_seconds=4.0)
+            opened = self._await_watch_open_after_tap_sync(query=query, timeout_seconds=6.5)
             logger.info(
                 "sponsor_fallback_tap: title=%s point=(%s,%s) opened=%s",
                 candidate.title,
@@ -2128,6 +2140,12 @@ class AndroidYouTubeNavigator:
                 )
             )
             if opened:
+                # Dismiss any overlay panel (engagement, consent, landing) that
+                # YouTube shows over the player right after opening a video.
+                # This runs before extracting the title so the panel doesn't
+                # cause wait_for_watch_surface to spin for 5-14s in the caller.
+                self._dismiss_possible_dialogs_sync(allow_heavy_adb=True)
+                self._dismiss_watch_engagement_panel_sync()
                 is_reel_result = (
                     self._is_reel_watch_surface_sync()
                     or self._is_reel_watch_surface_via_adb_sync()
@@ -2520,7 +2538,7 @@ class AndroidYouTubeNavigator:
         return False
 
     def _tap_system_dialog_wait_via_adb_dump_sync(self) -> bool:
-        hierarchy = self._dump_ui_hierarchy_via_adb_sync()
+        hierarchy = self._safe_page_source_sync()
         if not hierarchy:
             return False
         try:
@@ -2683,6 +2701,21 @@ class AndroidYouTubeNavigator:
         if cat_result.returncode != 0:
             return None
         return cat_result.stdout or None
+
+    def _safe_page_source_sync(self) -> str | None:
+        """Return page XML preferring Appium driver over uiautomator dump.
+
+        Never call uiautomator dump while the Appium/UiAutomator2 session is
+        active — it races for the accessibility service slot and causes
+        "UiAutomationService already registered", killing instrumentation.
+        """
+        try:
+            source = self._driver.page_source or None
+            if source:
+                return source
+        except Exception:
+            pass
+        return self._dump_ui_hierarchy_via_adb_sync()
 
     def _recover_results_after_system_dialog_sync(self, query: str) -> bool:
         if not (
@@ -3371,17 +3404,24 @@ class AndroidYouTubeNavigator:
                 )
             )
             if needs_adb_fallback:
-                adb_page_source = self._dump_ui_hierarchy_via_adb_sync()
-                adb_score = self._score_results_source_sync(adb_page_source)
+                # Re-fetch from Appium (bypass the stale driver_page_source — Appium
+                # sometimes returns a cached snapshot). Never run uiautomator dump
+                # while UiAutomator2 is active; it causes "already registered" crash.
+                time.sleep(0.3)
+                try:
+                    fresh_source = self._driver.page_source or ""
+                except Exception:
+                    fresh_source = ""
+                fresh_score = self._score_results_source_sync(fresh_source)
                 driver_score = self._score_results_source_sync(driver_page_source)
-                if adb_score > driver_score:
+                if fresh_score > driver_score:
                     logger.info(
-                        "results_source: using adb hierarchy over appium page_source "
-                        "(appium_score=%s adb_score=%s)",
+                        "results_source: fresh appium re-fetch improved score "
+                        "(old=%s new=%s)",
                         driver_score,
-                        adb_score,
+                        fresh_score,
                     )
-                    chosen_source = adb_page_source
+                    chosen_source = fresh_source
 
         self._results_source_cache_xml = chosen_source or ""
         self._results_source_cache_at = now
@@ -3421,6 +3461,37 @@ class AndroidYouTubeNavigator:
         if len(numbers) != 4:
             return None
         return numbers[0], numbers[1], numbers[2], numbers[3]
+
+    def _dismiss_watch_engagement_panel_sync(self) -> None:
+        """Swipe down to close the YouTube engagement/landing panel if open.
+
+        YouTube shows a panel with related videos/info over the player right
+        after opening a video. A downward swipe collapses it without affecting
+        the ad or video playback.
+        """
+        if not self._has_watch_surface_sync():
+            return
+        # Only swipe when the engagement panel is actually covering the player
+        # (detected via heavy_dialog path in wait_for_watch_surface). We probe
+        # the watch surface markup to avoid swiping on clean player surfaces.
+        page_source = ""
+        try:
+            page_source = self._driver.page_source or ""
+        except Exception:
+            pass
+        if not page_source:
+            return
+        # Engagement panel is present when watch surface exists but ad/player
+        # progress bar is not yet readable — infer from absence of seekbar.
+        has_seekbar = any(
+            sid in page_source
+            for sid in ("time_bar", "seek_bar", "player_seekbar", "PlayerControlsTimeBar")
+        )
+        if has_seekbar:
+            return
+        # Swipe down from mid-screen to collapse the panel
+        self._swipe_via_adb_sync(x=540, start_y=1400, end_y=400)
+        time.sleep(0.6)
 
     def _swipe_via_adb_sync(self, *, x: int, start_y: int, end_y: int) -> None:
         if not self._adb_serial:
@@ -4366,14 +4437,9 @@ class AndroidYouTubeNavigator:
                 if query and self._has_last_tapped_watch_activity_via_adb_sync(query):
                     return True
                 current_activity = ""
-                if self._adb_serial:
-                    page_source = self._dump_ui_hierarchy_via_adb_sync() or ""
-                else:
+                page_source = self._safe_page_source_sync() or ""
+                if not self._adb_serial:
                     current_activity = self._safe_current_activity_sync() or ""
-                    try:
-                        page_source = self._driver.page_source or ""
-                    except Exception:
-                        page_source = ""
                 if not page_source:
                     time.sleep(0.4)
                     continue
@@ -5014,7 +5080,7 @@ class AndroidYouTubeNavigator:
         return False
 
     def _is_reel_watch_surface_via_adb_sync(self) -> bool:
-        hierarchy = self._dump_ui_hierarchy_via_adb_sync()
+        hierarchy = self._safe_page_source_sync()
         if not hierarchy:
             return False
         lowered = hierarchy.casefold()

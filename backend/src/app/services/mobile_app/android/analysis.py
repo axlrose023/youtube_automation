@@ -61,9 +61,16 @@ class _AdRecordAdapter:
             self.recorded_video_duration_seconds = _coerce_float(
                 capture.get("recorded_video_duration_seconds")
             )
+            raw_screenshots = capture.get("screenshot_paths") or []
+            self.screenshot_files: list[str] = [
+                p for _, p in raw_screenshots if isinstance(p, str)
+            ] if raw_screenshots and isinstance(raw_screenshots[0], (list, tuple)) else [
+                p for p in raw_screenshots if isinstance(p, str)
+            ]
         else:
             self.video_file = None
             self.recorded_video_duration_seconds = None
+            self.screenshot_files = []
 
 
 def _coerce_float(value: Any) -> float | None:
@@ -144,6 +151,18 @@ class AndroidAdAnalyzer:
                 if video_result.status == AnalysisStatus.COMPLETED:
                     return self._with_error(video_result, video_error)
                 video_unclear_result = video_result
+
+            # No video — try screenshot (banner ads have a pre-click screenshot)
+            if video_result is None and capture.screenshot_files:
+                try:
+                    screenshot_result = await self._analyze_from_screenshot(capture)
+                except Exception as exc:
+                    screenshot_result = None
+                    video_error = video_error or str(exc)
+                if screenshot_result is not None:
+                    if screenshot_result.status == AnalysisStatus.COMPLETED:
+                        return self._with_error(screenshot_result, video_error)
+                    video_unclear_result = video_unclear_result or screenshot_result
 
             prompt = build_text_prompt(capture)
             if prompt is None:
@@ -236,6 +255,26 @@ class AndroidAdAnalyzer:
             )
         finally:
             await prepared_video.cleanup()
+
+    async def _analyze_from_screenshot(self, capture: _AdRecordAdapter) -> AndroidAdAnalysisResult | None:
+        # Use the pre-click screenshot (index 0 = before CTA tap, shows the ad banner)
+        if not capture.screenshot_files:
+            return None
+        screenshot_path = Path(capture.screenshot_files[0])
+        if not screenshot_path.exists():
+            return None
+        raw = await self._gemini.generate_from_image(screenshot_path, ANALYSIS_PROMPT)
+        result, data = parse_result(raw)
+        result, data = await self._guardrails.apply(
+            capture=capture,
+            result=result,
+            data=data,
+        )
+        if result == "relevant":
+            return AndroidAdAnalysisResult(status=AnalysisStatus.COMPLETED, summary=data, raw_response=raw)
+        if result == "not_relevant":
+            return AndroidAdAnalysisResult(status=AnalysisStatus.NOT_RELEVANT, summary=data, raw_response=raw)
+        return AndroidAdAnalysisResult(status=AnalysisStatus.SKIPPED, summary=data, raw_response=raw)
 
     async def _prepare_video_for_analysis(
         self,

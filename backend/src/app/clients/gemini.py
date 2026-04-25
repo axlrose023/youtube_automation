@@ -21,6 +21,15 @@ def _guess_video_mime_type(video_path: Path) -> str:
     return "video/webm"
 
 
+def _guess_image_mime_type(image_path: Path) -> str:
+    suffix = image_path.suffix.casefold()
+    if suffix in (".jpg", ".jpeg"):
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    return "image/png"
+
+
 class GeminiClient:
     def __init__(self, api_key: str, model: str = "gemini-2.5-flash") -> None:
         genai.configure(api_key=api_key)
@@ -59,6 +68,25 @@ class GeminiClient:
 
         if uploaded.state.name == "FAILED":
             raise RuntimeError(f"Gemini file processing failed: {uploaded.name}")
+
+    async def generate_from_image(self, image_path: Path, prompt: str) -> str:
+        uploaded = await asyncio.to_thread(
+            genai.upload_file,
+            str(image_path),
+            mime_type=_guess_image_mime_type(image_path),
+        )
+        try:
+            await self._wait_for_processing(uploaded)
+            response = await asyncio.wait_for(
+                asyncio.to_thread(self._model.generate_content, [uploaded, prompt]),
+                timeout=_GENERATE_TIMEOUT_S,
+            )
+            return response.text
+        finally:
+            try:
+                await asyncio.to_thread(genai.delete_file, uploaded.name)
+            except Exception:
+                logger.warning("Failed to cleanup Gemini file %s", uploaded.name)
 
     async def generate_from_text(self, prompt: str) -> str:
         response = await asyncio.wait_for(

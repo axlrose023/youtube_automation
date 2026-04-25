@@ -610,6 +610,17 @@ class AppiumSessionProvider:
     def _reset_appium_helpers_sync(adb_serial: str) -> None:
         adb_bin = require_tool_path("adb")
         env = build_android_runtime_env()
+        # Force-stop YouTube first so it cannot interfere with UiAutomator2
+        # instrumentation re-initialization on the next Appium session attempt.
+        subprocess.run(
+            [adb_bin, "-s", adb_serial, "shell", "am", "force-stop",
+             "com.google.android.youtube"],
+            check=False,
+            capture_output=True,
+            env=env,
+            text=True,
+            timeout=15,
+        )
         helper_packages = (
             "io.appium.settings",
             "io.appium.uiautomator2.server",

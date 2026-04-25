@@ -491,3 +491,80 @@ def test_build_watched_ad_record_selects_single_ad_segment_when_watch_samples_sp
     assert "Pocket Broker" not in record["full_text"]
     assert record["visible_lines"][0] == "Forest Etalon - Etalon House"
     assert "multi_ad_segments:2" in record["capture"]["capture_notes"]
+
+
+def test_build_watched_ad_record_splits_ad_pod_through_untimed_bridge_sample() -> None:
+    record = build_watched_ad_record(
+        watch_samples=[
+            AndroidWatchSample(
+                offset_seconds=0,
+                ad_detected=True,
+                ad_headline_text="Ūdens filtri mājai — Ecosoft",
+                ad_display_url="akvafors.lv/udens-filtri/mikstinatajs",
+                ad_cta_text="Learn more",
+                ad_progress_seconds=0,
+                ad_duration_seconds=5,
+                ad_visible_lines=[
+                    "Ūdens filtri mājai — Ecosoft",
+                    "akvafors.lv/udens-filtri/mikstinatajs",
+                    "Sponsored · 0:05",
+                ],
+            ),
+            AndroidWatchSample(
+                offset_seconds=4,
+                ad_detected=True,
+                ad_headline_text="Ūdens filtri mājai — Ecosoft",
+                ad_display_url="akvafors.lv/udens-filtri/mikstinatajs",
+                ad_cta_text="Learn more",
+                ad_progress_seconds=4,
+                ad_duration_seconds=5,
+                ad_visible_lines=[
+                    "Ūdens filtri mājai — Ecosoft",
+                    "akvafors.lv/udens-filtri/mikstinatajs",
+                    "Sponsored · 0:01",
+                ],
+            ),
+            AndroidWatchSample(
+                offset_seconds=5,
+                ad_detected=True,
+                ad_cta_text="Visit advertiser",
+                ad_visible_lines=["Sponsored My Ad Center", "Visit advertiser"],
+            ),
+            AndroidWatchSample(
+                offset_seconds=6,
+                ad_detected=True,
+                ad_cta_text="Contact us",
+                ad_progress_seconds=7,
+                ad_duration_seconds=89,
+                ad_visible_lines=["0 minutes 7 seconds of 1 minute 29 seconds"],
+            ),
+            AndroidWatchSample(
+                offset_seconds=8,
+                ad_detected=True,
+                ad_cta_text="Contact us",
+                ad_progress_seconds=9,
+                ad_duration_seconds=89,
+                ad_visible_lines=["0 minutes 9 seconds of 1 minute 29 seconds"],
+            ),
+        ],
+        watch_debug_screen_path=None,
+        watch_debug_page_source_path=None,
+        ad_cta_result=AndroidAdCtaProbeResult(
+            clicked=True,
+            label="Contact us",
+            landing_url="https://59.com.ua/?utm_source=google",
+        ),
+        recorded_video_path="android_probe/video/ad.mp4",
+        recorded_video_duration_seconds=53.6,
+    )
+
+    assert record is not None
+    assert record["advertiser_domain"] == "59.com.ua"
+    assert record["display_url"] == "https://59.com.ua/?utm_source=google"
+    assert record["first_ad_offset_seconds"] == 6.0
+    assert record["last_ad_offset_seconds"] == 8.0
+    assert record["ad_duration_seconds"] == 89.0
+    assert "Ūdens filtri mājai — Ecosoft" not in record["full_text"]
+    assert "akvafors.lv" not in record["full_text"]
+    assert "multi_ad_segments:3" in record["capture"]["capture_notes"]
+    assert "selected_segment:last:3" in record["capture"]["capture_notes"]

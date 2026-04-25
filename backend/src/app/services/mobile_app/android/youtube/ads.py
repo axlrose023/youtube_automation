@@ -393,7 +393,17 @@ class AndroidYouTubeAdInteractor:
     def _dismiss_system_dialog_via_adb_sync(self) -> bool:
         if not self._adb_serial:
             return False
-        hierarchy = self._dump_ui_hierarchy_via_adb_sync()
+        # Prefer Appium page_source over uiautomator dump when a driver is active.
+        # Running `uiautomator dump` while UiAutomator2 holds the accessibility
+        # service slot causes "UiAutomationService already registered" and crashes
+        # the instrumentation process, killing the Appium session.
+        hierarchy: str | None = None
+        try:
+            hierarchy = self._driver.page_source or None
+        except Exception:
+            hierarchy = None
+        if not hierarchy:
+            hierarchy = self._dump_ui_hierarchy_via_adb_sync()
         if not hierarchy:
             return False
         if not any(hint.casefold() in hierarchy.casefold() for hint in selectors.SYSTEM_DIALOG_TITLE_HINTS):

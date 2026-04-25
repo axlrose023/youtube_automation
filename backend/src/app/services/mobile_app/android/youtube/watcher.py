@@ -50,6 +50,7 @@ class AndroidYouTubeWatcher:
         self._config = config
         self._adb_serial = adb_serial
         self._thread_local = threading.local()
+        self._last_panel_dismiss_at: float = 0.0
 
     def _check_sync_deadline(self) -> None:
         deadline = getattr(self._thread_local, "hard_deadline", float("inf"))
@@ -132,6 +133,21 @@ class AndroidYouTubeWatcher:
             raise AndroidUiError("Timed out restoring primary watch surface")
         return result
 
+    async def dismiss_engagement_panel(self) -> None:
+        """Swipe down up to 3 times to collapse the YouTube engagement panel.
+
+        Unlike restore_primary_watch_surface, this always swipes regardless of
+        whether watch_player is detected. Call before starting a screen recorder
+        so the panel does not obscure the ad in the captured video.
+        """
+        with anyio.move_on_after(12) as scope:
+            await anyio.to_thread.run_sync(
+                self._dismiss_engagement_panel_sync,
+                abandon_on_cancel=True,
+            )
+        if scope.cancel_called:
+            return
+
     def _watch_current_sync(
         self,
         watch_seconds: int,
@@ -166,6 +182,12 @@ class AndroidYouTubeWatcher:
                 if sample_score >= best_ad_page_source_score:
                     best_ad_page_source = sample_page_source
                     best_ad_page_source_score = sample_score
+                if (
+                    "engagement_panel_wrapper" in sample_page_source
+                    and time.monotonic() - self._last_panel_dismiss_at > 10.0
+                ):
+                    self._dismiss_engagement_panel_sync()
+                    self._last_panel_dismiss_at = time.monotonic()
             if sample.is_reel_surface:
                 break
             if nudged_playback_count < 2 and self._should_nudge_playback(samples):
@@ -478,9 +500,13 @@ class AndroidYouTubeWatcher:
     ) -> bool:
         if not self._adb_serial:
             return False
+        # Never run uiautomator dump while an Appium/UiAutomator2 session is active —
+        # it causes "UiAutomationService already registered" and crashes instrumentation.
+        # Appium page_source is already used as primary in _safe_page_source_sync, so
+        # if we have a valid parsed root the ADB re-probe adds nothing.
+        if parsed_root is not None:
+            return False
         if not page_source:
-            return True
-        if parsed_root is None:
             return True
         if error_messages:
             return True
@@ -533,7 +559,15 @@ class AndroidYouTubeWatcher:
             return False
         if not self._wait_for_adb_device_sync(timeout_seconds=6.0):
             return False
-        hierarchy = self._dump_ui_hierarchy_via_adb_sync()
+        # Prefer Appium page_source to avoid "UiAutomationService already registered"
+        # crash that kills the instrumentation when uiautomator dump races with UiAutomator2.
+        hierarchy: str | None = None
+        try:
+            hierarchy = self._driver.page_source or None
+        except Exception:
+            hierarchy = None
+        if not hierarchy:
+            hierarchy = self._dump_ui_hierarchy_via_adb_sync()
         if not hierarchy:
             return False
         try:
@@ -691,19 +725,22 @@ class AndroidYouTubeWatcher:
 
     def _safe_page_source_sync(self) -> str:
         self._check_sync_deadline()
+        # Always try Appium page_source first. Running `uiautomator dump` while
+        # UiAutomator2 holds the accessibility service causes "already registered"
+        # and crashes the instrumentation process. ADB is only used as a fallback
+        # when the Appium driver itself is unavailable.
+        try:
+            source = self._driver.page_source or ""
+            if source:
+                return source
+        except Exception as exc:
+            if is_dead_appium_session_error(exc):
+                raise AndroidUiError(f"Appium session died while reading page source: {exc}") from exc
         if self._adb_serial:
             hierarchy = self._dump_ui_hierarchy_via_adb_sync(timeout_seconds=2.0)
             if hierarchy:
                 return hierarchy
-            # ADB uiautomator can fail while Appium's UiAutomator2 session is
-            # active. Falling back to Appium source is still better than dropping
-            # a visible sponsored card as a no-ad sample.
-        try:
-            return self._driver.page_source or ""
-        except Exception as exc:
-            if is_dead_appium_session_error(exc):
-                raise AndroidUiError(f"Appium session died while reading page source: {exc}") from exc
-            return ""
+        return ""
 
     def _safe_driver_attr_sync(self, name: str) -> str | None:
         self._check_sync_deadline()
@@ -1339,6 +1376,39 @@ class AndroidYouTubeWatcher:
         left, top, right, bottom = bounds
         height = max(1, bottom - top)
         return top <= int(screen_height * 0.12) and height >= int(screen_height * 0.16)
+
+    def _dismiss_engagement_panel_sync(self) -> None:
+        """Swipe down up to 3 times to collapse the engagement panel, checking page_source each time."""
+        if not self._adb_serial:
+            return
+        try:
+            size = self._driver.get_window_size()
+            height = int(size["height"])
+            width = int(size["width"])
+        except Exception:
+            height = 2400
+            width = 1080
+        x = width // 2
+        start_y = int(height * 0.58)
+        end_y = int(height * 0.18)
+        adb_bin = require_tool_path("adb")
+        env = build_android_runtime_env()
+        for _ in range(3):
+            try:
+                source = self._driver.page_source or ""
+            except Exception:
+                source = ""
+            if "engagement_panel_wrapper" not in source:
+                break
+            subprocess.run(
+                [adb_bin, "-s", self._adb_serial, "shell", "input", "swipe",
+                 str(x), str(start_y), str(x), str(end_y), "280"],
+                check=False,
+                capture_output=True,
+                env=env,
+                timeout=10,
+            )
+            time.sleep(0.8)
 
     def _swipe_watch_feed_down_sync(self) -> None:
         bounds = self._extract_bounds_by_ids_sync(selectors.WATCH_LIST_IDS)

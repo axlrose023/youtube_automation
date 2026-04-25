@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from appium.webdriver.appium_connection import AppiumConnection
+from selenium.webdriver.remote.client_config import ClientConfig
+
 from app.services.mobile_app.android.appium_provider import AppiumSessionProvider
 
 
@@ -55,3 +58,15 @@ def test_ignores_non_sdk_env_errors() -> None:
     exc = RuntimeError("adb: device offline")
 
     assert AppiumSessionProvider._is_sdk_env_error(exc) is False
+
+
+def test_pool_manager_client_config_enables_wider_appium_connection_pool() -> None:
+    client_config = ClientConfig(
+        remote_server_addr="http://127.0.0.1:4723",
+        timeout=10,
+        init_args_for_pool_manager=AppiumSessionProvider._build_pool_manager_client_config(),
+    )
+    conn = AppiumConnection(client_config=client_config)
+
+    assert conn._conn.connection_pool_kw["maxsize"] == 8
+    assert conn._conn.connection_pool_kw["block"] is False

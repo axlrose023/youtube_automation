@@ -1078,6 +1078,8 @@ class AndroidYouTubeProbeRunner:
         built_ad: object | None,
     ) -> tuple[object | None, list[str]]:
         notes: list[str] = []
+        with contextlib.suppress(Exception):
+            await watcher.dismiss_engagement_panel()
         if await watcher.restore_primary_watch_surface():
             notes.append("post_ad_surface:restored")
         # Check for a second ad in the pod — do NOT skip it, let midroll loop handle it.
@@ -1177,6 +1179,8 @@ class AndroidYouTubeProbeRunner:
             await watcher.dismiss_residual_ad_if_present()
         with contextlib.suppress(Exception):
             await watcher.restore_primary_watch_surface()
+        with contextlib.suppress(Exception):
+            await watcher.dismiss_engagement_panel()
         recorder = None
         recording_handle = None
         recorded_video_path = None
@@ -1356,6 +1360,37 @@ class AndroidYouTubeProbeRunner:
             getattr(sample, "ad_detected", False)
             for sample in list(getattr(result, "samples", []) or [])
         )
+
+    @staticmethod
+    def _result_is_banner_only_ad(result: object | None) -> bool:
+        """Return True when the detected ad is a banner overlay, not a video ad.
+
+        Banner ads show a Sponsored card while the main video keeps playing.
+        The key signal: main video progress_seconds increases across ad samples
+        (video not paused). Video ads pause the main video — progress stays flat.
+        """
+        samples = list(getattr(result, "samples", []) or [])
+        ad_samples = [s for s in samples if getattr(s, "ad_detected", False)]
+        if not ad_samples:
+            return False
+        # If any sample has an ad timer or skip button → definitely a video ad
+        has_timer = any(
+            isinstance(getattr(s, "ad_duration_seconds", None), (int, float))
+            for s in ad_samples
+        )
+        has_skip = any(getattr(s, "skip_available", False) for s in ad_samples)
+        if has_timer or has_skip:
+            return False
+        # Check if main video progress advances → video is still playing → banner
+        progress_values = [
+            getattr(s, "progress_seconds", None)
+            for s in ad_samples
+            if isinstance(getattr(s, "progress_seconds", None), (int, float))
+        ]
+        if len(progress_values) >= 2:
+            return progress_values[-1] > progress_values[0]
+        # Only one sample with no timer/skip — can't tell, assume video ad to be safe
+        return False
 
     async def _advance_main_watch_iteration(
         self,
@@ -2692,23 +2727,10 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 log_prefix="[android-session]",
                             )
                         )
-                        print("[android-session] stage:reset_to_home_initial", flush=True)
-                        try:
-                            await self._reset_to_home_with_timeout(
-                                navigator=navigator,
-                                topic_notes=acquire_notes,
-                                stage_label="reset_to_home_initial",
-                                launcher_tripwire=launcher_tripwire,
-                                timeout_seconds=20.0,
-                            )
-                        except Exception as exc:
-                            acquire_notes.append(
-                                f"reset_to_home_initial_failed:{type(exc).__name__}"
-                            )
-                            print(
-                                f"[android-session] acquire_note:reset_to_home_initial_failed {type(exc).__name__}:{exc}",
-                                flush=True,
-                            )
+                        # Skip home reset — submit_search will deeplink directly to
+                        # the first topic from whatever surface YouTube is on.
+                        acquire_notes.append("reset_to_home_initial_skipped:deeplink_will_handle")
+                        print("[android-session] stage:reset_to_home_initial:skipped", flush=True)
                         if _initial_rx_bytes == 0:
                             _initial_rx_bytes = await _read_rx_bytes()
                         print(
@@ -3185,8 +3207,35 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 topic_notes.append("no_result_opened_final_skipped:ad_already_captured")
                             else:
                                 topic_notes.append("no_result_opened_final_skipped:not_needed")
-                        topic_notes.append("no_result_opened")
-                        print("[android-session] topic:no_result_opened attempt=2", flush=True)
+                        _both_no_surface = (
+                            "open_result_failure:no_surface:first_attempt" in topic_notes
+                            and "open_result_failure:no_surface:retry" in topic_notes
+                        )
+                        if _both_no_surface:
+                            print("[android-session] topic:no_results_surface:deeplink_rescue", flush=True)
+                            topic_notes.append("no_results_surface_deeplink_rescue")
+                            try:
+                                await self._submit_search_with_timeout(
+                                    navigator=navigator,
+                                    topic=topic,
+                                    topic_notes=topic_notes,
+                                    stage_label="no_results_surface_deeplink_rescue",
+                                    launcher_tripwire=launcher_tripwire,
+                                    timeout_seconds=25.0,
+                                )
+                            except Exception:
+                                pass
+                        last_resort_title = await self._last_resort_open_any_result(
+                            navigator=navigator,
+                            topic=topic,
+                            topic_notes=topic_notes,
+                            stage_label="no_result_opened",
+                        )
+                        if last_resort_title:
+                            opened_title = last_resort_title
+                        else:
+                            topic_notes.append("no_result_opened")
+                            print("[android-session] topic:no_result_opened attempt=2", flush=True)
                         if session is not None:
                             debug_screen_path, debug_page_source_path = self._write_watch_debug_artifacts(
                                 driver=session.driver,
@@ -3232,6 +3281,8 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 await watcher.dismiss_residual_ad_if_present()
                             with contextlib.suppress(Exception):
                                 await watcher.restore_primary_watch_surface()
+                            with contextlib.suppress(Exception):
+                                await watcher.dismiss_engagement_panel()
                             if self._config.android_app.probe_screenrecord_enabled:
                                 (
                                     recorder,
@@ -3412,8 +3463,14 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             f"engagement_deferred:{self._engagement_gate_reason(watch_result.samples)}"
                         )
 
-                        # If no ad detected, stop recording and discard — no video needed
-                        if not watch_ad_detected and recorder is not None and recording_handle is not None:
+                        # Banner ads (no timer, no skip) don't need video — discard and note
+                        _is_banner_ad = watch_ad_detected and self._result_is_banner_only_ad(watch_result)
+                        if _is_banner_ad:
+                            topic_notes.append("watch_ad_banner_only:video_skipped")
+                            print("[android-session] stage:banner_ad_detected:no_video", flush=True)
+
+                        # If no ad detected (or banner-only), stop recording and discard — no video needed
+                        if (not watch_ad_detected or _is_banner_ad) and recorder is not None and recording_handle is not None:
                             try:
                                 local_video = await recorder.stop(recording_handle, keep_local=True)
                                 if local_video is not None:
@@ -3658,6 +3715,8 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 self._config.android_app.probe_screenrecord_enabled
                                 and recording_handle is None
                             ):
+                                with contextlib.suppress(Exception):
+                                    await watcher.dismiss_engagement_panel()
                                 (
                                     recorder,
                                     recording_handle,
@@ -3866,6 +3925,19 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 f"[android-session] stage:midroll_ad_catch round={_midroll_round + 1}",
                                 flush=True,
                             )
+                            # Banner-only midroll: discard video, keep screenshot only
+                            _mr_is_banner = self._result_is_banner_only_ad(_extension_extra_result or watch_result)
+                            if _mr_is_banner and recorder is not None and recording_handle is not None:
+                                await self._discard_recording_handle(
+                                    label="midroll",
+                                    topic=topic,
+                                    recorder=recorder,
+                                    recording_handle=recording_handle,
+                                    reason="banner_only",
+                                )
+                                recording_handle = None
+                                topic_notes.append(f"midroll_banner_only:video_skipped:round{_midroll_round + 1}")
+                                print(f"[android-session] stage:midroll_banner_ad:no_video round={_midroll_round + 1}", flush=True)
                             try:
                                 _mr_watch_debug_screen, _mr_watch_debug_xml = (
                                     self._write_watch_debug_artifacts(
@@ -4416,13 +4488,15 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                     else float("inf")
                 )
                 if remaining_after_topic > 75.0:
-                    # Reliability wins over the fast deeplink path here. Long
-                    # sessions were staying on watch/ad surfaces after a topic,
-                    # then every following search timed out as no results surface.
-                    topic_notes.append("topic_post_reset_required:clean_next_search")
+                    # Skip reset_to_home — submit_search handles transition from
+                    # watch surface to next search via deeplink without force-stop,
+                    # saving ~15-30s per topic. Only do a hard reset when the
+                    # session is nearly over and we just need to clean up.
+                    topic_notes.append("topic_post_reset_skipped:deeplink_will_handle")
+                    print("[android-session] topic:post_reset:skipped", flush=True)
                 else:
                     topic_notes.append("topic_post_reset_required:endgame_cleanup")
-                if navigator is not None:
+                if navigator is not None and "topic_post_reset_skipped" not in " ".join(topic_notes):
                     _post_reset_exc: Exception | None = None
                     try:
                         await asyncio.wait_for(
@@ -4440,6 +4514,20 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                         topic_notes.append("topic_post_reset_hard_timeout")
                         print("[android-session] topic:post_reset:hard_timeout", flush=True)
                         _post_reset_exc = AndroidUiError("topic_post_reset timed out")
+                        if device is not None:
+                            try:
+                                _adb_bin = require_tool_path("adb")
+                                subprocess.run(
+                                    [_adb_bin, "-s", device.adb_serial, "shell",
+                                     "am", "force-stop", "com.google.android.youtube"],
+                                    check=False,
+                                    capture_output=True,
+                                    env=build_android_runtime_env(),
+                                    timeout=10,
+                                )
+                                print("[android-session] topic:post_reset:force_stopped_yt", flush=True)
+                            except Exception:
+                                pass
                     except Exception as exc:
                         _post_reset_exc = exc
                     if _post_reset_exc is not None:
@@ -5073,6 +5161,15 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
             if recovered_title:
                 topic_notes.append(f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}")
                 return recovered_title
+            last_resort_title = await self._last_resort_open_any_result(
+                navigator=navigator,
+                topic=topic,
+                topic_notes=topic_notes,
+                stage_label=stage_label,
+            )
+            if last_resort_title:
+                topic_notes.append(f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}")
+                return last_resort_title
             recovered = await self._recover_from_launcher_anr_with_timeout(
                 navigator=navigator,
             )
@@ -5095,6 +5192,15 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
             if recovered_title:
                 topic_notes.append(f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}")
                 return recovered_title
+            last_resort_title = await self._last_resort_open_any_result(
+                navigator=navigator,
+                topic=topic,
+                topic_notes=topic_notes,
+                stage_label=stage_label,
+            )
+            if last_resort_title:
+                topic_notes.append(f"{stage_label}_seconds:{time.monotonic() - started_at:.1f}")
+                return last_resort_title
             recovered = await self._recover_from_launcher_anr_with_timeout(
                 navigator=navigator,
             )
@@ -5164,6 +5270,33 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         except Exception:
             return True
         return True
+
+    async def _last_resort_open_any_result(
+        self,
+        *,
+        navigator: AndroidYouTubeNavigator,
+        topic: str,
+        topic_notes: list[str],
+        stage_label: str,
+    ) -> str | None:
+        """After a timeout, retry open_first_result with a short budget.
+
+        Handles cases where the initial attempt timed out because the results
+        surface was blocked by ads/channel cards at the top — open_first_result
+        will scroll past them via the last-resort scroll loop in navigator.
+        """
+        try:
+            opened = await asyncio.wait_for(
+                navigator.open_first_result(topic, deadline=time.monotonic() + 20.0),
+                timeout=25.0,
+            )
+        except Exception:
+            opened = None
+        if opened:
+            topic_notes.append(f"{stage_label}_last_resort_opened")
+        else:
+            topic_notes.append(f"{stage_label}_last_resort_failed")
+        return opened
 
     async def _recover_open_result_timeout_surface(
         self,
