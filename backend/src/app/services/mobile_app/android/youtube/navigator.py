@@ -1583,6 +1583,20 @@ class AndroidYouTubeNavigator:
 
             self._scroll_results_feed_once_sync()
             time.sleep(1.0)
+
+        # Last-resort: open any organic video visible on screen, ignoring topic
+        # relevance — better to watch something than to report no_result_opened.
+        if self._has_results_surface_sync():
+            logger.info("open_first_result_last_resort: query=%s trying any organic", query)
+            any_opened = self._tap_first_playable_candidate_below_sponsor_sync(None)
+            if any_opened is not None:
+                logger.info("open_first_result_last_resort: query=%s opened=%s", query, any_opened)
+                return any_opened
+            top_opened = self._tap_top_result_region_sync(None)
+            if top_opened is not None:
+                logger.info("open_first_result_last_resort: query=%s top_region opened=%s", query, top_opened)
+                return top_opened
+
         return None
 
     def _escape_reel_surface_for_query_sync(self, query: str | None) -> bool:
