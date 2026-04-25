@@ -156,6 +156,44 @@ function getLandingHost(value: string | null | undefined) {
   }
 }
 
+function isGoogleAdClickHost(value: string | null | undefined) {
+  const host = getLandingHost(value)?.toLowerCase() ?? "";
+  return host === "googleadservices.com" || host === "www.googleadservices.com";
+}
+
+function isSubscriptionHeadline(value: string | null | undefined) {
+  return /^(subscribe to|подпишитесь на|подписаться на)/i.test((value ?? "").trim());
+}
+
+function getAdLandingHost(
+  ad: EmulationWatchedAd | null,
+  capture: EmulationAdCapture | null,
+) {
+  return (
+    getLandingHost(capture?.landing_url) ||
+    getLandingHost(ad?.landing_urls?.[0]) ||
+    getLandingHost(ad?.advertiser_domain) ||
+    getLandingHost(capture?.advertiser_domain) ||
+    (!isGoogleAdClickHost(ad?.display_url) ? getLandingHost(ad?.display_url) : null) ||
+    (!isGoogleAdClickHost(capture?.display_url) ? getLandingHost(capture?.display_url) : null)
+  );
+}
+
+function getAdCardTitle(
+  ad: EmulationWatchedAd | null,
+  capture: EmulationAdCapture | null,
+) {
+  const headline = pickFirstString(ad?.headline_text, capture?.headline_text);
+  if (headline && !isSubscriptionHeadline(headline)) {
+    return headline;
+  }
+  return (
+    getAdLandingHost(ad, capture) ||
+    pickFirstString(ad?.advertiser_domain, capture?.advertiser_domain) ||
+    "Реклама без названия"
+  );
+}
+
 function getPostProcessingLabel(
   status: string | null | undefined,
   sessionStatus: string | null | undefined,
@@ -1270,18 +1308,10 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
                   <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="text-base font-semibold text-[var(--ink)]">
-                      {item.ad?.headline_text ||
-                        item.primaryCapture?.headline_text ||
-                        item.ad?.advertiser_domain ||
-                        item.primaryCapture?.advertiser_domain ||
-                        "Реклама без названия"}
+                      {getAdCardTitle(item.ad, item.primaryCapture)}
                     </div>
                     <div className="mt-1 text-sm text-[var(--muted)]">
-                      {item.ad?.advertiser_domain ||
-                        item.primaryCapture?.advertiser_domain ||
-                        getLandingHost(item.ad?.display_url) ||
-                        getLandingHost(item.primaryCapture?.display_url) ||
-                        "неизвестный домен"}
+                      {getAdLandingHost(item.ad, item.primaryCapture) || "неизвестный домен"}
                     </div>
                   </div>
                   <div className="flex flex-wrap justify-end gap-1.5">

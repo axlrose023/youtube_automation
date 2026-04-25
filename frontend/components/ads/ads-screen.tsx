@@ -73,9 +73,9 @@ function extractCleanDomain(url: string | null | undefined): string | null {
 function resolveAdIdentity(ad: AdEntry): { name: string; domain: string | null } {
   const summaryName = ad.analysis_summary?.["advertiser"] as string | undefined;
   const domain =
+    extractCleanDomain(ad.landing_url) ??
     extractCleanDomain(ad.advertiser_domain) ??
     extractCleanDomain(ad.display_url) ??
-    extractCleanDomain(ad.landing_url) ??
     null;
   const headline = ad.headline_text ?? "";
   const isChannelHeadline = /^(subscribe to|подпишитесь на)/i.test(headline.trim());

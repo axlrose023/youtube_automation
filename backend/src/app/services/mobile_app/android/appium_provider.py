@@ -419,18 +419,26 @@ class AppiumSessionProvider:
             client_config = ClientConfig(
                 remote_server_addr=self._config.appium_server_url,
                 timeout=self._config.appium_command_timeout_seconds,
+                init_args_for_pool_manager=self._build_pool_manager_client_config(),
             )
             command_executor = AppiumConnection(
                 remote_server_addr=self._config.appium_server_url,
-                init_args_for_pool_manager={
-                    "maxsize": 8,
-                    "block": False,
-                },
                 client_config=client_config,
             )
             return webdriver.Remote(command_executor=command_executor, options=options)
         except Exception as exc:
             raise AndroidAppiumError(f"Failed to create Appium session: {exc}") from exc
+
+    @staticmethod
+    def _build_pool_manager_client_config() -> dict[str, dict[str, int | bool]]:
+        # Selenium/Appium reads pool overrides from a nested key on ClientConfig.
+        # A flat {"maxsize": ...} dict is ignored by RemoteConnection._get_connection_manager().
+        return {
+            "init_args_for_pool_manager": {
+                "maxsize": 8,
+                "block": False,
+            }
+        }
 
     def _validate_driver_sync(self, driver: object) -> None:
         if driver is None:

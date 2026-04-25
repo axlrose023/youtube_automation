@@ -251,12 +251,17 @@ def _sample_starts_new_ad_segment(
     if (
         isinstance(previous_duration, (int, float))
         and isinstance(current_duration, (int, float))
-        and abs(float(current_duration) - float(previous_duration)) >= 2.0
-        and isinstance(current_progress, (int, float))
-        and isinstance(previous_progress, (int, float))
-        and current_progress <= previous_progress
     ):
-        return True
+        duration_delta = abs(float(current_duration) - float(previous_duration))
+        if duration_delta >= 10.0:
+            return True
+        if (
+            duration_delta >= 2.0
+            and isinstance(current_progress, (int, float))
+            and isinstance(previous_progress, (int, float))
+            and current_progress <= previous_progress
+        ):
+            return True
 
     previous_markers = set(_sample_identity_markers(previous))
     current_markers = set(_sample_identity_markers(current))
@@ -265,13 +270,29 @@ def _sample_starts_new_ad_segment(
     return False
 
 
+def _sample_has_segment_signal(sample: AndroidWatchSample) -> bool:
+    return bool(
+        _sample_identity_markers(sample)
+        or isinstance(sample.ad_progress_seconds, (int, float))
+        or isinstance(sample.ad_duration_seconds, (int, float))
+    )
+
+
+def _segment_reference_sample(segment: list[AndroidWatchSample]) -> AndroidWatchSample:
+    for sample in reversed(segment):
+        if _sample_has_segment_signal(sample):
+            return sample
+    return segment[-1]
+
+
 def _split_ad_segments(ad_samples: list[AndroidWatchSample]) -> list[list[AndroidWatchSample]]:
     if not ad_samples:
         return []
     segments: list[list[AndroidWatchSample]] = [[ad_samples[0]]]
     for sample in ad_samples[1:]:
         current_segment = segments[-1]
-        if _sample_starts_new_ad_segment(current_segment[-1], sample):
+        reference_sample = _segment_reference_sample(current_segment)
+        if _sample_starts_new_ad_segment(reference_sample, sample):
             segments.append([sample])
             continue
         current_segment.append(sample)
@@ -497,6 +518,7 @@ def build_watched_ad_record(
         or landing_metadata.get("display_url")
         or _extract_display_url_candidate(ad_text_hints)
     )
+    identity_notes: list[str] = []
     # If the display/landing URL is a Google click redirect, unwrap it to the
     # real advertiser destination so advertiser_domain reflects the brand,
     # not "www.google.com".
@@ -507,6 +529,25 @@ def build_watched_ad_record(
     if _unwrapped_landing:
         effective_display_url = _unwrapped_landing
         resolved_landing_url = resolved_landing_url or _unwrapped_landing
+    landing_domain = _extract_domain(resolved_landing_url)
+    display_domain = _extract_domain(effective_display_url)
+    if (
+        landing_domain
+        and display_domain
+        and landing_domain not in _SUPPRESSED_ADVERTISER_HOSTS
+        and display_domain not in _SUPPRESSED_ADVERTISER_HOSTS
+        and landing_domain != display_domain
+    ):
+        identity_notes.append(
+            "mixed_ad_identity_detected:landing_host_mismatch:"
+            f"{display_domain}->{landing_domain}"
+        )
+        effective_display_url = resolved_landing_url
+        # CTA landing is the only identity that is guaranteed to match the
+        # clicked ad. If the visible overlay belongs to a neighbouring ad in
+        # the pod, do not feed that stale headline into analysis.
+        if not _pre_click_headline_raw:
+            headline_text = landing_surface_title
     advertiser_domain = _extract_domain(effective_display_url)
     # Suppress generic Google-ad-click hosts — they are redirect middlemen,
     # not the real advertiser. When we can't unwrap them, leave advertiser blank.
@@ -538,7 +579,7 @@ def build_watched_ad_record(
     landing_status = LandingStatus.SKIPPED
     landing_dir = None
     landing_url = resolved_landing_url or landing_metadata.get("display_url") or effective_display_url
-    capture_notes: list[str] = list(selection_notes)
+    capture_notes: list[str] = [*selection_notes, *identity_notes]
     if ad_cta_result and ad_cta_result.clicked:
         if (
             _is_first_run_chrome(ad_cta_result.destination_package, ad_cta_result.destination_activity)
@@ -554,8 +595,10 @@ def build_watched_ad_record(
     if recorded_video_path:
         _dur = recorded_video_duration_seconds or 0.0
         _watched = watched_seconds or 0.0
+        if _dur <= 0:
+            _video_status = VideoStatus.FAILED
         # Partial recording: screenrecord truncated far short of observed ad time.
-        if _dur > 0 and (_dur < 3.0 or (_watched > 0 and _watched > 3.0 * _dur)):
+        elif _dur < 3.0 or (_watched > 0 and _watched > 3.0 * _dur):
             _video_status = VideoStatus.PARTIAL
         else:
             _video_status = VideoStatus.COMPLETED

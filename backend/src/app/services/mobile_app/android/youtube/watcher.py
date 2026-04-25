@@ -24,9 +24,20 @@ class AndroidWatchResult:
     ad_debug_page_source: str | None = None
 
 
+@dataclass(frozen=True)
+class _YouTubeMediaSessionSnapshot:
+    state: str
+    playing: bool
+    position_seconds: int | None = None
+    title: str | None = None
+
+
 class AndroidYouTubeWatcher:
     _MAX_RELIABLE_AD_DURATION_SECONDS = 600
     _MAX_MAIN_SEEKBAR_FALLBACK_AD_DURATION_SECONDS = 300
+    _DISPLAY_URL_RE = re.compile(
+        r"(?i)\b((?:https?://)?(?:www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s]*)?)"
+    )
 
     def __init__(
         self,
@@ -174,8 +185,12 @@ class AndroidYouTubeWatcher:
         self._check_sync_deadline()
         self._dismiss_system_dialog_sync()
         page_source = self._safe_page_source_sync()
-        package = self._safe_driver_attr_sync("current_package")
-        activity = self._safe_driver_attr_sync("current_activity")
+        if self._adb_serial:
+            package = self._config.youtube_package
+            activity = None
+        else:
+            package = self._safe_driver_attr_sync("current_package")
+            activity = self._safe_driver_attr_sync("current_activity")
         player_visible = False
         watch_panel_visible = False
         results_visible = False
@@ -263,7 +278,7 @@ class AndroidYouTubeWatcher:
                 ad_cta_labels = self._collect_ad_cta_labels(parsed_root)
                 error_messages = self._collect_error_messages(parsed_root)
                 ad_visible_lines = self._collect_visible_lines(parsed_root)
-        else:
+        elif not self._adb_serial:
             player_visible = self._has_any_id_sync(
                 (*selectors.WATCH_PLAYER_IDS, *selectors.REEL_WATCH_PLAYER_IDS)
             )
@@ -358,11 +373,43 @@ class AndroidYouTubeWatcher:
                     error_messages = error_messages or self._collect_error_messages(adb_root)
                     ad_visible_lines = ad_visible_lines or self._collect_visible_lines(adb_root)
 
+        if self._adb_serial and (not player_visible or not watch_panel_visible):
+            media_session = self._read_youtube_media_session_via_adb_sync()
+            if media_session is not None and media_session.playing:
+                player_visible = True
+                watch_panel_visible = True
+                results_visible = False
+                if progress_seconds is None:
+                    # YouTube's MediaSession position can be stale; sample offset
+                    # is a better lower-bound for foreground playback verification.
+                    progress_seconds = max(
+                        int(offset_seconds),
+                        int(media_session.position_seconds or 0),
+                    )
+                if seekbar_description is None:
+                    seekbar_description = (
+                        f"media_session:{media_session.state}:"
+                        f"{media_session.title or 'youtube'}"
+                    )
+
         active_ad_signal_labels = self._filter_active_ad_signal_labels(ad_signal_labels)
         active_ad_cta_labels = self._filter_active_ad_cta_labels(
             ad_cta_labels,
             results_visible=results_visible,
         )
+        visible_ad_metadata = self._extract_visible_ad_overlay_metadata(
+            ad_visible_lines,
+            results_visible=results_visible,
+        )
+        if visible_ad_metadata:
+            ad_sponsor_label = ad_sponsor_label or visible_ad_metadata.get("sponsor_label")
+            ad_headline_text = ad_headline_text or visible_ad_metadata.get("headline_text")
+            ad_display_url = ad_display_url or visible_ad_metadata.get("display_url")
+            ad_cta_text = ad_cta_text or visible_ad_metadata.get("cta_text")
+            visible_cta = visible_ad_metadata.get("cta_text")
+            if isinstance(visible_cta, str) and visible_cta not in ad_cta_labels:
+                ad_cta_labels.append(visible_cta)
+                active_ad_cta_labels.append(visible_cta)
 
         # For skippable ads, YouTube hides the ad-specific time_bar and uses the regular
         # watch_while_time_bar_view seekbar to show the ad's progress. Fall back to the
@@ -446,6 +493,10 @@ class AndroidYouTubeWatcher:
         has_dialog_hint = any(
             hint.casefold() in lowered for hint in selectors.SYSTEM_DIALOG_TITLE_HINTS
         )
+        if self._adb_serial:
+            if not page_source or not has_dialog_hint:
+                return False
+            return self._dismiss_system_dialog_via_adb_sync()
         if not has_dialog_hint and page_source:
             return False
         for candidate_id in selectors.SYSTEM_DIALOG_WAIT_IDS:
@@ -475,8 +526,6 @@ class AndroidYouTubeWatcher:
                     return True
                 except Exception:
                     continue
-        if self._adb_serial and (has_dialog_hint or not page_source):
-            return self._dismiss_system_dialog_via_adb_sync()
         return False
 
     def _dismiss_system_dialog_via_adb_sync(self) -> bool:
@@ -515,42 +564,104 @@ class AndroidYouTubeWatcher:
             return None
         adb_bin = require_tool_path("adb")
         dump_path = "/sdcard/codex_watcher_window_dump.xml"
-        dump_result = subprocess.run(
-            [
-                adb_bin,
-                "-s",
-                self._adb_serial,
-                "shell",
-                "uiautomator",
-                "dump",
-                dump_path,
-            ],
-            capture_output=True,
-            check=False,
-            env=build_android_runtime_env(),
-            text=True,
-            timeout=timeout_seconds,
-        )
+        try:
+            dump_result = subprocess.run(
+                [
+                    adb_bin,
+                    "-s",
+                    self._adb_serial,
+                    "shell",
+                    "uiautomator",
+                    "dump",
+                    dump_path,
+                ],
+                capture_output=True,
+                check=False,
+                env=build_android_runtime_env(),
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            return None
         if dump_result.returncode != 0:
             return None
-        cat_result = subprocess.run(
-            [
-                adb_bin,
-                "-s",
-                self._adb_serial,
-                "shell",
-                "cat",
-                dump_path,
-            ],
-            capture_output=True,
-            check=False,
-            env=build_android_runtime_env(),
-            text=True,
-            timeout=timeout_seconds,
-        )
+        try:
+            cat_result = subprocess.run(
+                [
+                    adb_bin,
+                    "-s",
+                    self._adb_serial,
+                    "shell",
+                    "cat",
+                    dump_path,
+                ],
+                capture_output=True,
+                check=False,
+                env=build_android_runtime_env(),
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            return None
         if cat_result.returncode != 0:
             return None
         return cat_result.stdout or None
+
+    def _read_youtube_media_session_via_adb_sync(
+        self,
+        *,
+        timeout_seconds: float = 2.0,
+    ) -> _YouTubeMediaSessionSnapshot | None:
+        self._check_sync_deadline()
+        if not self._adb_serial:
+            return None
+        adb_bin = require_tool_path("adb")
+        try:
+            result = subprocess.run(
+                [
+                    adb_bin,
+                    "-s",
+                    self._adb_serial,
+                    "shell",
+                    "dumpsys",
+                    "media_session",
+                ],
+                capture_output=True,
+                check=False,
+                env=build_android_runtime_env(),
+                text=True,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired:
+            return None
+        if result.returncode != 0:
+            return None
+        output = result.stdout or ""
+        package_index = output.find("package=com.google.android.youtube")
+        if package_index < 0:
+            return None
+        block = output[package_index : package_index + 2200]
+        state_match = re.search(
+            r"state=PlaybackState\s*\{\s*state=([A-Z_]+)\((\d+)\),\s*position=(-?\d+)",
+            block,
+        )
+        if not state_match:
+            return None
+        state_name = state_match.group(1)
+        try:
+            position_ms = int(state_match.group(3))
+        except ValueError:
+            position_ms = -1
+        title = None
+        title_match = re.search(r"metadata:.*?description=([^\n]+)", block)
+        if title_match:
+            title = title_match.group(1).strip() or None
+        return _YouTubeMediaSessionSnapshot(
+            state=state_name,
+            playing=state_name == "PLAYING",
+            position_seconds=(position_ms // 1000 if position_ms >= 0 else None),
+            title=title,
+        )
 
     def _wait_for_adb_device_sync(self, *, timeout_seconds: float) -> bool:
         self._check_sync_deadline()
@@ -580,6 +691,13 @@ class AndroidYouTubeWatcher:
 
     def _safe_page_source_sync(self) -> str:
         self._check_sync_deadline()
+        if self._adb_serial:
+            hierarchy = self._dump_ui_hierarchy_via_adb_sync(timeout_seconds=2.0)
+            if hierarchy:
+                return hierarchy
+            # ADB uiautomator can fail while Appium's UiAutomator2 session is
+            # active. Falling back to Appium source is still better than dropping
+            # a visible sponsored card as a no-ad sample.
         try:
             return self._driver.page_source or ""
         except Exception as exc:
@@ -772,6 +890,99 @@ class AndroidYouTubeWatcher:
                 if value not in seen:
                     seen.append(value)
         return seen
+
+    @classmethod
+    def _extract_visible_ad_overlay_metadata(
+        cls,
+        lines: list[str],
+        *,
+        results_visible: bool,
+    ) -> dict[str, str]:
+        if results_visible or not lines:
+            return {}
+        normalized = [line.strip() for line in lines if isinstance(line, str) and line.strip()]
+        if not normalized:
+            return {}
+        lowered = [line.casefold() for line in normalized]
+        sponsored_idx = next(
+            (
+                idx
+                for idx, line in enumerate(lowered)
+                if line == "sponsored"
+                or line.startswith("sponsored ")
+                or "my ad center" in line
+                or line in {"реклама", "спонсоровано"}
+            ),
+            None,
+        )
+        if sponsored_idx is None:
+            return {}
+        cta_candidates = cls._extract_cta_candidates_from_lines(normalized)
+        display_url = cls._extract_display_url_from_lines(normalized)
+        # A plain "Sponsored" label can appear in stale/miniplayer text. Require
+        # either an actionable CTA or advertiser-like domain to mark the surface.
+        if not cta_candidates and not display_url:
+            return {}
+        generic = {
+            "sponsored",
+            "my ad center",
+            "more options",
+            "close ad panel",
+            "close",
+            "more info",
+            "pause video",
+            "play video",
+            "next video",
+            "previous video",
+            "captions",
+            "settings",
+            "cast",
+            "enter fullscreen",
+            "exit fullscreen",
+            "drag handle",
+        }
+        cta_values = {value.casefold() for value in cta_candidates}
+        display_lower = display_url.casefold() if display_url else None
+        headline = None
+        for line in normalized[sponsored_idx + 1:]:
+            lowered_line = line.casefold()
+            if lowered_line in generic or lowered_line in cta_values:
+                continue
+            if display_lower and lowered_line == display_lower:
+                continue
+            if cls._DISPLAY_URL_RE.search(line):
+                continue
+            headline = line
+            break
+        return {
+            "sponsor_label": normalized[sponsored_idx],
+            **({"headline_text": headline} if headline else {}),
+            **({"display_url": display_url} if display_url else {}),
+            **({"cta_text": cta_candidates[0]} if cta_candidates else {}),
+        }
+
+    @staticmethod
+    def _extract_cta_candidates_from_lines(lines: list[str]) -> list[str]:
+        result: list[str] = []
+        cta_values = {label.casefold(): label for label in selectors.AD_CTA_DESCRIPTIONS}
+        for line in lines:
+            canonical = cta_values.get(line.strip().casefold())
+            if canonical and canonical not in result:
+                result.append(canonical)
+        return result
+
+    @classmethod
+    def _extract_display_url_from_lines(cls, lines: list[str]) -> str | None:
+        for line in lines:
+            match = cls._DISPLAY_URL_RE.search(line.strip())
+            if not match:
+                continue
+            value = match.group(1).strip().rstrip(".,)")
+            lowered = value.casefold()
+            if "youtube.com" in lowered or "google.com" in lowered:
+                continue
+            return value
+        return None
 
     @staticmethod
     def _filter_active_ad_signal_labels(labels: list[str]) -> list[str]:

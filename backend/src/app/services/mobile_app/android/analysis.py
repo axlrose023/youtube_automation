@@ -23,6 +23,7 @@ class AndroidAdAnalysisResult:
     summary: dict[str, Any] | None = None
     raw_response: str | None = None
     error: str | None = None
+    error_stage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,25 +82,23 @@ def _build_ad_video_focus_window(
     if first_ad_offset_seconds is None:
         return None
 
-    # Use the full ad duration if known — record the whole ad, not just 30s.
-    # Trim only to what was actually recorded (recorded_video_duration_seconds).
-    start_seconds = max(0.0, first_ad_offset_seconds - 2.0)
+    # Keep a compact window for analysis/UI. The raw source recording remains
+    # available for debugging; the focused clip should not include minutes of
+    # regular video or neighbouring ads.
+    if first_ad_offset_seconds >= 5.0:
+        start_seconds = first_ad_offset_seconds
+    else:
+        start_seconds = max(0.0, first_ad_offset_seconds - 2.0)
 
     if ad_duration_seconds and ad_duration_seconds > 0:
-        # Full ad + small buffer after
-        window_seconds = ad_duration_seconds + 4.0
+        window_seconds = min(ad_duration_seconds + 4.0, 30.0)
     else:
-        # Fallback: use watched time or minimum 30s
-        observed_seconds = max(watched_seconds or 0.0, 30.0)
-        window_seconds = observed_seconds + 6.0
+        observed_seconds = max(watched_seconds or 0.0, 12.0)
+        window_seconds = min(observed_seconds + 6.0, 30.0)
 
     if recorded_video_duration_seconds is not None:
         remaining_seconds = max(0.0, recorded_video_duration_seconds - start_seconds)
         if remaining_seconds <= 0.0:
-            return None
-        # Don't focus if we'd cut off more than half the intended window — keep
-        # the full recording instead so the ad content isn't lost.
-        if remaining_seconds < window_seconds * 0.5:
             return None
         window_seconds = min(window_seconds, remaining_seconds)
 
@@ -142,15 +141,14 @@ class AndroidAdAnalyzer:
                 video_result = None
                 video_error = str(exc)
             if video_result is not None:
-                if video_result.status in {
-                    AnalysisStatus.COMPLETED,
-                    AnalysisStatus.NOT_RELEVANT,
-                }:
+                if video_result.status == AnalysisStatus.COMPLETED:
                     return self._with_error(video_result, video_error)
                 video_unclear_result = video_result
 
             prompt = build_text_prompt(capture)
             if prompt is None:
+                if video_unclear_result is not None:
+                    return self._with_error(video_unclear_result, video_error)
                 return self._resolve_unclear_as_not_relevant(
                     primary=video_unclear_result,
                     fallback_reason=(
@@ -170,6 +168,7 @@ class AndroidAdAnalyzer:
             return AndroidAdAnalysisResult(
                 status=AnalysisStatus.FAILED,
                 error=str(exc),
+                error_stage="text_fallback_or_guardrails",
             )
 
         if result == "relevant":
@@ -272,6 +271,7 @@ class AndroidAdAnalyzer:
             summary=result.summary,
             raw_response=result.raw_response,
             error=error,
+            error_stage="video" if error else result.error_stage,
         )
 
     @staticmethod
@@ -298,6 +298,11 @@ class AndroidAdAnalyzer:
             summary=summary,
             raw_response=raw_response or (primary.raw_response if primary is not None else None),
             error=error or (primary.error if primary is not None else None),
+            error_stage=(
+                "video"
+                if error
+                else (primary.error_stage if primary is not None else None)
+            ),
         )
 
     @staticmethod
@@ -380,6 +385,8 @@ class AndroidAdAnalysisCoordinator:
                 capture_payload["analysis_raw_response"] = analysis_result.raw_response
             if analysis_result.error:
                 capture_payload["analysis_error"] = analysis_result.error
+            if analysis_result.error_stage:
+                capture_payload["analysis_error_stage"] = analysis_result.error_stage
         self._completed += 1
         if analysis_result.status in {
             AnalysisStatus.COMPLETED,

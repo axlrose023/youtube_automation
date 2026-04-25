@@ -183,21 +183,87 @@ class AndroidYouTubeNavigator:
         self._adb_serial = adb_serial
         self._last_tapped_result_title: str | None = None
         self._last_tapped_result_is_short = False
+        self._last_open_result_diagnostics: dict[str, object] = {}
         self._watch_activity_probe_at = 0.0
         self._watch_activity_probe_result = False
         self._rejected_result_titles: set[str] = set()
         self._thread_local = threading.local()
+        self._sync_operation_generation = 0
+        self._sync_operation_lock = threading.Lock()
         self._results_source_cache_xml: str | None = None
         self._results_source_cache_at = 0.0
 
     def _check_sync_deadline(self) -> None:
-        deadline = getattr(self._thread_local, "hard_deadline", float("inf"))
+        thread_local = getattr(self, "_thread_local", None)
+        operation_generation = getattr(thread_local, "sync_operation_generation", None)
+        if (
+            operation_generation is not None
+            and operation_generation != getattr(self, "_sync_operation_generation", operation_generation)
+        ):
+            raise AndroidUiError("sync operation hard deadline exceeded (superseded)")
+        deadline = getattr(thread_local, "hard_deadline", float("inf"))
         if time.monotonic() > deadline:
             raise AndroidUiError("sync operation hard deadline exceeded")
+
+    def _begin_sync_operation(self, hard_deadline: float) -> int:
+        with self._sync_operation_lock:
+            self._sync_operation_generation += 1
+            generation = self._sync_operation_generation
+        self._thread_local.hard_deadline = hard_deadline
+        self._thread_local.sync_operation_generation = generation
+        return generation
+
+    def _finish_sync_operation(self, generation: int) -> None:
+        if getattr(self._thread_local, "sync_operation_generation", None) == generation:
+            self._thread_local.hard_deadline = float("inf")
+            self._thread_local.sync_operation_generation = None
+
+    def _cancel_active_sync_operation_sync(self) -> None:
+        with self._sync_operation_lock:
+            self._sync_operation_generation += 1
+
+    def _remaining_sync_deadline_seconds(self) -> float:
+        deadline = getattr(getattr(self, "_thread_local", None), "hard_deadline", float("inf"))
+        if deadline == float("inf"):
+            return float("inf")
+        return max(0.0, deadline - time.monotonic())
+
+    def _bounded_subprocess_timeout_sync(
+        self,
+        default_timeout: float,
+        *,
+        minimum_timeout: float = 0.5,
+    ) -> float:
+        remaining = self._remaining_sync_deadline_seconds()
+        if remaining == float("inf"):
+            return default_timeout
+        self._check_sync_deadline()
+        return max(minimum_timeout, min(default_timeout, remaining + 0.25))
 
     def _invalidate_results_source_cache_sync(self) -> None:
         self._results_source_cache_xml = None
         self._results_source_cache_at = 0.0
+
+    def _reset_last_open_result_diagnostics_sync(self, query: str | None) -> None:
+        self._last_open_result_diagnostics = {
+            "query": query,
+            "reason": "not_started",
+            "attempt": 0,
+            "results_surface": False,
+            "search_context": False,
+            "watch_surface": False,
+            "watch_opened": False,
+            "raw_playable_count": 0,
+            "raw_text_count": 0,
+            "filtered_candidate_count": 0,
+            "candidate_title": None,
+            "resolved_title": None,
+        }
+
+    def _update_last_open_result_diagnostics_sync(self, **updates: object) -> None:
+        diagnostics = dict(getattr(self, "_last_open_result_diagnostics", {}))
+        diagnostics.update(updates)
+        self._last_open_result_diagnostics = diagnostics
 
     async def ensure_app_ready(self) -> None:
         await anyio.to_thread.run_sync(
@@ -215,11 +281,11 @@ class AndroidYouTubeNavigator:
         hard_deadline = deadline if deadline is not None else float("inf")
 
         def _run() -> None:
-            self._thread_local.hard_deadline = hard_deadline
+            generation = self._begin_sync_operation(hard_deadline)
             try:
                 self._reset_to_home_sync()
             finally:
-                self._thread_local.hard_deadline = float("inf")
+                self._finish_sync_operation(generation)
 
         await anyio.to_thread.run_sync(_run, abandon_on_cancel=True)
 
@@ -227,11 +293,11 @@ class AndroidYouTubeNavigator:
         hard_deadline = deadline if deadline is not None else float("inf")
 
         def _run() -> None:
-            self._thread_local.hard_deadline = hard_deadline
+            generation = self._begin_sync_operation(hard_deadline)
             try:
                 self._submit_search_sync(query)
             finally:
-                self._thread_local.hard_deadline = float("inf")
+                self._finish_sync_operation(generation)
 
         await anyio.to_thread.run_sync(_run, abandon_on_cancel=True)
 
@@ -246,11 +312,11 @@ class AndroidYouTubeNavigator:
         hard_deadline = deadline if deadline is not None else float("inf")
 
         def _run() -> None:
-            self._thread_local.hard_deadline = hard_deadline
+            generation = self._begin_sync_operation(hard_deadline)
             try:
                 self._wait_for_results_sync(query)
             finally:
-                self._thread_local.hard_deadline = float("inf")
+                self._finish_sync_operation(generation)
 
         await anyio.to_thread.run_sync(_run, abandon_on_cancel=True)
 
@@ -259,11 +325,11 @@ class AndroidYouTubeNavigator:
         result: list[str | None] = [None]
 
         def _run() -> None:
-            self._thread_local.hard_deadline = hard_deadline
+            generation = self._begin_sync_operation(hard_deadline)
             try:
                 result[0] = self._open_first_result_sync(query)
             finally:
-                self._thread_local.hard_deadline = float("inf")
+                self._finish_sync_operation(generation)
 
         await anyio.to_thread.run_sync(_run, abandon_on_cancel=True)
         return result[0]
@@ -295,6 +361,12 @@ class AndroidYouTubeNavigator:
             abandon_on_cancel=True,
         )
 
+    async def dismiss_system_dialogs_via_adb_background(self) -> bool:
+        return await anyio.to_thread.run_sync(
+            self._dismiss_system_dialogs_via_adb_background_sync,
+            abandon_on_cancel=True,
+        )
+
     async def recover_from_launcher_anr(self) -> bool:
         return await anyio.to_thread.run_sync(
             self._recover_from_launcher_anr_sync,
@@ -306,13 +378,48 @@ class AndroidYouTubeNavigator:
         query: str | None = None,
         *,
         timeout_seconds: float = 4.0,
+        deadline: float | None = None,
     ) -> str | None:
-        return await anyio.to_thread.run_sync(
-            self._await_current_watch_title_sync,
-            query,
-            timeout_seconds,
+        hard_deadline = deadline if deadline is not None else float("inf")
+        result: list[str | None] = [None]
+
+        def _run() -> None:
+            generation = self._begin_sync_operation(hard_deadline)
+            try:
+                result[0] = self._await_current_watch_title_sync(
+                    query,
+                    timeout_seconds,
+                )
+            finally:
+                self._finish_sync_operation(generation)
+
+        await anyio.to_thread.run_sync(_run, abandon_on_cancel=True)
+        return result[0]
+
+    async def cancel_active_sync_operation(self) -> None:
+        await anyio.to_thread.run_sync(
+            self._cancel_active_sync_operation_sync,
             abandon_on_cancel=True,
         )
+
+    async def promote_current_watch_surface(
+        self,
+        query: str | None = None,
+        *,
+        deadline: float | None = None,
+    ) -> str | None:
+        hard_deadline = deadline if deadline is not None else float("inf")
+        result: list[str | None] = [None]
+
+        def _run() -> None:
+            generation = self._begin_sync_operation(hard_deadline)
+            try:
+                result[0] = self._promote_current_watch_surface_sync(query)
+            finally:
+                self._finish_sync_operation(generation)
+
+        await anyio.to_thread.run_sync(_run, abandon_on_cancel=True)
+        return result[0]
 
     async def describe_surface(self) -> tuple[str | None, str | None, int]:
         return await anyio.to_thread.run_sync(
@@ -326,12 +433,30 @@ class AndroidYouTubeNavigator:
             abandon_on_cancel=True,
         )
 
-    async def provisional_watch_title(self, query: str) -> str | None:
+    async def last_open_result_diagnostics(self) -> dict[str, object]:
         return await anyio.to_thread.run_sync(
-            self._provisional_watch_title_sync,
-            query,
+            lambda: dict(self._last_open_result_diagnostics),
             abandon_on_cancel=True,
         )
+
+    async def provisional_watch_title(
+        self,
+        query: str,
+        *,
+        deadline: float | None = None,
+    ) -> str | None:
+        hard_deadline = deadline if deadline is not None else float("inf")
+        result: list[str | None] = [None]
+
+        def _run() -> None:
+            generation = self._begin_sync_operation(hard_deadline)
+            try:
+                result[0] = self._provisional_watch_title_sync(query)
+            finally:
+                self._finish_sync_operation(generation)
+
+        await anyio.to_thread.run_sync(_run, abandon_on_cancel=True)
+        return result[0]
 
     async def has_watch_surface_for_query(self, query: str | None = None) -> bool:
         return await anyio.to_thread.run_sync(
@@ -900,6 +1025,7 @@ class AndroidYouTubeNavigator:
         hard_cap = min(time.monotonic() + 45, getattr(self._thread_local, "hard_deadline", float("inf")))
         deadline = min(time.monotonic() + 12, hard_cap)
         while time.monotonic() < deadline:
+            self._check_sync_deadline()
             if query and self._recover_results_after_system_dialog_sync(query):
                 deadline = min(max(deadline, time.monotonic() + 8), hard_cap)
                 continue
@@ -991,6 +1117,7 @@ class AndroidYouTubeNavigator:
         if query and self._open_results_via_deeplink_sync(query):
             second_deadline = time.monotonic() + 4
             while time.monotonic() < second_deadline:
+                self._check_sync_deadline()
                 if self._recover_results_after_system_dialog_sync(query):
                     second_deadline = max(second_deadline, time.monotonic() + 8)
                     continue
@@ -1075,10 +1202,17 @@ class AndroidYouTubeNavigator:
         self._dismiss_possible_dialogs_sync()
         self._dismiss_miniplayer_on_results_sync()
         self._escape_reel_surface_for_query_sync(query)
+        self._reset_last_open_result_diagnostics_sync(query)
         # Only recover results surface if we're not already on a ready surface —
         # the unconditional recover call was adding 1-3s on every open attempt.
         if query and not self._has_query_ready_surface_sync(query):
             self._recover_results_surface_sync(query)
+        promoted_watch_title = self._promote_current_watch_surface_sync(
+            query,
+            reason="existing_watch_surface_promoted",
+        )
+        if promoted_watch_title:
+            return promoted_watch_title
         if query:
             on_ready_results_surface = (
                 self._has_results_surface_sync()
@@ -1087,6 +1221,12 @@ class AndroidYouTubeNavigator:
             if not on_ready_results_surface:
                 resolved_watch_title = self._resolve_current_watch_title_sync(query, timeout_seconds=1.6)
                 if resolved_watch_title:
+                    self._update_last_open_result_diagnostics_sync(
+                        reason="existing_watch_surface",
+                        watch_opened=True,
+                        watch_surface=True,
+                        resolved_title=resolved_watch_title,
+                    )
                     return resolved_watch_title
             if (
                 self._safe_current_package_sync() == self._config.youtube_package
@@ -1101,6 +1241,12 @@ class AndroidYouTubeNavigator:
                     timeout_seconds=2.0,
                 )
                 if delayed_watch_title:
+                    self._update_last_open_result_diagnostics_sync(
+                        reason="existing_watch_surface_delayed_title",
+                        watch_opened=True,
+                        watch_surface=True,
+                        resolved_title=delayed_watch_title,
+                    )
                     return delayed_watch_title
                 extracted_title = self._extract_current_watch_title_sync()
                 if (
@@ -1108,24 +1254,49 @@ class AndroidYouTubeNavigator:
                     and not self._is_placeholder_result_title(extracted_title)
                     and self._is_reasonable_topic_video_title_sync(extracted_title, query)
                 ):
+                    self._update_last_open_result_diagnostics_sync(
+                        reason="existing_watch_surface_extracted_title",
+                        watch_opened=True,
+                        watch_surface=True,
+                        resolved_title=extracted_title,
+                    )
                     return extracted_title
             if self._has_stale_previous_watch_surface_sync(query):
                 self._recover_results_surface_sync(query)
                 time.sleep(0.8)
         if self._is_watch_surface_for_query_sync(query) and not self._is_reel_watch_surface_sync():
-            return (
+            resolved_title = (
                 self._extract_current_watch_title_for_query_sync(query)
                 or self._extract_current_watch_title_sync()
             )
-        if query and self._has_provisional_watch_surface_for_query_sync(query) and not self._is_reel_watch_surface_sync():
+            self._update_last_open_result_diagnostics_sync(
+                reason="watch_surface_for_query_ready",
+                watch_opened=True,
+                watch_surface=True,
+                resolved_title=resolved_title,
+            )
             return (
+                resolved_title
+            )
+        if query and self._has_provisional_watch_surface_for_query_sync(query) and not self._is_reel_watch_surface_sync():
+            resolved_title = (
                 self._extract_current_watch_title_for_query_sync(query)
                 or self._extract_current_watch_title_sync()
+            )
+            self._update_last_open_result_diagnostics_sync(
+                reason="provisional_watch_surface_for_query_ready",
+                watch_opened=True,
+                watch_surface=True,
+                resolved_title=resolved_title,
+            )
+            return (
+                resolved_title
             )
         if self._has_watch_surface_sync() and not self._has_results_surface_sync():
             self._press_back_sync()
             time.sleep(1.0)
         for attempt_idx in range(8):
+            self._check_sync_deadline()
             sponsor_bounds: list[tuple[int, int, int, int]] | None = None
             if query and self._recover_results_after_system_dialog_sync(query):
                 logger.info(
@@ -1197,6 +1368,14 @@ class AndroidYouTubeNavigator:
                 self._recover_results_surface_sync(query)
                 time.sleep(0.8)
                 continue
+            if query and self._advance_past_short_only_results_sync(query):
+                logger.info(
+                    "open_first_result: query=%s attempt=%s branch=advance_past_nonorganic_pre_tap",
+                    query,
+                    attempt_idx + 1,
+                )
+                time.sleep(0.6)
+                continue
             if query:
                 results_surface = self._has_results_surface_sync()
                 search_context = self._has_search_context_sync()
@@ -1208,6 +1387,12 @@ class AndroidYouTubeNavigator:
                     results_surface,
                     search_context,
                     watch_surface,
+                )
+                self._update_last_open_result_diagnostics_sync(
+                    attempt=attempt_idx + 1,
+                    results_surface=results_surface,
+                    search_context=search_context,
+                    watch_surface=watch_surface,
                 )
                 if results_surface and search_context and not watch_surface:
                     logger.info(
@@ -1268,6 +1453,12 @@ class AndroidYouTubeNavigator:
                 )
                 time.sleep(0.8)
                 continue
+            promoted_watch_title = self._promote_current_watch_surface_sync(
+                query,
+                reason="watch_surface_promoted_after_open_attempt",
+            )
+            if promoted_watch_title:
+                return promoted_watch_title
             if self._has_watch_surface_sync() and not self._is_watch_surface_for_query_sync(query):
                 if not self._has_results_surface_sync():
                     logger.info(
@@ -1283,6 +1474,13 @@ class AndroidYouTubeNavigator:
                     "open_first_result: query=%s attempt=%s branch=no_results_surface",
                     query,
                     attempt_idx + 1,
+                )
+                self._update_last_open_result_diagnostics_sync(
+                    reason="no_results_surface",
+                    attempt=attempt_idx + 1,
+                    results_surface=False,
+                    search_context=self._has_search_context_sync(),
+                    watch_surface=self._has_watch_surface_sync(),
                 )
                 time.sleep(0.8)
                 continue
@@ -1419,6 +1617,62 @@ class AndroidYouTubeNavigator:
             return None
         return self._await_current_watch_title_sync(query, timeout_seconds=timeout_seconds)
 
+    def _promote_current_watch_surface_sync(
+        self,
+        query: str | None = None,
+        *,
+        reason: str = "watch_surface_promoted",
+    ) -> str | None:
+        self._check_sync_deadline()
+        if self._safe_current_package_sync() != self._config.youtube_package:
+            return None
+        fallback_title = (self._last_tapped_result_title or "").strip()
+        if (
+            query
+            and fallback_title
+            and self._has_last_tapped_watch_activity_via_adb_sync(query)
+        ):
+            self._update_last_open_result_diagnostics_sync(
+                reason=reason,
+                watch_opened=True,
+                watch_surface=True,
+                candidate_title=fallback_title,
+                resolved_title=fallback_title,
+            )
+            return fallback_title
+        if not self._has_stable_watch_surface_sync():
+            return None
+        if self._is_reel_watch_surface_sync() or self._is_reel_watch_surface_via_adb_sync():
+            return None
+        if self._has_playerless_watch_shell_sync():
+            return None
+        if self._has_search_context_sync():
+            return None
+        resolved_title = (
+            self._extract_current_watch_title_for_query_sync(query)
+            if query
+            else self._extract_current_watch_title_sync()
+        )
+        if not resolved_title:
+            resolved_title = self._extract_current_watch_title_sync()
+        if (
+            not resolved_title
+            and fallback_title
+            and not self._last_tapped_result_is_short
+            and not self._is_rejected_result_title_sync(fallback_title)
+        ):
+            resolved_title = fallback_title
+        if not resolved_title or self._is_placeholder_result_title(resolved_title):
+            return None
+        self._update_last_open_result_diagnostics_sync(
+            reason=reason,
+            watch_opened=True,
+            watch_surface=True,
+            candidate_title=fallback_title or None,
+            resolved_title=resolved_title,
+        )
+        return resolved_title
+
     def _tap_first_organic_region_below_sponsor_sync(self, query: str) -> bool:
         if not self._adb_serial:
             return False
@@ -1434,6 +1688,7 @@ class AndroidYouTubeNavigator:
         left_x = int(results_right * 0.28)
         right_x = int(results_right * 0.72)
         for x in (left_x, right_x):
+            self._check_sync_deadline()
             if not self._tap_via_adb_sync(x, candidate_y):
                 continue
             if self._wait_for_watch_surface_sync(
@@ -1579,6 +1834,10 @@ class AndroidYouTubeNavigator:
                 for candidate in raw_text_candidates[:4]
             ],
         )
+        self._update_last_open_result_diagnostics_sync(
+            raw_playable_count=len(raw_playable_candidates),
+            raw_text_count=len(raw_text_candidates),
+        )
 
         candidates: list[NativeResultCandidate] = []
         relaxed_cutoff_used = False
@@ -1707,6 +1966,17 @@ class AndroidYouTubeNavigator:
                 for candidate in candidates[:4]
             ],
         )
+        self._update_last_open_result_diagnostics_sync(
+            filtered_candidate_count=len(candidates),
+        )
+        if not candidates:
+            self._update_last_open_result_diagnostics_sync(
+                reason=(
+                    "candidates_filtered_out"
+                    if raw_playable_candidates or raw_text_candidates
+                    else "candidates_empty"
+                ),
+            )
         candidates.sort(
             key=lambda item: (
                 -self._score_result_title_for_query_sync(item.title, query),
@@ -1715,6 +1985,7 @@ class AndroidYouTubeNavigator:
             )
         )
         for candidate in candidates:
+            self._check_sync_deadline()
             logger.info(
                 "sponsor_fallback: query=%s cutoff=%s candidate=%s bounds=%s",
                 query,
@@ -1748,18 +2019,20 @@ class AndroidYouTubeNavigator:
         left, top, right, bottom = candidate.bounds
         width = max(1, right - left)
         height = max(1, bottom - top)
-        tap_points: list[tuple[int, int]] = []
+        primary_y_ratio = 0.46 if candidate.is_short else 0.38
+        tap_points: list[tuple[int, int]] = [
+            (int(left + width * 0.50), int(top + height * primary_y_ratio)),
+            (int(left + width * 0.34), int(top + height * 0.28)),
+            (int(left + width * 0.66), int(top + height * 0.28)),
+        ]
         if prefer_center_first:
-            tap_points.append((int(left + width * 0.45), int(top + height * 0.35)))
-        tap_points.extend([
-            (int(left + width * 0.28), int(top + height * 0.22)),
-            (int(left + width * 0.72), int(top + height * 0.22)),
-            (int(left + width * 0.34), int(top + height * 0.76)),
-            (int(left + width * 0.66), int(top + height * 0.76)),
-            (int(left + width * 0.50), int(top + height * 0.32)),
-        ])
+            tap_points.insert(
+                1,
+                (int(left + width * 0.50), int(top + height * min(0.58, primary_y_ratio + 0.14))),
+            )
         seen_points: set[tuple[int, int]] = set()
         for x, y in tap_points:
+            self._check_sync_deadline()
             point = (x, y)
             if point in seen_points:
                 continue
@@ -1780,7 +2053,7 @@ class AndroidYouTubeNavigator:
             )
             if not tap_sent:
                 continue
-            opened = self._await_watch_open_after_tap_sync(query=query, timeout_seconds=7.5)
+            opened = self._await_watch_open_after_tap_sync(query=query, timeout_seconds=4.0)
             logger.info(
                 "sponsor_fallback_tap: title=%s point=(%s,%s) opened=%s",
                 candidate.title,
@@ -1788,12 +2061,26 @@ class AndroidYouTubeNavigator:
                 y,
                 opened,
             )
+            candidate_title_matches_query = bool(
+                query
+                and (
+                    self._titles_overlap_sync(candidate.title, query)
+                    or self._is_reasonable_topic_video_title_sync(candidate.title, query)
+                )
+            )
             if opened:
                 is_reel_result = (
                     self._is_reel_watch_surface_sync()
                     or self._is_reel_watch_surface_via_adb_sync()
                 )
                 if is_reel_result and allow_reel_result:
+                    self._update_last_open_result_diagnostics_sync(
+                        reason="watch_opened_reel_allowed",
+                        watch_opened=True,
+                        watch_surface=True,
+                        candidate_title=candidate.title,
+                        resolved_title=candidate.title,
+                    )
                     return candidate.title
                 if self._reject_reel_watch_surface_sync():
                     self._recover_results_surface_sync(query)
@@ -1811,18 +2098,18 @@ class AndroidYouTubeNavigator:
                         or self._is_reasonable_topic_video_title_sync(resolved_title, query)
                     )
                 )
-                candidate_title_matches_query = bool(
-                    query
-                    and (
-                        self._titles_overlap_sync(candidate.title, query)
-                        or self._is_reasonable_topic_video_title_sync(candidate.title, query)
-                    )
-                )
                 if (
                     resolved_title
                     and not resolved_title_matches_query
                     and candidate_title_matches_query
                 ):
+                    self._update_last_open_result_diagnostics_sync(
+                        reason="watch_opened_kept_candidate_title",
+                        watch_opened=True,
+                        watch_surface=True,
+                        candidate_title=candidate.title,
+                        resolved_title=resolved_title,
+                    )
                     logger.info(
                         "sponsor_fallback_keep_candidate_title: candidate=%s resolved=%s",
                         candidate.title,
@@ -1835,6 +2122,13 @@ class AndroidYouTubeNavigator:
                     and not allow_offtopic_result
                     and not resolved_title_matches_query
                 ):
+                    self._update_last_open_result_diagnostics_sync(
+                        reason="watch_opened_rejected",
+                        watch_opened=True,
+                        watch_surface=True,
+                        candidate_title=candidate.title,
+                        resolved_title=resolved_title,
+                    )
                     logger.info(
                         "sponsor_fallback_reject_opened: candidate=%s resolved=%s",
                         candidate.title,
@@ -1843,11 +2137,57 @@ class AndroidYouTubeNavigator:
                     self._recover_results_surface_sync(query)
                     time.sleep(0.8)
                     continue
+                self._update_last_open_result_diagnostics_sync(
+                    reason="watch_opened",
+                    watch_opened=True,
+                    watch_surface=True,
+                    candidate_title=candidate.title,
+                    resolved_title=resolved_title or candidate.title,
+                )
                 return resolved_title or candidate.title
             if not self._has_results_surface_sync():
+                search_context = self._has_search_context_sync()
+                if (
+                    self._safe_current_package_sync() == self._config.youtube_package
+                    and not search_context
+                    and not candidate.is_short
+                    and candidate_title_matches_query
+                ):
+                    self._update_last_open_result_diagnostics_sync(
+                        reason="post_tap_non_results_accepted_candidate",
+                        candidate_title=candidate.title,
+                        resolved_title=candidate.title,
+                        watch_opened=True,
+                        watch_surface=False,
+                        watch_surface_probe_skipped=True,
+                        results_surface=False,
+                        search_context=search_context,
+                    )
+                    logger.info(
+                        "sponsor_fallback_accept_non_results_candidate: title=%s query=%s",
+                        candidate.title,
+                        query,
+                    )
+                    return candidate.title
+                self._update_last_open_result_diagnostics_sync(
+                    reason="no_results_surface_after_tap",
+                    candidate_title=candidate.title,
+                    watch_opened=False,
+                    results_surface=False,
+                    search_context=search_context,
+                    watch_surface=self._has_watch_surface_sync(),
+                )
                 self._recover_results_surface_sync(query)
                 time.sleep(0.8)
             else:
+                self._update_last_open_result_diagnostics_sync(
+                    reason="tap_no_open",
+                    candidate_title=candidate.title,
+                    watch_opened=False,
+                    results_surface=True,
+                    search_context=self._has_search_context_sync(),
+                    watch_surface=self._has_watch_surface_sync(),
+                )
                 time.sleep(0.6)
         return None
 
@@ -1874,6 +2214,7 @@ class AndroidYouTubeNavigator:
     ) -> str | None:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
+            self._check_sync_deadline()
             if query and self._last_tapped_result_is_short:
                 if self._has_watch_surface_sync() and not self._has_results_surface_sync():
                     self._press_back_sync()
@@ -1933,6 +2274,12 @@ class AndroidYouTubeNavigator:
                 )
             if self._is_watchwhile_activity_sync() and self._last_tapped_title_matches_query_sync(query):
                 return self._last_tapped_result_title
+        promoted_title = self._promote_current_watch_surface_sync(
+            query,
+            reason="watch_surface_promoted_after_title_wait",
+        )
+        if promoted_title:
+            return promoted_title
         return None
 
     def _dismiss_possible_dialogs_sync(self, *, allow_heavy_adb: bool = True) -> bool:
@@ -2001,15 +2348,8 @@ class AndroidYouTubeNavigator:
             return False
         if not self._wait_for_adb_device_sync(timeout_seconds=6.0):
             return False
-        if self._tap_launcher_close_via_adb_dump_sync():
-            self._wait_for_adb_device_sync(timeout_seconds=8.0)
-            time.sleep(0.8)
-            return True
-        if self._tap_system_dialog_wait_via_adb_dump_sync():
-            self._wait_for_adb_device_sync(timeout_seconds=8.0)
-            time.sleep(0.8)
-            return True
-        if not self._has_system_dialog_overlay_via_adb_sync():
+        overlay_visible = self._has_system_dialog_overlay_sync() or self._has_system_dialog_overlay_via_adb_sync()
+        if not overlay_visible:
             return False
         if self._tap_launcher_close_via_adb_sync():
             self._wait_for_adb_device_sync(timeout_seconds=8.0)
@@ -2025,6 +2365,23 @@ class AndroidYouTubeNavigator:
             return True
         if self._tap_system_dialog_wait_via_adb_dump_sync():
             self._wait_for_adb_device_sync(timeout_seconds=8.0)
+            time.sleep(0.8)
+            return True
+        return False
+
+    def _dismiss_system_dialogs_via_adb_background_sync(self) -> bool:
+        if not self._adb_serial:
+            return False
+        if not self._wait_for_adb_device_sync(timeout_seconds=4.0):
+            return False
+        if not self._has_system_dialog_overlay_via_adb_sync():
+            return False
+        if self._tap_launcher_close_via_adb_dump_sync():
+            self._wait_for_adb_device_sync(timeout_seconds=6.0)
+            time.sleep(0.8)
+            return True
+        if self._tap_system_dialog_wait_via_adb_dump_sync():
+            self._wait_for_adb_device_sync(timeout_seconds=6.0)
             time.sleep(0.8)
             return True
         return False
@@ -2059,7 +2416,7 @@ class AndroidYouTubeNavigator:
             check=False,
             env=build_android_runtime_env(),
             text=True,
-            timeout=30,
+            timeout=self._bounded_subprocess_timeout_sync(4.0, minimum_timeout=0.75),
         )
         if result.returncode != 0:
             return False
@@ -2201,6 +2558,7 @@ class AndroidYouTubeNavigator:
         adb_bin = require_tool_path("adb")
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
+            self._check_sync_deadline()
             result = subprocess.run(
                 [
                     adb_bin,
@@ -2212,7 +2570,7 @@ class AndroidYouTubeNavigator:
                 check=False,
                 env=build_android_runtime_env(),
                 text=True,
-                timeout=30,
+                timeout=self._bounded_subprocess_timeout_sync(4.0, minimum_timeout=0.75),
             )
             if result.returncode == 0 and result.stdout.strip() == "device":
                 return True
@@ -2224,39 +2582,45 @@ class AndroidYouTubeNavigator:
             return None
         adb_bin = require_tool_path("adb")
         dump_path = "/sdcard/codex_window_dump.xml"
-        dump_result = subprocess.run(
-            [
-                adb_bin,
-                "-s",
-                self._adb_serial,
-                "shell",
-                "uiautomator",
-                "dump",
-                dump_path,
-            ],
-            capture_output=True,
-            check=False,
-            env=build_android_runtime_env(),
-            text=True,
-            timeout=40,
-        )
+        try:
+            dump_result = subprocess.run(
+                [
+                    adb_bin,
+                    "-s",
+                    self._adb_serial,
+                    "shell",
+                    "uiautomator",
+                    "dump",
+                    dump_path,
+                ],
+                capture_output=True,
+                check=False,
+                env=build_android_runtime_env(),
+                text=True,
+                timeout=self._bounded_subprocess_timeout_sync(6.0, minimum_timeout=1.0),
+            )
+        except subprocess.TimeoutExpired:
+            return None
         if dump_result.returncode != 0:
             return None
-        cat_result = subprocess.run(
-            [
-                adb_bin,
-                "-s",
-                self._adb_serial,
-                "shell",
-                "cat",
-                dump_path,
-            ],
-            capture_output=True,
-            check=False,
-            env=build_android_runtime_env(),
-            text=True,
-            timeout=40,
-        )
+        try:
+            cat_result = subprocess.run(
+                [
+                    adb_bin,
+                    "-s",
+                    self._adb_serial,
+                    "shell",
+                    "cat",
+                    dump_path,
+                ],
+                capture_output=True,
+                check=False,
+                env=build_android_runtime_env(),
+                text=True,
+                timeout=self._bounded_subprocess_timeout_sync(6.0, minimum_timeout=1.0),
+            )
+        except subprocess.TimeoutExpired:
+            return None
         if cat_result.returncode != 0:
             return None
         return cat_result.stdout or None
@@ -2654,6 +3018,7 @@ class AndroidYouTubeNavigator:
             return False
         deadline = time.monotonic() + (6.0 if force_stop_before_intent else 4.5)
         while time.monotonic() < deadline:
+            self._check_sync_deadline()
             if self._safe_current_package_sync() != self._config.youtube_package:
                 time.sleep(0.4)
                 continue
@@ -2667,6 +3032,7 @@ class AndroidYouTubeNavigator:
     def _await_query_ready_surface_sync(self, query: str, *, timeout_seconds: float) -> bool:
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
+            self._check_sync_deadline()
             self._dismiss_possible_dialogs_sync()
             self._dismiss_miniplayer_on_results_sync()
             if self._has_query_ready_surface_sync(query):
@@ -3675,6 +4041,13 @@ class AndroidYouTubeNavigator:
             if self._await_watch_open_after_tap_sync(query=query, timeout_seconds=4.0):
                 if self._reject_reel_watch_surface_sync():
                     return False
+                self._update_last_open_result_diagnostics_sync(
+                    reason="watch_opened",
+                    watch_opened=True,
+                    watch_surface=True,
+                    candidate_title=title,
+                    resolved_title=title,
+                )
                 return True
         except Exception:
             pass
@@ -3686,9 +4059,21 @@ class AndroidYouTubeNavigator:
         if not self._tap_via_adb_sync(center_x, center_y):
             return False
         if not self._await_watch_open_after_tap_sync(query=query, timeout_seconds=6.5):
+            self._update_last_open_result_diagnostics_sync(
+                reason="tap_no_open",
+                watch_opened=False,
+                candidate_title=title,
+            )
             return False
         if self._reject_reel_watch_surface_sync():
             return False
+        self._update_last_open_result_diagnostics_sync(
+            reason="watch_opened",
+            watch_opened=True,
+            watch_surface=True,
+            candidate_title=title,
+            resolved_title=title,
+        )
         return True
 
     def _is_element_short_result_sync(self, element: object) -> bool:
@@ -3761,6 +4146,7 @@ class AndroidYouTubeNavigator:
     def _tap_via_adb_sync(self, x: int, y: int) -> bool:
         if not self._adb_serial:
             return False
+        self._check_sync_deadline()
         self._invalidate_results_source_cache_sync()
         adb_bin = require_tool_path("adb")
         result = subprocess.run(
@@ -3778,7 +4164,7 @@ class AndroidYouTubeNavigator:
             check=False,
             env=build_android_runtime_env(),
             text=True,
-            timeout=30,
+            timeout=self._bounded_subprocess_timeout_sync(6.0, minimum_timeout=0.75),
         )
         return result.returncode == 0
 
@@ -3801,23 +4187,42 @@ class AndroidYouTubeNavigator:
         if self._await_watch_open_after_tap_sync(query=query, timeout_seconds=7.5):
             title = self._extract_current_watch_title_sync()
             if title:
+                self._update_last_open_result_diagnostics_sync(
+                    reason="watch_opened_top_region",
+                    watch_opened=True,
+                    watch_surface=True,
+                    resolved_title=title,
+                )
                 return title
         return None
 
     def _tap_result_candidate_sync(self, candidate: NativeResultCandidate, query: str | None = None) -> bool:
+        self._check_sync_deadline()
         self._last_tapped_result_title = candidate.title
         self._last_tapped_result_is_short = candidate.is_short
         left, top, right, bottom = candidate.bounds
         width = max(1, right - left)
         height = max(1, bottom - top)
-        x = int(left + width * 0.45)
-        y = int(top + height * 0.35)
+        x = int(left + width * 0.50)
+        y = int(top + height * (0.46 if candidate.is_short else 0.38))
         if not self._tap_via_adb_sync(x, y):
             return False
         if not self._await_watch_open_after_tap_sync(query=query, timeout_seconds=6.5):
+            self._update_last_open_result_diagnostics_sync(
+                reason="tap_no_open",
+                watch_opened=False,
+                candidate_title=candidate.title,
+            )
             return False
         if self._reject_reel_watch_surface_sync():
             return False
+        self._update_last_open_result_diagnostics_sync(
+            reason="watch_opened",
+            watch_opened=True,
+            watch_surface=True,
+            candidate_title=candidate.title,
+            resolved_title=candidate.title,
+        )
         return True
 
     def _await_watch_open_after_tap_sync(
@@ -3846,16 +4251,12 @@ class AndroidYouTubeNavigator:
         )
         if watch_opened:
             return True
+        if not self._last_tapped_result_is_short and self._has_stable_watch_surface_sync():
+            return True
+        if timeout_seconds <= 4.5:
+            return False
         if not query:
             return False
-        if (
-            self._is_watchwhile_activity_sync()
-            and not self._has_playerless_watch_shell_sync()
-            and self._has_stable_watch_surface_sync()
-            and not self._last_tapped_result_is_short
-            and self._last_tapped_title_matches_query_sync(query)
-        ):
-            return True
         delayed_title = self._await_current_watch_title_sync(
             query,
             timeout_seconds=min(4.0, max(1.6, timeout_seconds * 0.5)),
@@ -3892,20 +4293,31 @@ class AndroidYouTubeNavigator:
         settle_deadline: float | None = None
         while time.monotonic() < deadline:
             self._check_sync_deadline()
-            handled_dialog = self._dismiss_possible_dialogs_sync(
-                allow_heavy_adb=allow_heavy_dialog_recovery,
-            )
-            if handled_dialog:
-                deadline = min(max(deadline, time.monotonic() + 2.0), hard_deadline)
+            handled_dialog = False
+            if allow_heavy_dialog_recovery:
+                handled_dialog = self._dismiss_possible_dialogs_sync(
+                    allow_heavy_adb=True,
+                )
+                if handled_dialog:
+                    deadline = min(max(deadline, time.monotonic() + 2.0), hard_deadline)
             current_package = self._safe_current_package_sync()
             if current_package != self._config.youtube_package:
                 return False
             if not allow_heavy_dialog_recovery:
-                current_activity = self._safe_current_activity_sync()
-                try:
-                    page_source = self._driver.page_source or ""
-                except Exception:
-                    page_source = ""
+                if query and self._has_last_tapped_watch_activity_via_adb_sync(query):
+                    return True
+                current_activity = ""
+                if self._adb_serial:
+                    page_source = self._dump_ui_hierarchy_via_adb_sync() or ""
+                else:
+                    current_activity = self._safe_current_activity_sync() or ""
+                    try:
+                        page_source = self._driver.page_source or ""
+                    except Exception:
+                        page_source = ""
+                if not page_source:
+                    time.sleep(0.4)
+                    continue
                 has_search_input = self._source_has_search_input_markup_sync(page_source)
                 has_search_context = has_search_input or self._source_has_search_context_markup_sync(
                     page_source,
@@ -3923,17 +4335,10 @@ class AndroidYouTubeNavigator:
                         current_activity,
                     ):
                         return False
-                    if has_watch and not has_search_context and not has_results:
-                        return True
-                    lowered_activity = (current_activity or "").casefold()
                     if (
-                        not has_search_context
-                        and not has_results
+                        has_watch
+                        and not has_search_context
                         and not self._last_tapped_result_is_short
-                        and (
-                            "watchwhile" in lowered_activity
-                            or "internalmainactivity" in lowered_activity
-                        )
                     ):
                         return True
                     if has_watch and (has_search_context or has_results):
@@ -4189,7 +4594,7 @@ class AndroidYouTubeNavigator:
             left, top, right, bottom = bounds
             raw_width = max(0, right - left)
             raw_height = max(0, bottom - top)
-            if not is_short and (raw_height < 48 or raw_width < 160):
+            if not is_short and raw_height < 48 and raw_width < 160:
                 # YouTube sometimes exposes a "play video" accessibility node with
                 # a 1-4px height above the real result card. Tapping its normalized
                 # area misses the card and causes open_first_result timeouts.
@@ -4432,14 +4837,23 @@ class AndroidYouTubeNavigator:
         )
 
     def _last_tapped_title_matches_query_sync(self, query: str) -> bool:
-        if self._last_tapped_result_is_short:
+        if getattr(self, "_last_tapped_result_is_short", False):
             return False
-        title = (self._last_tapped_result_title or "").strip()
+        title = (getattr(self, "_last_tapped_result_title", None) or "").strip()
         if not title:
             return False
         if self._is_rejected_result_title_sync(title):
             return False
         return self._titles_overlap_sync(title, query)
+
+    def _has_last_tapped_watch_activity_via_adb_sync(self, query: str | None) -> bool:
+        if not query or self._last_tapped_result_is_short:
+            return False
+        if not self._last_tapped_title_matches_query_sync(query):
+            return False
+        if not getattr(self, "_adb_serial", None):
+            return False
+        return self._has_watchwhile_component_via_adb_sync()
 
     def _is_watchwhile_activity_sync(self) -> bool:
         current_activity = (self._safe_current_activity_sync() or "").casefold()
@@ -4483,7 +4897,7 @@ class AndroidYouTubeNavigator:
                 check=False,
                 env=build_android_runtime_env(),
                 text=True,
-                timeout=8,
+                timeout=self._bounded_subprocess_timeout_sync(4.0, minimum_timeout=0.75),
             )
         except Exception:
             return False
@@ -4712,7 +5126,7 @@ class AndroidYouTubeNavigator:
                             0,
                             max(0, top - 860),
                             1080,
-                            bottom + 140,
+                            bottom + 80,
                         )
                     )
                 else:
