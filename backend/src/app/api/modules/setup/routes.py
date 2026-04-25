@@ -1,6 +1,5 @@
 import asyncio
 import os
-import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -56,16 +55,9 @@ def _extract_novnc_url(output: str) -> str | None:
 
 @router.post("/android-ui/start", response_model=AndroidUiStartResponse)
 async def start_android_ui() -> AndroidUiStartResponse:
-    output = await _run_script("start", timeout=240.0)
-    novnc_url = _extract_novnc_url(output)
-    if not novnc_url:
-        # Fall back to env-derived URL
-        public_url = os.environ.get("YTA_PUBLIC_URL", "").rstrip("/")
-        novnc_port = os.environ.get("YTA_ANDROID_BOOTSTRAP_NOVNC_PORT", "6080")
-        if public_url:
-            novnc_url = f"{public_url}:{novnc_port}/vnc.html"
-        else:
-            novnc_url = f"http://localhost:{novnc_port}/vnc.html"
+    await _run_script("start", timeout=240.0)
+    # Always use the nginx-proxied path so it works over HTTPS without mixed-content issues
+    novnc_url = "/novnc/vnc.html"
     return AndroidUiStartResponse(novnc_url=novnc_url, status="started")
 
 
