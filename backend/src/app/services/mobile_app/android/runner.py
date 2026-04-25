@@ -1252,25 +1252,6 @@ class AndroidYouTubeProbeRunner:
         if watch_debug_page_source_path is not None:
             topic_notes.append(f"{stage_label}_debug_xml:{watch_debug_page_source_path}")
 
-        # Stop recording BEFORE clicking CTA so the captured video contains only
-        # the clean ad in the player — not the landing panel that opens on top.
-        if recorder is not None and recording_handle is not None:
-            (
-                recorded_video_path,
-                recorded_video_duration_seconds,
-            ) = await self._finalize_recording_after_cta(
-                label=stage_label,
-                recorder=recorder,
-                recording_handle=recording_handle,
-                samples=probe_samples,
-                debug_page_source_path=watch_debug_page_source_path,
-                clicked=None,
-                returned_to_youtube=None,
-                elapsed_since_samples=0.0,
-            )
-            recorder = None
-            recording_handle = None
-
         ad_cta_result = None
         try:
             ad_interactor = AndroidYouTubeAdInteractor(
@@ -1290,6 +1271,29 @@ class AndroidYouTubeProbeRunner:
             )
         except Exception as exc:
             topic_notes.append(f"{stage_label}_ad_cta_probe_failed:{type(exc).__name__}:{exc}")
+        # Full elapsed from last sample: debug artifact writes + CTA probe.
+        _stage_cta_elapsed = time.monotonic() - _stage_samples_ended_monotonic
+
+        # Stop recording after CTA probe — subtract elapsed CTA probe time from remaining
+        # since ad progressed during that window.
+        if recorder is not None and recording_handle is not None:
+            (
+                recorded_video_path,
+                recorded_video_duration_seconds,
+            ) = await self._finalize_recording_after_cta(
+                label=stage_label,
+                recorder=recorder,
+                recording_handle=recording_handle,
+                samples=probe_samples,
+                debug_page_source_path=watch_debug_page_source_path,
+                clicked=ad_cta_result.clicked if ad_cta_result is not None else None,
+                returned_to_youtube=(
+                    ad_cta_result.returned_to_youtube
+                    if ad_cta_result is not None
+                    else None
+                ),
+                elapsed_since_samples=_stage_cta_elapsed,
+            )
 
         built_ad = build_watched_ad_record(
             watch_samples=probe_samples,
