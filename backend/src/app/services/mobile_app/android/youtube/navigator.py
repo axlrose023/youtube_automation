@@ -716,6 +716,19 @@ class AndroidYouTubeNavigator:
 
     def _recover_results_surface_sync(self, query: str) -> None:
         if self._safe_current_package_sync() != self._config.youtube_package:
+            # Chrome or other app opened (e.g. ad CTA intercepted the tap) — press back
+            # to dismiss it, then force-restore YouTube results via deeplink.
+            logger.info(
+                "navigator: non-youtube package after tap, pressing back to recover query=%s",
+                query,
+            )
+            self._press_back_sync()
+            time.sleep(1.0)
+            if self._safe_current_package_sync() != self._config.youtube_package:
+                self._launch_youtube_if_needed_sync()
+                time.sleep(1.5)
+            self._dismiss_possible_dialogs_sync()
+            self._restore_results_surface_sync(query, prefer_hard_reset=True)
             return
         if self._has_mixed_watch_results_surface_sync():
             if self._press_back_sync():

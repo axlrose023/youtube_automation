@@ -3916,7 +3916,27 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     topic_notes.append(
                                         f"midroll_duplicate_cap_break:round{_midroll_round + 1}"
                                     )
-                                    break
+                                    _midroll_duplicate_rounds = 0
+                                    pending_midroll_result = None
+                                    pending_midroll_samples_ended_monotonic = None
+                                    # Attempt remaining watch immediately; if a new ad appears
+                                    # let the outer loop handle it normally.
+                                    _cap_next, _cap_note, _cap_extra = await self._continue_main_watch_if_needed(
+                                        watcher=watcher,
+                                        watch_result=watch_result,
+                                        target_watch_seconds=target_watch_seconds,
+                                    )
+                                    if _cap_next is not watch_result:
+                                        watch_result = _cap_next
+                                        watch_verified = bool(getattr(watch_result, "verified", False))
+                                    if _cap_note:
+                                        topic_notes.append(f"midroll_cap_fill:{_cap_note}")
+                                    if _cap_note and "main_watch_ad_detected" in _cap_note:
+                                        # New ad found — feed it back as pending for next round
+                                        pending_midroll_result = _cap_extra
+                                        pending_midroll_samples_ended_monotonic = time.monotonic()
+                                        continue
+                                    break  # watch completed or no remaining seconds
                                 continue  # same banner — clear it and keep filling watch target
                             _midroll_duplicate_rounds = 0
 
@@ -4091,6 +4111,25 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                                         topic_notes.append(
                                                             "post_ad_surface:restored_midroll_identity_cap"
                                                         )
+                                                    # Reset counters and attempt remaining watch immediately.
+                                                    _midroll_residual_return_rounds = 0
+                                                    _midroll_duplicate_rounds = 0
+                                                    pending_midroll_result = None
+                                                    pending_midroll_samples_ended_monotonic = None
+                                                    _cap_next, _cap_note, _cap_extra = await self._continue_main_watch_if_needed(
+                                                        watcher=watcher,
+                                                        watch_result=watch_result,
+                                                        target_watch_seconds=target_watch_seconds,
+                                                    )
+                                                    if _cap_next is not watch_result:
+                                                        watch_result = _cap_next
+                                                        watch_verified = bool(getattr(watch_result, "verified", False))
+                                                    if _cap_note:
+                                                        topic_notes.append(f"identity_cap_fill:{_cap_note}")
+                                                    if _cap_note and "main_watch_ad_detected" in _cap_note:
+                                                        pending_midroll_result = _cap_extra
+                                                        pending_midroll_samples_ended_monotonic = time.monotonic()
+                                                        continue
                                                     break
                                                 if _midroll_residual_return_rounds >= 3:
                                                     topic_notes.append(
@@ -4105,6 +4144,24 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                                         topic_notes.append(
                                                             "post_ad_surface:restored_midroll_residual_cap"
                                                         )
+                                                    # Reset counters and attempt remaining watch immediately.
+                                                    _midroll_residual_return_rounds = 0
+                                                    pending_midroll_result = None
+                                                    pending_midroll_samples_ended_monotonic = None
+                                                    _cap_next, _cap_note, _cap_extra = await self._continue_main_watch_if_needed(
+                                                        watcher=watcher,
+                                                        watch_result=watch_result,
+                                                        target_watch_seconds=target_watch_seconds,
+                                                    )
+                                                    if _cap_next is not watch_result:
+                                                        watch_result = _cap_next
+                                                        watch_verified = bool(getattr(watch_result, "verified", False))
+                                                    if _cap_note:
+                                                        topic_notes.append(f"residual_cap_fill:{_cap_note}")
+                                                    if _cap_note and "main_watch_ad_detected" in _cap_note:
+                                                        pending_midroll_result = _cap_extra
+                                                        pending_midroll_samples_ended_monotonic = time.monotonic()
+                                                        continue
                                                     break
                                                 pending_midroll_result = _mr_post_ad
                                                 pending_midroll_samples_ended_monotonic = (
