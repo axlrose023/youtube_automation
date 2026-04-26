@@ -1078,8 +1078,6 @@ class AndroidYouTubeProbeRunner:
         built_ad: object | None,
     ) -> tuple[object | None, list[str]]:
         notes: list[str] = []
-        with contextlib.suppress(Exception):
-            await watcher.dismiss_engagement_panel()
         if await watcher.restore_primary_watch_surface():
             notes.append("post_ad_surface:restored")
         # Check for a second ad in the pod — do NOT skip it, let midroll loop handle it.
@@ -1179,8 +1177,6 @@ class AndroidYouTubeProbeRunner:
             await watcher.dismiss_residual_ad_if_present()
         with contextlib.suppress(Exception):
             await watcher.restore_primary_watch_surface()
-        with contextlib.suppress(Exception):
-            await watcher.dismiss_engagement_panel()
         recorder = None
         recording_handle = None
         recorded_video_path = None
@@ -3301,8 +3297,6 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 await watcher.dismiss_residual_ad_if_present()
                             with contextlib.suppress(Exception):
                                 await watcher.restore_primary_watch_surface()
-                            with contextlib.suppress(Exception):
-                                await watcher.dismiss_engagement_panel()
                             if self._config.android_app.probe_screenrecord_enabled:
                                 (
                                     recorder,
@@ -3742,8 +3736,6 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 self._config.android_app.probe_screenrecord_enabled
                                 and recording_handle is None
                             ):
-                                with contextlib.suppress(Exception):
-                                    await watcher.dismiss_engagement_panel()
                                 (
                                     recorder,
                                     recording_handle,
