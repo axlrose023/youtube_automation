@@ -18,12 +18,11 @@ logging.basicConfig(
 )
 
 TOPICS = [
-    "forex trading strategy",
-    "ai trading bot review",
-    "crypto trading profit",
+    "quantum ai trading bot",
+    "best forex signals provider",
     "prop firm funded account",
 ]
-DURATION_MINUTES = 15
+DURATION_MINUTES = 20
 AVD_NAME = "yt_android_playstore_api35_clean"
 ARTIFACTS_PATH = Path(__file__).parent.parent / "artifacts"
 

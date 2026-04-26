@@ -1392,6 +1392,26 @@ class AndroidYouTubeProbeRunner:
         # Only one sample with no timer/skip — can't tell, assume video ad to be safe
         return False
 
+    @staticmethod
+    def _result_is_play_store_ad(result: object | None) -> bool:
+        """Return True when the detected ad is a Google Play Store app-install banner.
+
+        These banners are irrelevant (no landing page, no video) and should be skipped.
+        The only reliable signal is display_url containing play.google.com — "Install"
+        CTA alone is not sufficient because financial app ads also use it.
+        """
+        samples = list(getattr(result, "samples", []) or [])
+        ad_samples = [s for s in samples if getattr(s, "ad_detected", False)]
+        for s in ad_samples:
+            display = str(getattr(s, "ad_display_url", "") or "").casefold()
+            if "play.google.com" in display:
+                return True
+            # CTA labels visible in ad overlay text
+            for line in list(getattr(s, "ad_visible_lines", []) or []):
+                if "play.google.com" in str(line).casefold():
+                    return True
+        return False
+
     async def _advance_main_watch_iteration(
         self,
         *,
@@ -3469,7 +3489,14 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             topic_notes.append("watch_ad_banner_only:video_skipped")
                             print("[android-session] stage:banner_ad_detected:no_video", flush=True)
 
-                        # If no ad detected (or banner-only), stop recording and discard — no video needed
+                        # Play Store app-install banners are irrelevant — skip entirely
+                        _is_play_store_ad = watch_ad_detected and not _is_banner_ad and self._result_is_play_store_ad(watch_result)
+                        if _is_play_store_ad:
+                            watch_ad_detected = False
+                            topic_notes.append("watch_ad_play_store:skipped")
+                            print("[android-session] stage:play_store_ad_detected:skipped", flush=True)
+
+                        # If no ad detected (or banner-only/play-store), stop recording and discard
                         if (not watch_ad_detected or _is_banner_ad) and recorder is not None and recording_handle is not None:
                             try:
                                 local_video = await recorder.stop(recording_handle, keep_local=True)
@@ -3921,22 +3948,24 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     pending_midroll_samples_ended_monotonic = None
                                     # Attempt remaining watch immediately; if a new ad appears
                                     # let the outer loop handle it normally.
-                                    _cap_next, _cap_note, _cap_extra = await self._continue_main_watch_if_needed(
-                                        watcher=watcher,
-                                        watch_result=watch_result,
-                                        target_watch_seconds=target_watch_seconds,
-                                    )
-                                    if _cap_next is not watch_result:
-                                        watch_result = _cap_next
-                                        watch_verified = bool(getattr(watch_result, "verified", False))
-                                    if _cap_note:
-                                        topic_notes.append(f"midroll_cap_fill:{_cap_note}")
-                                    if _cap_note and "main_watch_ad_detected" in _cap_note:
-                                        # New ad found — feed it back as pending for next round
-                                        pending_midroll_result = _cap_extra
-                                        pending_midroll_samples_ended_monotonic = time.monotonic()
-                                        continue
-                                    break  # watch completed or no remaining seconds
+                                    try:
+                                        _cap_next, _cap_note, _cap_extra = await self._continue_main_watch_if_needed(
+                                            watcher=watcher,
+                                            watch_result=watch_result,
+                                            target_watch_seconds=target_watch_seconds,
+                                        )
+                                        if _cap_next is not watch_result:
+                                            watch_result = _cap_next
+                                            watch_verified = bool(getattr(watch_result, "verified", False))
+                                        if _cap_note:
+                                            topic_notes.append(f"midroll_cap_fill:{_cap_note}")
+                                        if _cap_note and "main_watch_ad_detected" in _cap_note:
+                                            pending_midroll_result = _cap_extra
+                                            pending_midroll_samples_ended_monotonic = time.monotonic()
+                                            continue
+                                    except Exception as _cap_exc:
+                                        topic_notes.append(f"midroll_cap_fill_failed:{type(_cap_exc).__name__}")
+                                    break
                                 continue  # same banner — clear it and keep filling watch target
                             _midroll_duplicate_rounds = 0
 
@@ -3945,6 +3974,26 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 f"[android-session] stage:midroll_ad_catch round={_midroll_round + 1}",
                                 flush=True,
                             )
+                            # Play Store app-install midroll: skip entirely
+                            _mr_is_play_store = self._result_is_play_store_ad(_extension_extra_result or watch_result)
+                            if _mr_is_play_store:
+                                if recorder is not None and recording_handle is not None:
+                                    await self._discard_recording_handle(
+                                        label="midroll",
+                                        topic=topic,
+                                        recorder=recorder,
+                                        recording_handle=recording_handle,
+                                        reason="play_store",
+                                    )
+                                    recording_handle = None
+                                topic_notes.append(f"midroll_play_store:skipped:round{_midroll_round + 1}")
+                                print(f"[android-session] stage:midroll_play_store_ad:skipped round={_midroll_round + 1}", flush=True)
+                                with contextlib.suppress(Exception):
+                                    await watcher.restore_primary_watch_surface()
+                                with contextlib.suppress(Exception):
+                                    await watcher.ensure_playing()
+                                continue
+
                             # Banner-only midroll: discard video, keep screenshot only
                             _mr_is_banner = self._result_is_banner_only_ad(_extension_extra_result or watch_result)
                             if _mr_is_banner and recorder is not None and recording_handle is not None:
@@ -4116,20 +4165,23 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                                     _midroll_duplicate_rounds = 0
                                                     pending_midroll_result = None
                                                     pending_midroll_samples_ended_monotonic = None
-                                                    _cap_next, _cap_note, _cap_extra = await self._continue_main_watch_if_needed(
-                                                        watcher=watcher,
-                                                        watch_result=watch_result,
-                                                        target_watch_seconds=target_watch_seconds,
-                                                    )
-                                                    if _cap_next is not watch_result:
-                                                        watch_result = _cap_next
-                                                        watch_verified = bool(getattr(watch_result, "verified", False))
-                                                    if _cap_note:
-                                                        topic_notes.append(f"identity_cap_fill:{_cap_note}")
-                                                    if _cap_note and "main_watch_ad_detected" in _cap_note:
-                                                        pending_midroll_result = _cap_extra
-                                                        pending_midroll_samples_ended_monotonic = time.monotonic()
-                                                        continue
+                                                    try:
+                                                        _cap_next, _cap_note, _cap_extra = await self._continue_main_watch_if_needed(
+                                                            watcher=watcher,
+                                                            watch_result=watch_result,
+                                                            target_watch_seconds=target_watch_seconds,
+                                                        )
+                                                        if _cap_next is not watch_result:
+                                                            watch_result = _cap_next
+                                                            watch_verified = bool(getattr(watch_result, "verified", False))
+                                                        if _cap_note:
+                                                            topic_notes.append(f"identity_cap_fill:{_cap_note}")
+                                                        if _cap_note and "main_watch_ad_detected" in _cap_note:
+                                                            pending_midroll_result = _cap_extra
+                                                            pending_midroll_samples_ended_monotonic = time.monotonic()
+                                                            continue
+                                                    except Exception as _cap_exc:
+                                                        topic_notes.append(f"identity_cap_fill_failed:{type(_cap_exc).__name__}")
                                                     break
                                                 if _midroll_residual_return_rounds >= 3:
                                                     topic_notes.append(
@@ -4148,20 +4200,23 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                                     _midroll_residual_return_rounds = 0
                                                     pending_midroll_result = None
                                                     pending_midroll_samples_ended_monotonic = None
-                                                    _cap_next, _cap_note, _cap_extra = await self._continue_main_watch_if_needed(
-                                                        watcher=watcher,
-                                                        watch_result=watch_result,
-                                                        target_watch_seconds=target_watch_seconds,
-                                                    )
-                                                    if _cap_next is not watch_result:
-                                                        watch_result = _cap_next
-                                                        watch_verified = bool(getattr(watch_result, "verified", False))
-                                                    if _cap_note:
-                                                        topic_notes.append(f"residual_cap_fill:{_cap_note}")
-                                                    if _cap_note and "main_watch_ad_detected" in _cap_note:
-                                                        pending_midroll_result = _cap_extra
-                                                        pending_midroll_samples_ended_monotonic = time.monotonic()
-                                                        continue
+                                                    try:
+                                                        _cap_next, _cap_note, _cap_extra = await self._continue_main_watch_if_needed(
+                                                            watcher=watcher,
+                                                            watch_result=watch_result,
+                                                            target_watch_seconds=target_watch_seconds,
+                                                        )
+                                                        if _cap_next is not watch_result:
+                                                            watch_result = _cap_next
+                                                            watch_verified = bool(getattr(watch_result, "verified", False))
+                                                        if _cap_note:
+                                                            topic_notes.append(f"residual_cap_fill:{_cap_note}")
+                                                        if _cap_note and "main_watch_ad_detected" in _cap_note:
+                                                            pending_midroll_result = _cap_extra
+                                                            pending_midroll_samples_ended_monotonic = time.monotonic()
+                                                            continue
+                                                    except Exception as _cap_exc:
+                                                        topic_notes.append(f"residual_cap_fill_failed:{type(_cap_exc).__name__}")
                                                     break
                                                 pending_midroll_result = _mr_post_ad
                                                 pending_midroll_samples_ended_monotonic = (
