@@ -29,7 +29,7 @@ def build_topic_watched_video_payload(
         "watched_seconds": watched_seconds,
         "target_seconds": target_seconds,
         "watch_ratio": watch_ratio,
-        "completed": topic_result.watch_verified,
+        "completed": topic_result.watch_verified and watch_ratio >= 0.5,
         "search_keyword": topic_result.topic,
         "matched_topics": [topic_result.topic],
         "keywords": [],

@@ -178,11 +178,8 @@ class AndroidYouTubeWatcher:
             sample, sample_page_source = self._collect_sample_sync(offset)
             samples.append(sample)
             if sample_page_source and "engagement_panel_wrapper" in sample_page_source:
-                # Engagement panel is an ad preview — just ensure it's playing, don't dismiss
-                if time.monotonic() - self._last_panel_dismiss_at > 10.0:
-                    self._last_panel_dismiss_at = time.monotonic()
-                    self._ensure_playing_sync()
-                    sample_page_source = self._safe_page_source_sync()
+                # Engagement panel is an ad preview — do not interact, let it play naturally
+                pass
             if sample.ad_detected and sample_page_source:
                 sample_score = self._ad_capture_score(sample)
                 if sample_score >= best_ad_page_source_score:

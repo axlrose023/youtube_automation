@@ -1408,6 +1408,162 @@ class AndroidYouTubeProbeRunner:
                     return True
         return False
 
+    async def _capture_search_banner_ad_if_present(
+        self,
+        *,
+        navigator: object,
+        session: object,
+        adb_serial: str | None,
+        topic: str,
+        topic_notes: list[str],
+        watched_ads: list[dict[str, object]],
+        topic_watched_ads: list[dict[str, object]],
+        ad_analysis: object,
+        landing_scraper: object,
+        notify_ad_captured: object,
+    ) -> bool:
+        """Detect a sponsored search-results banner, screenshot it, record as banner-only ad."""
+        import uuid as _uuid
+        try:
+            cta_bounds = await asyncio.get_event_loop().run_in_executor(
+                None,
+                navigator._extract_sponsor_cta_bounds_sync,  # type: ignore[attr-defined]
+            )
+        except Exception:
+            return False
+        if not cta_bounds:
+            return False
+
+        # Take screenshot via adb screencap
+        artifact_prefix = self._build_safe_artifact_prefix(topic)
+        storage = self._config.storage.base_path
+        screen_path = Path(storage) / "android_probe" / f"{artifact_prefix}_search_banner.png"
+        screen_path.parent.mkdir(parents=True, exist_ok=True)
+        driver = getattr(session, "driver", None) if session is not None else None
+        written_screen: Path | None = None
+        if adb_serial:
+            try:
+                adb_bin = require_tool_path("adb")
+                result = subprocess.run(
+                    [adb_bin, "-s", adb_serial, "exec-out", "screencap", "-p"],
+                    capture_output=True, check=False, timeout=12,
+                )
+                if result.returncode == 0 and result.stdout:
+                    screen_path.write_bytes(result.stdout)
+                    written_screen = screen_path
+            except Exception:
+                pass
+        if written_screen is None and driver is not None:
+            try:
+                driver.save_screenshot(str(screen_path))  # type: ignore[attr-defined]
+                written_screen = screen_path
+            except Exception:
+                pass
+
+        # Extract visible text from page source
+        visible_lines: list[str] = []
+        display_url: str | None = None
+        headline_text: str | None = None
+        try:
+            import xml.etree.ElementTree as ET
+            page_source = (driver.page_source or "") if driver else ""
+            if page_source:
+                root = ET.fromstring(page_source)
+                seen: set[str] = set()
+                for node in root.iter():
+                    text = (node.attrib.get("text") or "").strip()
+                    if text and text not in seen and len(text) > 1:
+                        seen.add(text)
+                        visible_lines.append(text)
+                # Heuristic: first long non-CTA line is headline, url-looking line is display_url
+                cta_words = {"sponsored", "visit site", "learn more", "open an account", "watch", "install"}
+                for line in visible_lines:
+                    ll = line.casefold()
+                    if not headline_text and len(line) > 10 and ll not in cta_words:
+                        headline_text = line
+                    if not display_url and ("." in line) and len(line.split()) == 1 and len(line) < 60:
+                        display_url = line
+        except Exception:
+            pass
+
+        from app.api.modules.emulation.models import AnalysisStatus, LandingStatus
+
+        screenshot_paths: list[tuple[int, str]] = []
+        if written_screen is not None:
+            screenshot_paths.append((0, str(written_screen)))
+
+        _now = time.time()
+        capture_payload: dict[str, object] = {
+            "video_src_url": None,
+            "video_status": VideoStatus.FALLBACK_SCREENSHOTS if screenshot_paths else VideoStatus.NO_SRC,
+            "video_file": None,
+            "landing_url": None,
+            "landing_status": LandingStatus.SKIPPED,
+            "landing_dir": None,
+            "screenshot_paths": screenshot_paths,
+            "cta_href": None,
+            "recorded_video_duration_seconds": None,
+            "first_ad_offset_seconds": None,
+            "last_ad_offset_seconds": None,
+            "analysis_status": AnalysisStatus.PENDING,
+            "analysis_summary": None,
+            "capture_notes": ["search_banner"],
+            "pre_click_display_url": display_url,
+            "pre_click_headline_text": headline_text,
+        }
+        built_ad: dict[str, object] = {
+            "position": 0,
+            "started_at": _now,
+            "ended_at": _now,
+            "watched_seconds": 0.0,
+            "completed": True,
+            "skip_clicked": False,
+            "skip_visible": False,
+            "skip_text": None,
+            "cta_text": None,
+            "cta_candidates": [],
+            "cta_href": None,
+            "sponsor_label": "Sponsored",
+            "advertiser_domain": None,
+            "display_url": display_url,
+            "display_url_decoded": display_url,
+            "landing_urls": [],
+            "headline_text": headline_text,
+            "description_text": None,
+            "description_lines": [],
+            "ad_pod_position": None,
+            "ad_pod_total": None,
+            "ad_duration_seconds": None,
+            "ad_first_progress_seconds": None,
+            "ad_last_progress_seconds": None,
+            "ad_completion_reason": "search_banner",
+            "first_ad_offset_seconds": None,
+            "last_ad_offset_seconds": None,
+            "recorded_video_duration_seconds": None,
+            "my_ad_center_visible": False,
+            "full_text": "\n".join(visible_lines),
+            "full_text_source": "search_banner",
+            "full_visible_text": "\n".join(visible_lines),
+            "full_caption_text": "",
+            "visible_lines": visible_lines,
+            "caption_lines": [],
+            "text_samples": [],
+            "end_reason": "search_banner",
+            "capture_id": str(_uuid.uuid4()),
+            "capture": capture_payload,
+            "recorded_at": _now,
+            "ad_type": "search_banner",
+        }
+        built_ad = self._with_watched_ad_position(built_ad, len(watched_ads) + 1)
+        ad_analysis.submit(built_ad)
+        landing_scraper.submit(built_ad)
+        watched_ads.append(built_ad)
+        topic_watched_ads.append(built_ad)
+        await notify_ad_captured()
+        topic_notes.append("search_banner_ad:captured")
+        print("[android-session] stage:search_banner_ad:captured", flush=True)
+        return True
+
     async def _advance_main_watch_iteration(
         self,
         *,
@@ -1914,6 +2070,7 @@ class AndroidYouTubeProbeRunner:
         clicked: bool | None = None,
         returned_to_youtube: bool | None = None,
         elapsed_since_samples: float = 0.0,
+        watcher: object = None,
     ) -> tuple[str | None, float | None]:
         self._log_recorder_decision(
             label=label,
@@ -1961,7 +2118,17 @@ class AndroidYouTubeProbeRunner:
                 debug_progress,
                 debug_duration,
             )
-            await asyncio.sleep(sleep_seconds)
+            # Sleep in chunks, nudging miniplayer play if ad is paused there
+            _sleep_remaining = sleep_seconds
+            while _sleep_remaining > 0:
+                _chunk = min(5.0, _sleep_remaining)
+                await asyncio.sleep(_chunk)
+                _sleep_remaining -= _chunk
+                if _sleep_remaining > 0 and watcher is not None:
+                    with contextlib.suppress(Exception):
+                        await watcher.restore_primary_watch_surface()
+                    with contextlib.suppress(Exception):
+                        await watcher.ensure_playing()
         else:
             logger.info(
                 "recorder[%s]: no remaining ad time "
@@ -2872,6 +3039,20 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             stage_label="wait_for_results",
                             launcher_tripwire=launcher_tripwire,
                         )
+                        # Capture any sponsored search banner visible in results
+                        with contextlib.suppress(Exception):
+                            await self._capture_search_banner_ad_if_present(
+                                navigator=navigator,
+                                session=session,
+                                adb_serial=device.adb_serial if device is not None else None,
+                                topic=topic,
+                                topic_notes=topic_notes,
+                                watched_ads=watched_ads,
+                                topic_watched_ads=topic_watched_ads,
+                                ad_analysis=ad_analysis,
+                                landing_scraper=landing_scraper,
+                                notify_ad_captured=_notify_ad_captured,
+                            )
                     except Exception as exc:
                         if "Failed to detect native YouTube results list" not in str(exc):
                             raise
@@ -3559,6 +3740,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                             else None
                                         ),
                                         elapsed_since_samples=_cta_probe_elapsed,
+                                        watcher=watcher,
                                     )
                                     recording_handle = None
                                 built_ad = build_watched_ad_record(
@@ -3855,6 +4037,23 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     topic_notes.append(
                                         f"midroll_duplicate_cap_break:round{_midroll_round + 1}:continuation"
                                     )
+                                    try:
+                                        _cap_next, _cap_note, _cap_extra = await self._continue_main_watch_if_needed(
+                                            watcher=watcher,
+                                            watch_result=watch_result,
+                                            target_watch_seconds=target_watch_seconds,
+                                        )
+                                        if _cap_next is not watch_result:
+                                            watch_result = _cap_next
+                                            watch_verified = bool(getattr(watch_result, "verified", False))
+                                        if _cap_note:
+                                            topic_notes.append(f"continuation_cap_fill:{_cap_note}")
+                                        if _cap_note and "main_watch_ad_detected" in _cap_note:
+                                            pending_midroll_result = _cap_extra
+                                            pending_midroll_samples_ended_monotonic = time.monotonic()
+                                            continue
+                                    except Exception as _cap_exc:
+                                        topic_notes.append(f"continuation_cap_fill_failed:{type(_cap_exc).__name__}")
                                     break
                                 continue
                             _midroll_continuation_duplicate_rounds = 0
@@ -4057,6 +4256,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                             else None
                                         ),
                                         elapsed_since_samples=_mr_cta_elapsed,
+                                        watcher=watcher,
                                     )
                                     recording_handle = None
                                 else:
@@ -4523,13 +4723,17 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                 if on_progress is not None:
                     try:
                         verified_count = sum(1 for tr in topic_results if tr.watch_verified)
+                        _meaningful_results = [
+                            tr for tr in topic_results
+                            if tr.opened_title or (tr.watch_seconds or 0) > 0 or tr.watch_verified
+                        ]
                         _progress_videos = [
                             build_topic_watched_video_payload(
                                 tr,
                                 position=idx + 1,
                                 recorded_at=time.time(),
                             )
-                            for idx, tr in enumerate(topic_results)
+                            for idx, tr in enumerate(_meaningful_results)
                         ]
                         _progress_ads = [
                             {**ad, "position": idx + 1}
@@ -6000,6 +6204,23 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         if not samples:
             return None
 
+        # Primary: use seekbar progress_seconds delta across non-ad samples.
+        # This reflects actual video playback position reported by YouTube and
+        # correctly accumulates across merged multi-chunk watch runs (midroll +
+        # continuation), unlike offset_seconds which resets each chunk.
+        non_ad_progress = [
+            float(sample.progress_seconds)
+            for sample in samples
+            if isinstance(sample.progress_seconds, (int, float)) and not sample.ad_detected
+        ]
+        if len(non_ad_progress) >= 2:
+            delta = max(non_ad_progress) - min(non_ad_progress)
+            if delta > 0:
+                return delta
+
+        # Secondary: use shifted offset_seconds (max - min) across non-ad samples.
+        # After _merge_watch_samples the offsets are monotonically increasing across
+        # all chunks, so max - min gives total elapsed non-ad watch time.
         non_ad_offsets = [
             float(sample.offset_seconds)
             for sample in samples
@@ -6012,18 +6233,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         elif len(non_ad_offsets) == 1:
             return max(non_ad_offsets)
 
-        explicit_progress = [
-            float(sample.progress_seconds)
-            for sample in samples
-            if isinstance(sample.progress_seconds, (int, float)) and not sample.ad_detected
-        ]
-        if len(explicit_progress) >= 2:
-            delta = max(explicit_progress) - min(explicit_progress)
-            if delta > 0:
-                return delta
-        elif len(explicit_progress) == 1:
-            return None
-
+        # Fallback: any offset delta including ad samples (at least gives elapsed time)
         sample_offsets = [
             float(sample.offset_seconds)
             for sample in samples

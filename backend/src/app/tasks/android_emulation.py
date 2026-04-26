@@ -230,13 +230,17 @@ async def android_emulation_task(
             ]
             topics_searched = [tr.topic for tr in result.topic_results]
             verified_count = sum(1 for tr in result.topic_results if tr.watch_verified)
+            _meaningful_results = [
+                tr for tr in result.topic_results
+                if tr.opened_title or (tr.watch_seconds or 0) > 0 or tr.watch_verified
+            ]
             watched_videos = [
                 build_topic_watched_video_payload(
                     tr,
                     position=idx + 1,
                     recorded_at=time.time(),
                 )
-                for idx, tr in enumerate(result.topic_results)
+                for idx, tr in enumerate(_meaningful_results)
             ]
 
             await session_store.update(

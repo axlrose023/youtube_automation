@@ -121,6 +121,23 @@ class AndroidYouTubeAdInteractor:
             _pre_click_xml_path, selectors.AD_HEADLINE_IDS
         )
 
+        # Skip CTA click if the ad links to a YouTube channel — no landing page value
+        _pre_url_lower = (pre_click_display_url or "").casefold()
+        _is_youtube_channel_ad = (
+            "youtube.com/@" in _pre_url_lower
+            or "youtube.com/channel" in _pre_url_lower
+            or "youtube.com/c/" in _pre_url_lower
+            or ("youtube.com" in _pre_url_lower and "@" in _pre_url_lower)
+        )
+        if _is_youtube_channel_ad:
+            logger.info("probe_cta: skipping click — YouTube channel ad url=%s", pre_click_display_url)
+            return AndroidAdCtaProbeResult(
+                clicked=False,
+                label=label,
+                pre_click_display_url=pre_click_display_url,
+                pre_click_headline_text=pre_click_headline_text,
+            )
+
         clicked = self._tap_ad_cta_via_adb_sync(preferred_label=label)
         if not clicked:
             button = self._find_first_by_ids_sync(selectors.AD_CTA_BUTTON_IDS)
