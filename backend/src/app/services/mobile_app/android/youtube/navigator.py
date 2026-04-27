@@ -1599,20 +1599,21 @@ class AndroidYouTubeNavigator:
 
         # Last-resort: open any organic video visible on screen, ignoring topic
         # relevance — better to watch something than to report no_result_opened.
-        if self._has_results_surface_sync():
-            logger.info("open_first_result_last_resort: query=%s trying any organic", query)
-            # Scroll down a couple of times to get past ads/channel cards at top
-            for _scroll_idx in range(3):
-                any_opened = self._tap_first_playable_candidate_below_sponsor_sync(None)
-                if any_opened is not None:
-                    logger.info("open_first_result_last_resort: query=%s opened=%s scroll=%s", query, any_opened, _scroll_idx)
-                    return any_opened
-                top_opened = self._tap_top_result_region_sync(None)
-                if top_opened is not None:
-                    logger.info("open_first_result_last_resort: query=%s top_region opened=%s scroll=%s", query, top_opened, _scroll_idx)
-                    return top_opened
-                self._scroll_results_feed_once_sync()
-                time.sleep(0.8)
+        # Runs even without a confirmed results surface — for queries where YT
+        # only shows Play Store apps, the underlying feed still contains
+        # organic video tiles that the tap helpers can pick up.
+        logger.info("open_first_result_last_resort: query=%s trying any organic", query)
+        for _scroll_idx in range(3):
+            any_opened = self._tap_first_playable_candidate_below_sponsor_sync(None)
+            if any_opened is not None:
+                logger.info("open_first_result_last_resort: query=%s opened=%s scroll=%s", query, any_opened, _scroll_idx)
+                return any_opened
+            top_opened = self._tap_top_result_region_sync(None)
+            if top_opened is not None:
+                logger.info("open_first_result_last_resort: query=%s top_region opened=%s scroll=%s", query, top_opened, _scroll_idx)
+                return top_opened
+            self._scroll_results_feed_once_sync()
+            time.sleep(0.8)
 
         return None
 

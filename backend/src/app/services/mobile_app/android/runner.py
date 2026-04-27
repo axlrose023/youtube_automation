@@ -3090,6 +3090,22 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 f"[android-session] stage:wait_for_results_first_attempt_ad_done total_ads={len(watched_ads)}",
                                 flush=True,
                             )
+                        # Even when wait_for_results fails, a sponsored banner may
+                        # be visible on the partial results surface (e.g. when YT
+                        # only returns Play Store apps and no native list).
+                        with contextlib.suppress(Exception):
+                            await self._capture_search_banner_ad_if_present(
+                                navigator=navigator,
+                                session=session,
+                                adb_serial=device.adb_serial if device is not None else None,
+                                topic=topic,
+                                topic_notes=topic_notes,
+                                watched_ads=watched_ads,
+                                topic_watched_ads=topic_watched_ads,
+                                ad_analysis=ad_analysis,
+                                landing_scraper=landing_scraper,
+                                notify_ad_captured=_notify_ad_captured,
+                            )
                     if not results_ready_confirmed:
                         with contextlib.suppress(Exception):
                             if await navigator.has_query_ready_surface_via_adb(topic):
@@ -3136,8 +3152,25 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             launcher_tripwire=launcher_tripwire,
                         )
                     elif not results_ready_confirmed and not opened_title:
-                        topic_notes.append("open_first_result_skipped:no_results_surface")
-                        topic_notes.append("open_result_failure:no_surface:first_attempt")
+                        # Last-resort: even when wait_for_results failed (e.g. YT
+                        # showed only Play Store apps for the query), the underlying
+                        # surface may still have organic videos that the navigator's
+                        # last-resort tap can pick up. Try to open *anything*.
+                        topic_notes.append("open_first_result_no_surface_fallback:first_attempt")
+                        print(
+                            "[android-session] stage:open_first_result_no_surface_fallback",
+                            flush=True,
+                        )
+                        opened_title = await self._open_first_result_with_timeout(
+                            navigator=navigator,
+                            topic=topic,
+                            topic_notes=topic_notes,
+                            stage_label="open_first_result_no_surface_fallback",
+                            launcher_tripwire=launcher_tripwire,
+                        )
+                        if not opened_title:
+                            topic_notes.append("open_first_result_skipped:no_results_surface")
+                            topic_notes.append("open_result_failure:no_surface:first_attempt")
                     if not opened_title:
                         self._append_open_result_diagnostics_notes(
                             topic_notes=topic_notes,
@@ -3311,8 +3344,24 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                         launcher_tripwire=launcher_tripwire,
                                     )
                                 else:
-                                    topic_notes.append("open_first_result_retry_skipped:no_results_surface")
-                                    topic_notes.append("open_result_failure:no_surface:retry")
+                                    # Mirror the first-attempt last-resort: try
+                                    # to open any organic video even without a
+                                    # confirmed results surface.
+                                    topic_notes.append("open_first_result_no_surface_fallback:retry")
+                                    print(
+                                        "[android-session] stage:open_first_result_no_surface_fallback_retry",
+                                        flush=True,
+                                    )
+                                    opened_title = await self._open_first_result_with_timeout(
+                                        navigator=navigator,
+                                        topic=topic,
+                                        topic_notes=topic_notes,
+                                        stage_label="open_first_result_no_surface_fallback_retry",
+                                        launcher_tripwire=launcher_tripwire,
+                                    )
+                                    if not opened_title:
+                                        topic_notes.append("open_first_result_retry_skipped:no_results_surface")
+                                        topic_notes.append("open_result_failure:no_surface:retry")
                                 if not opened_title:
                                     self._append_open_result_diagnostics_notes(
                                         topic_notes=topic_notes,
@@ -4725,7 +4774,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                         verified_count = sum(1 for tr in topic_results if tr.watch_verified)
                         _meaningful_results = [
                             tr for tr in topic_results
-                            if tr.opened_title or (tr.watch_seconds or 0) > 0 or tr.watch_verified
+                            if (tr.watch_seconds or 0) > 0 or tr.watch_verified
                         ]
                         _progress_videos = [
                             build_topic_watched_video_payload(

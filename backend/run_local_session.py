@@ -22,7 +22,7 @@ TOPICS = [
     "best forex signals provider",
     "prop firm funded account",
 ]
-DURATION_MINUTES = 20
+DURATION_MINUTES = 15
 AVD_NAME = "yt_android_playstore_api35_clean"
 ARTIFACTS_PATH = Path(__file__).parent.parent / "artifacts"
 
@@ -36,6 +36,7 @@ os.environ.setdefault("APP__ANDROID_APP__EMULATOR_GPU_MODE", "auto")
 os.environ.setdefault("APP__ANDROID_APP__EMULATOR_ACCEL_MODE", "auto")
 os.environ.setdefault("APP__ANDROID_APP__EMULATOR_USE_SNAPSHOTS", "false")
 os.environ.setdefault("APP__ANDROID_APP__EMULATOR_HEADLESS", "false")
+os.environ.setdefault("APP__ANDROID_APP__EMULATOR_FORCE_RESTART_BEFORE_RUN", "false")
 os.environ.setdefault("APP__ANDROID_APP__PROBE_SCREENRECORD_ENABLED", "true")
 # dummy DB — not used by runner directly
 os.environ.setdefault("APP__POSTGRES__HOST", "127.0.0.1")

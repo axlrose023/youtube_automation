@@ -73,7 +73,6 @@ async def android_emulation_task(
     run_holder = f"{session_id}:{uuid.uuid4().hex}"
     device_lock_id = _android_device_lock_id(config)
     device_lock_holder = f"{run_holder}:android-device"
-    started_at_ts = time.time()
     _last_persisted_ads_count = 0
     heartbeat_stop = asyncio.Event()
     heartbeat_task: asyncio.Task[None] | None = None
@@ -130,6 +129,7 @@ async def android_emulation_task(
             )
             await asyncio.sleep(_ANDROID_QUEUE_POLL_SECONDS)
 
+        started_at_ts = time.time()
         await session_store.update(
             session_id,
             status=SessionStatus.RUNNING,
@@ -232,7 +232,7 @@ async def android_emulation_task(
             verified_count = sum(1 for tr in result.topic_results if tr.watch_verified)
             _meaningful_results = [
                 tr for tr in result.topic_results
-                if tr.opened_title or (tr.watch_seconds or 0) > 0 or tr.watch_verified
+                if (tr.watch_seconds or 0) > 0 or tr.watch_verified
             ]
             watched_videos = [
                 build_topic_watched_video_payload(
