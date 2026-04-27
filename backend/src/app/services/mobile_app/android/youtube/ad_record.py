@@ -677,6 +677,11 @@ def build_watched_ad_record(
         "capture_id": capture_id,
         "capture": capture_payload,
         "recorded_at": _now,
+        "ad_type": (
+            "app_install"
+            if (cta_text or "").strip().lower() == "install"
+            else "video_ad"
+        ),
     }
     logger.info(
         "build_ad_record: BUILT ad display_url=%s headline=%s "

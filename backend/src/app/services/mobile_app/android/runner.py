@@ -1460,29 +1460,58 @@ class AndroidYouTubeProbeRunner:
             except Exception:
                 pass
 
-        # Extract visible text from page source
+        # Extract visible text from page source.
+        # Try up to 3 times with a small delay because the banner often loads
+        # asynchronously after the search results surface appears.
         visible_lines: list[str] = []
         display_url: str | None = None
         headline_text: str | None = None
+        cta_href: str | None = None
+        advertiser_domain: str | None = None
         try:
             import xml.etree.ElementTree as ET
-            page_source = (driver.page_source or "") if driver else ""
-            if page_source:
-                root = ET.fromstring(page_source)
-                seen: set[str] = set()
+            url_re = re.compile(r"\b((?:https?://)?(?:www\.)?[a-z0-9][a-z0-9\-]{1,62}(?:\.[a-z]{2,})+(?:/[^\s\"'<>]*)?)", re.IGNORECASE)
+            seen: set[str] = set()
+            for attempt in range(3):
+                if attempt > 0:
+                    await asyncio.sleep(1.0)
+                page_source = ""
+                try:
+                    page_source = (driver.page_source or "") if driver else ""
+                except Exception:
+                    pass
+                if not page_source:
+                    continue
+                try:
+                    root = ET.fromstring(page_source)
+                except Exception:
+                    continue
                 for node in root.iter():
-                    text = (node.attrib.get("text") or "").strip()
-                    if text and text not in seen and len(text) > 1:
-                        seen.add(text)
-                        visible_lines.append(text)
-                # Heuristic: first long non-CTA line is headline, url-looking line is display_url
-                cta_words = {"sponsored", "visit site", "learn more", "open an account", "watch", "install"}
-                for line in visible_lines:
-                    ll = line.casefold()
-                    if not headline_text and len(line) > 10 and ll not in cta_words:
-                        headline_text = line
-                    if not display_url and ("." in line) and len(line.split()) == 1 and len(line) < 60:
-                        display_url = line
+                    for attr in ("text", "content-desc"):
+                        text = (node.attrib.get(attr) or "").strip()
+                        if text and text not in seen and len(text) > 1:
+                            seen.add(text)
+                            visible_lines.append(text)
+                if any("." in line for line in visible_lines):
+                    break
+
+            cta_words = {"sponsored", "visit site", "learn more", "open an account", "watch", "install", "shop now", "sign up"}
+            topic_norm = (topic or "").strip().casefold()
+            for line in visible_lines:
+                ll = line.casefold()
+                if not headline_text and len(line) > 10 and ll not in cta_words and ll != topic_norm:
+                    headline_text = line
+                if display_url is None:
+                    m = url_re.search(line)
+                    if m:
+                        candidate = m.group(1)
+                        if candidate.casefold() != topic_norm:
+                            display_url = candidate
+                            host = re.sub(r"^https?://", "", candidate, flags=re.IGNORECASE).split("/")[0]
+                            host = re.sub(r"^www\.", "", host, flags=re.IGNORECASE)
+                            if "." in host:
+                                advertiser_domain = host
+                                cta_href = candidate if candidate.lower().startswith("http") else f"https://{host}"
         except Exception:
             pass
 
@@ -1501,7 +1530,7 @@ class AndroidYouTubeProbeRunner:
             "landing_status": LandingStatus.SKIPPED,
             "landing_dir": None,
             "screenshot_paths": screenshot_paths,
-            "cta_href": None,
+            "cta_href": cta_href,
             "recorded_video_duration_seconds": None,
             "first_ad_offset_seconds": None,
             "last_ad_offset_seconds": None,
@@ -1522,9 +1551,9 @@ class AndroidYouTubeProbeRunner:
             "skip_text": None,
             "cta_text": None,
             "cta_candidates": [],
-            "cta_href": None,
+            "cta_href": cta_href,
             "sponsor_label": "Sponsored",
-            "advertiser_domain": None,
+            "advertiser_domain": advertiser_domain,
             "display_url": display_url,
             "display_url_decoded": display_url,
             "landing_urls": [],
