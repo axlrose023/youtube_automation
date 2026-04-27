@@ -372,6 +372,7 @@ class AndroidYouTubeProbeRunner:
                             ad_cta_result=ad_cta_result,
                             recorded_video_path=recorded_video_path,
                             recorded_video_duration_seconds=recorded_video_duration_seconds,
+                            search_topic=topic,
                         )
                         if built_ad is not None:
                             built_ad = self._with_watched_ad_position(
@@ -1302,6 +1303,7 @@ class AndroidYouTubeProbeRunner:
             ad_cta_result=ad_cta_result,
             recorded_video_path=recorded_video_path,
             recorded_video_duration_seconds=recorded_video_duration_seconds,
+            search_topic=topic,
         )
         if built_ad is None:
             return False
@@ -1550,8 +1552,15 @@ class AndroidYouTubeProbeRunner:
             # navigation labels, channel subscribe rows, video timecode.
             junk_prefixes = (
                 "navigate up", "subscribe to ", "go to channel",
-                "playlist", "video player",
+                "playlist", "video player", "voice search",
+                "more options", "clear", "home", "shorts", "create",
+                "subscriptions", "new content",
             )
+            # Non-advertiser domains that appear in page_source — skip them
+            _junk_domains = {
+                "support.google.com", "google.com", "youtube.com",
+                "goo.gl", "play.google.com",
+            }
             timecode_re = re.compile(r"^\d+\s+(minutes?|seconds?|hours?)\b", re.IGNORECASE)
             for line in visible_lines:
                 ll = line.casefold()
@@ -1569,9 +1578,11 @@ class AndroidYouTubeProbeRunner:
                     if m:
                         candidate = m.group(1)
                         if candidate.casefold() != topic_norm:
-                            display_url = candidate
                             host = re.sub(r"^https?://", "", candidate, flags=re.IGNORECASE).split("/")[0]
                             host = re.sub(r"^www\.", "", host, flags=re.IGNORECASE)
+                            if host.casefold() in _junk_domains:
+                                continue
+                            display_url = candidate
                             if "." in host:
                                 advertiser_domain = host
                                 cta_href = candidate if candidate.lower().startswith("http") else f"https://{host}"
@@ -1580,12 +1591,13 @@ class AndroidYouTubeProbeRunner:
 
         # Fallback: use URL extracted from logcat if page_source had nothing
         if display_url is None and logcat_url:
-            display_url = logcat_url
-            host = re.sub(r"^https?://", "", logcat_url, flags=re.IGNORECASE).split("/")[0]
-            host = re.sub(r"^www\.", "", host, flags=re.IGNORECASE)
-            if "." in host:
-                advertiser_domain = host
-                cta_href = logcat_url
+            lc_host = re.sub(r"^https?://", "", logcat_url, flags=re.IGNORECASE).split("/")[0]
+            lc_host = re.sub(r"^www\.", "", lc_host, flags=re.IGNORECASE)
+            if lc_host.casefold() not in _junk_domains:
+                display_url = logcat_url
+                if "." in lc_host:
+                    advertiser_domain = lc_host
+                    cta_href = logcat_url
 
         # Skip junk captures: if neither URL nor a meaningful headline was
         # found, this is most likely a sponsored Shorts shelf (no advertiser
@@ -1593,7 +1605,7 @@ class AndroidYouTubeProbeRunner:
         # add noise like headline_text="Navigate up".
         if not advertiser_domain and not headline_text:
             topic_notes.append("search_banner_ad:skipped:no_identity")
-            print("[android-session] stage:search_banner_ad:skipped:no_identity", flush=True)
+            print(f"[android-session] stage:search_banner_ad:skipped:no_identity visible={visible_lines[:5]!r} logcat_url={logcat_url!r}", flush=True)
             return False
 
         from app.api.modules.emulation.models import AnalysisStatus, LandingStatus
@@ -3913,6 +3925,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     ad_cta_result=ad_cta_result,
                                     recorded_video_path=recorded_video_path,
                                     recorded_video_duration_seconds=recorded_video_duration_seconds,
+                                    search_topic=topic,
                                 )
                                 if built_ad is None:
                                     # Fallback: ad was detected but samples had no ad_detected=True.
@@ -3929,6 +3942,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                         recorded_video_path=recorded_video_path,
                                         recorded_video_duration_seconds=recorded_video_duration_seconds,
                                         force_from_debug=True,
+                                        search_topic=topic,
                                     )
                                 if built_ad is not None:
                                     built_ad = self._with_watched_ad_position(
@@ -4439,6 +4453,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     ad_cta_result=_mr_cta_result,
                                     recorded_video_path=_mr_video_path,
                                     recorded_video_duration_seconds=_mr_video_dur,
+                                    search_topic=topic,
                                 )
                                 _mr_identity_matches_previous = bool(
                                     _mr_built_ad is not None
@@ -7118,6 +7133,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                 ad_cta_result=ad_cta_result,
                 recorded_video_path=recorded_video_path,
                 recorded_video_duration_seconds=recorded_video_duration_seconds,
+                search_topic=topic,
             )
             if built_ad is not None:
                 built_ad = self._with_watched_ad_position(

@@ -345,6 +345,7 @@ def build_watched_ad_record(
     recorded_video_path: str | None = None,
     recorded_video_duration_seconds: float | None = None,
     force_from_debug: bool = False,
+    search_topic: str | None = None,
 ) -> dict[str, Any] | None:
     ad_samples = [sample for sample in watch_samples if sample.ad_detected]
     logger.info(
@@ -417,6 +418,8 @@ def build_watched_ad_record(
             or _h_low == "video player"
         )
         if _is_timecode or _is_channel:
+            headline_text = None
+        elif search_topic and headline_text and headline_text.strip().casefold() == search_topic.strip().casefold():
             headline_text = None
     display_url = _pre_click_display_raw or debug_metadata.get("display_url") or _pick_last_str(
         sample.ad_display_url for sample in ad_samples
@@ -581,6 +584,7 @@ def build_watched_ad_record(
     # not the real advertiser. When we can't unwrap them, leave advertiser blank.
     if advertiser_domain and advertiser_domain in _SUPPRESSED_ADVERTISER_HOSTS:
         advertiser_domain = None
+        effective_display_url = None
     raw_visible_lines = _dedupe_strings(
         [
             sponsor_label,
