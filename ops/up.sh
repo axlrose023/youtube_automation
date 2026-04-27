@@ -14,6 +14,9 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 if android_enabled; then
+  echo "Syncing Python venv with android extras"
+  (cd "$ROOT_DIR/backend" && uv sync --frozen --extra android --extra emulation)
+
   echo "Starting Android target"
   systemctl start yta-android.target
 
