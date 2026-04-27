@@ -1519,6 +1519,10 @@ class AndroidYouTubeProbeRunner:
         headline_text: str | None = None
         cta_href: str | None = None
         advertiser_domain: str | None = None
+        _junk_domains = {
+            "support.google.com", "google.com", "youtube.com",
+            "goo.gl", "play.google.com",
+        }
         try:
             import xml.etree.ElementTree as ET
             url_re = re.compile(r"\b((?:https?://)?(?:www\.)?[a-z0-9][a-z0-9\-]{1,62}(?:\.[a-z]{2,})+(?:/[^\s\"'<>]*)?)", re.IGNORECASE)
@@ -1556,11 +1560,6 @@ class AndroidYouTubeProbeRunner:
                 "more options", "clear", "home", "shorts", "create",
                 "subscriptions", "new content",
             )
-            # Non-advertiser domains that appear in page_source — skip them
-            _junk_domains = {
-                "support.google.com", "google.com", "youtube.com",
-                "goo.gl", "play.google.com",
-            }
             timecode_re = re.compile(r"^\d+\s+(minutes?|seconds?|hours?)\b", re.IGNORECASE)
             for line in visible_lines:
                 ll = line.casefold()

@@ -403,7 +403,8 @@ def build_watched_ad_record(
         sample.ad_headline_text for sample in ad_samples
     )
     # Reject headlines that are obviously not ad copy: channel-subscribe rows,
-    # video player timecode, "Go to channel" labels, navigation buttons.
+    # video player timecode, "Go to channel" labels, navigation buttons,
+    # or YouTube live-chat messages ("@channel. text...").
     if headline_text:
         _h = headline_text.strip()
         _h_low = _h.casefold()
@@ -417,7 +418,8 @@ def build_watched_ad_record(
             or _h_low.startswith("navigate up")
             or _h_low == "video player"
         )
-        if _is_timecode or _is_channel:
+        _is_live_chat = bool(re.match(r"^@[a-z0-9_\-]+", _h, re.IGNORECASE))
+        if _is_timecode or _is_channel or _is_live_chat:
             headline_text = None
         elif search_topic and headline_text and headline_text.strip().casefold() == search_topic.strip().casefold():
             headline_text = None
@@ -585,6 +587,7 @@ def build_watched_ad_record(
     if advertiser_domain and advertiser_domain in _SUPPRESSED_ADVERTISER_HOSTS:
         advertiser_domain = None
         effective_display_url = None
+        display_url = None
     raw_visible_lines = _dedupe_strings(
         [
             sponsor_label,
@@ -607,6 +610,12 @@ def build_watched_ad_record(
         watch_debug_screen = str(watch_debug_screen_path)
         if all(existing_path != watch_debug_screen for _, existing_path in screenshot_paths):
             screenshot_paths.append((len(screenshot_paths), watch_debug_screen))
+
+    # Drop records that have no advertiser identity at all — junk captures
+    # (e.g. YouTube Live Chat pinned comment mistaken for a midroll ad).
+    if not advertiser_domain and not headline_text and not sponsor_label:
+        logger.info("build_ad_record: returning None — no advertiser identity (domain/headline/sponsor all empty)")
+        return None
 
     landing_status = LandingStatus.SKIPPED
     landing_dir = None
