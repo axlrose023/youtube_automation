@@ -1460,6 +1460,31 @@ class AndroidYouTubeProbeRunner:
             except Exception:
                 pass
 
+        # Try to extract advertiser URL from recent adb logcat entries.
+        # The YouTube app logs ad click URLs via ChromeActivity / AdRequest
+        # which are not accessible via Appium page_source (WebView is opaque).
+        logcat_url: str | None = None
+        if adb_serial:
+            try:
+                adb_bin = require_tool_path("adb")
+                lc = subprocess.run(
+                    [adb_bin, "-s", adb_serial, "logcat", "-d", "-t", "200",
+                     "-s", "chromium:V", "cr_MediaPlayerBridge:S"],
+                    capture_output=True, check=False, timeout=8, text=True,
+                )
+                _url_pattern = re.compile(
+                    r"https?://(?:www\.)?(?!googleads|doubleclick|googlesyndication|google\.com)"
+                    r"[a-z0-9][a-z0-9\-]{1,62}\.[a-z]{2,}[^\s\"'<>]*",
+                    re.IGNORECASE,
+                )
+                for line in reversed((lc.stdout or "").splitlines()):
+                    m = _url_pattern.search(line)
+                    if m:
+                        logcat_url = m.group(0)
+                        break
+            except Exception:
+                pass
+
         # Extract visible text from page source.
         # Try up to 3 times with a small delay because the banner often loads
         # asynchronously after the search results surface appears.
@@ -1514,6 +1539,15 @@ class AndroidYouTubeProbeRunner:
                                 cta_href = candidate if candidate.lower().startswith("http") else f"https://{host}"
         except Exception:
             pass
+
+        # Fallback: use URL extracted from logcat if page_source had nothing
+        if display_url is None and logcat_url:
+            display_url = logcat_url
+            host = re.sub(r"^https?://", "", logcat_url, flags=re.IGNORECASE).split("/")[0]
+            host = re.sub(r"^www\.", "", host, flags=re.IGNORECASE)
+            if "." in host:
+                advertiser_domain = host
+                cta_href = logcat_url
 
         from app.api.modules.emulation.models import AnalysisStatus, LandingStatus
 
