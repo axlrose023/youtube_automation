@@ -28,6 +28,28 @@ def _android_device_lock_id(config: Config) -> str:
     return f"android-device:{avd_name}"
 
 
+async def _android_stop_watcher(
+    session_id: str,
+    session_store: EmulationSessionStore,
+    runner_stop_event: asyncio.Event,
+    heartbeat_stop: asyncio.Event,
+) -> None:
+    """Polls Redis every 3 s; sets runner_stop_event when session moves to STOPPING."""
+    while not heartbeat_stop.is_set():
+        try:
+            payload = await session_store.get(session_id)
+            if payload is not None and payload.get("status") == SessionStatus.STOPPING:
+                logger.info("Android session %s: stop_watcher detected STOPPING — signalling runner", session_id)
+                runner_stop_event.set()
+                return
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(heartbeat_stop.wait(), timeout=3)
+        except TimeoutError:
+            continue
+
+
 async def _android_session_heartbeat(
     session_id: str,
     session_store: EmulationSessionStore,
@@ -76,6 +98,8 @@ async def android_emulation_task(
     _last_persisted_ads_count = 0
     heartbeat_stop = asyncio.Event()
     heartbeat_task: asyncio.Task[None] | None = None
+    runner_stop_event = asyncio.Event()
+    stop_watcher_task: asyncio.Task[None] | None = None
 
     lock_acquired = await session_store.try_acquire_run_lock(
         session_id=session_id,
@@ -156,6 +180,14 @@ async def android_emulation_task(
                 stop_event=heartbeat_stop,
             )
         )
+        stop_watcher_task = asyncio.create_task(
+            _android_stop_watcher(
+                session_id=session_id,
+                session_store=session_store,
+                runner_stop_event=runner_stop_event,
+                heartbeat_stop=heartbeat_stop,
+            )
+        )
 
         async def on_progress(**kwargs: object) -> None:
             nonlocal _last_persisted_ads_count
@@ -221,7 +253,29 @@ async def android_emulation_task(
                 proxy_url=proxy_url,
                 headless=headless,
                 on_progress=on_progress,
+                stop_event=runner_stop_event,
             )
+
+            if runner_stop_event.is_set():
+                await session_store.update(
+                    session_id,
+                    status=SessionStatus.STOPPED,
+                    finished_at=time.time(),
+                    error="Stopped by user",
+                    queue_reason=None,
+                )
+                live_payload = await session_store.get(session_id) or {}
+                try:
+                    await persistence.persist_history_failed(
+                        session_id=session_id,
+                        duration_minutes=duration_minutes,
+                        topics=topics,
+                        error="Stopped by user",
+                        live_payload=live_payload,
+                    )
+                except Exception:
+                    pass
+                return {"status": SessionStatus.STOPPED, "session_id": session_id}
 
             raw_ads = result.watched_ads or []
             watched_ads = [
@@ -330,6 +384,11 @@ async def android_emulation_task(
                 await heartbeat_task
             except Exception:
                 logger.exception("Android session %s: heartbeat task shutdown failed", session_id)
+        if stop_watcher_task is not None:
+            try:
+                await stop_watcher_task
+            except Exception:
+                pass
         if device_lock_acquired:
             await session_store.release_profile_lock(device_lock_id, device_lock_holder)
         await session_store.release_run_lock(session_id, run_holder)

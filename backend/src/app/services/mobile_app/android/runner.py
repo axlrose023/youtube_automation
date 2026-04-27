@@ -2651,6 +2651,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
         adspower_profile_id: str | None = None,
         headless: bool | None = None,
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        stop_event: asyncio.Event | None = None,
     ) -> AndroidSessionRunResult:
         resolved_topics = [topic.strip() for topic in topics if topic.strip()]
         if not resolved_topics:
@@ -2785,6 +2786,9 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                         f"duration_minutes={duration_minutes}",
                         flush=True,
                     )
+                if stop_event is not None and stop_event.is_set():
+                    print("[android-session] stop_event:set stopping before next topic", flush=True)
+                    break
                 if deadline is not None and topic_results and time.monotonic() >= deadline:
                     break
                 if deadline is not None:
