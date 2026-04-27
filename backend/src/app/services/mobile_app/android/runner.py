@@ -1459,6 +1459,13 @@ class AndroidYouTubeProbeRunner:
             return False
         if not cta_bounds:
             return False
+        try:
+            sponsor_card_bounds = await asyncio.get_event_loop().run_in_executor(
+                None,
+                navigator._extract_current_sponsored_bounds_sync,  # type: ignore[attr-defined]
+            )
+        except Exception:
+            sponsor_card_bounds = []
 
         # Take screenshot via adb screencap
         artifact_prefix = self._build_safe_artifact_prefix(topic)
@@ -1523,6 +1530,37 @@ class AndroidYouTubeProbeRunner:
             "support.google.com", "google.com", "youtube.com",
             "goo.gl", "play.google.com",
         }
+        # Union of all banner area bounds (the sponsored card region + CTA buttons).
+        # We only collect text from nodes that fall inside this region, otherwise
+        # the headline picks up titles of organic videos below the banner.
+        _banner_region: tuple[int, int, int, int] | None = None
+        for _bx in (sponsor_card_bounds or []) + (cta_bounds or []):
+            if not _bx or len(_bx) != 4:
+                continue
+            if _banner_region is None:
+                _banner_region = tuple(_bx)
+            else:
+                _banner_region = (
+                    min(_banner_region[0], _bx[0]),
+                    min(_banner_region[1], _bx[1]),
+                    max(_banner_region[2], _bx[2]),
+                    max(_banner_region[3], _bx[3]),
+                )
+
+        def _node_in_banner(node_bounds: str | None) -> bool:
+            if _banner_region is None:
+                return True
+            if not node_bounds:
+                return False
+            nums = re.findall(r"\d+", node_bounds)
+            if len(nums) != 4:
+                return False
+            x1, y1, x2, y2 = (int(n) for n in nums)
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
+            return (_banner_region[0] <= cx <= _banner_region[2]
+                    and _banner_region[1] <= cy <= _banner_region[3])
+
         try:
             import xml.etree.ElementTree as ET
             url_re = re.compile(r"\b((?:https?://)?(?:www\.)?[a-z0-9][a-z0-9\-]{1,62}(?:\.[a-z]{2,})+(?:/[^\s\"'<>]*)?)", re.IGNORECASE)
@@ -1542,6 +1580,8 @@ class AndroidYouTubeProbeRunner:
                 except Exception:
                     continue
                 for node in root.iter():
+                    if not _node_in_banner(node.attrib.get("bounds")):
+                        continue
                     for attr in ("text", "content-desc"):
                         text = (node.attrib.get(attr) or "").strip()
                         if text and text not in seen and len(text) > 1:

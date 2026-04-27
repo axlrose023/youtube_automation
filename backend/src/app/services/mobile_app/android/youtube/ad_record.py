@@ -416,10 +416,18 @@ def build_watched_ad_record(
             or _h_low.startswith("playlist")
             or _h_low.startswith("video player")
             or _h_low.startswith("navigate up")
+            or _h_low.startswith("action menu")
             or _h_low == "video player"
         )
         _is_live_chat = bool(re.match(r"^@[a-z0-9_\-]+", _h, re.IGNORECASE))
-        if _is_timecode or _is_channel or _is_live_chat:
+        # CTA labels mistakenly captured as headlines ("Watch", "Install",
+        # "Learn more", "Visit site"). These are short and never real ad copy.
+        _cta_label_set = {
+            "watch", "install", "learn more", "visit site", "shop now",
+            "sign up", "subscribe", "open an account", "view channel",
+        }
+        _is_cta_label = _h_low in _cta_label_set or len(_h) < 6
+        if _is_timecode or _is_channel or _is_live_chat or _is_cta_label:
             headline_text = None
         elif search_topic and headline_text and headline_text.strip().casefold() == search_topic.strip().casefold():
             headline_text = None
@@ -916,6 +924,14 @@ def _pick_heuristic_headline(
         if any(frag in lowered for frag in _YOUTUBE_SEARCH_NOISE_SUBSTRINGS):
             continue
         if lowered.startswith(("sponsored", "реклам", "ad ", "visit ")):
+            continue
+        # Reject UI/navigation labels and YouTube live-chat messages.
+        if lowered.startswith((
+            "subscribe to ", "go to channel", "playlist",
+            "video player", "navigate up", "action menu",
+        )):
+            continue
+        if re.match(r"^@[a-z0-9_\-]+", s, re.IGNORECASE):
             continue
         if _TIMECODE_PATTERN.fullmatch(s):
             continue
