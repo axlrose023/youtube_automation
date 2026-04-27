@@ -32,8 +32,7 @@ def require_tool_path(tool_name: str) -> str:
 
 def build_android_runtime_env() -> dict[str, str]:
     env = dict(os.environ)
-    if "DISPLAY" not in env:
-        env["DISPLAY"] = ":99"
+    env["DISPLAY"] = ":99"
     sdk_root = ensure_sdk_root_layout()
     env["ANDROID_SDK_ROOT"] = str(sdk_root)
     env["ANDROID_HOME"] = str(sdk_root)
