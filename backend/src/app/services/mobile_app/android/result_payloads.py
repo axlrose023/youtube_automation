@@ -21,6 +21,15 @@ def build_topic_watched_video_payload(
     else:
         watch_ratio = 1.0 if topic_result.watch_verified else 0.0
 
+    # `watch_verified` from the runner means "the player started and was
+    # observed playing the right video". Treat the video as truly watched
+    # only if we also accumulated enough watch time — otherwise a 5s probe
+    # blip would be marked verified.
+    _verified_raw = bool(topic_result.watch_verified)
+    _verified = _verified_raw and (
+        watched_seconds >= 15.0
+        or (target_seconds > 0.0 and watched_seconds >= 0.3 * target_seconds)
+    )
     return {
         "position": position,
         "action": "watch",
@@ -29,8 +38,8 @@ def build_topic_watched_video_payload(
         "watched_seconds": watched_seconds,
         "target_seconds": target_seconds,
         "watch_ratio": watch_ratio,
-        "watch_verified": bool(topic_result.watch_verified),
-        "completed": topic_result.watch_verified and watch_ratio >= 0.5,
+        "watch_verified": _verified,
+        "completed": _verified and watch_ratio >= 0.5,
         "search_keyword": topic_result.topic,
         "matched_topics": [topic_result.topic],
         "keywords": [],

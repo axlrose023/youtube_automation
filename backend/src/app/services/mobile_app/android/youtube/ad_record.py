@@ -401,6 +401,23 @@ def build_watched_ad_record(
     headline_text = _pre_click_headline_raw or debug_metadata.get("headline_text") or _pick_last_str(
         sample.ad_headline_text for sample in ad_samples
     )
+    # Reject headlines that are obviously not ad copy: channel-subscribe rows,
+    # video player timecode, "Go to channel" labels, navigation buttons.
+    if headline_text:
+        _h = headline_text.strip()
+        _h_low = _h.casefold()
+        _is_timecode = bool(re.match(r"^\d+\s+(minutes?|seconds?|hours?)\b", _h, re.IGNORECASE)) \
+            or bool(re.match(r"^\d+\s*[:.]?\d*\s*(of|/)\s*\d+", _h, re.IGNORECASE))
+        _is_channel = (
+            _h_low.startswith("subscribe to ")
+            or _h_low.startswith("go to channel")
+            or _h_low.startswith("playlist")
+            or _h_low.startswith("video player")
+            or _h_low.startswith("navigate up")
+            or _h_low == "video player"
+        )
+        if _is_timecode or _is_channel:
+            headline_text = None
     display_url = _pre_click_display_raw or debug_metadata.get("display_url") or _pick_last_str(
         sample.ad_display_url for sample in ad_samples
     )
@@ -548,6 +565,17 @@ def build_watched_ad_record(
         # the pod, do not feed that stale headline into analysis.
         if not _pre_click_headline_raw:
             headline_text = landing_surface_title
+        # Drop visible_lines from the previous (stale) ad so full_visible_text
+        # / full_text don't mix copy from two different advertisers in one row.
+        _stale_domain = display_domain
+        _filtered_samples: list[AndroidWatchSample] = []
+        for _s in ad_samples:
+            _markers = " ".join(_sample_identity_markers(_s))
+            if _stale_domain and _stale_domain.casefold() in _markers.casefold():
+                continue
+            _filtered_samples.append(_s)
+        if _filtered_samples:
+            ad_samples = _filtered_samples
     advertiser_domain = _extract_domain(effective_display_url)
     # Suppress generic Google-ad-click hosts — they are redirect middlemen,
     # not the real advertiser. When we can't unwrap them, leave advertiser blank.

@@ -1424,6 +1424,30 @@ class AndroidYouTubeProbeRunner:
     ) -> bool:
         """Detect a sponsored search-results banner, screenshot it, record as banner-only ad."""
         import uuid as _uuid
+        # Guard: only capture banner ads when we are on the search results
+        # surface. video_ad pre-rolls also expose `Visit site` CTA bounds,
+        # which used to leak into watched_ads as bogus search_banner records
+        # (e.g. headline_text="Video player").
+        driver_for_guard = getattr(session, "driver", None) if session is not None else None
+        if driver_for_guard is not None:
+            try:
+                page_src = driver_for_guard.page_source or ""
+            except Exception:
+                page_src = ""
+            on_results_surface = (
+                ("Search YouTube" in page_src)
+                or ("results_search_query" in page_src)
+                or ("search_results" in page_src.lower())
+                or ("Voice search" in page_src and "Clear" in page_src)
+            )
+            on_player_surface = (
+                ("watch_player" in page_src)
+                or ("Video player" in page_src)
+                or ("inline_action_panel" in page_src)
+                or ("engagement_panel" in page_src)
+            )
+            if on_player_surface and not on_results_surface:
+                return False
         try:
             cta_bounds = await asyncio.get_event_loop().run_in_executor(
                 None,
@@ -1522,9 +1546,23 @@ class AndroidYouTubeProbeRunner:
 
             cta_words = {"sponsored", "visit site", "learn more", "open an account", "watch", "install", "shop now", "sign up"}
             topic_norm = (topic or "").strip().casefold()
+            # Junk prefixes / patterns that aren't real ad headlines —
+            # navigation labels, channel subscribe rows, video timecode.
+            junk_prefixes = (
+                "navigate up", "subscribe to ", "go to channel",
+                "playlist", "video player",
+            )
+            timecode_re = re.compile(r"^\d+\s+(minutes?|seconds?|hours?)\b", re.IGNORECASE)
             for line in visible_lines:
                 ll = line.casefold()
-                if not headline_text and len(line) > 10 and ll not in cta_words and ll != topic_norm:
+                if (
+                    not headline_text
+                    and len(line) > 10
+                    and ll not in cta_words
+                    and ll != topic_norm
+                    and not any(ll.startswith(p) for p in junk_prefixes)
+                    and not timecode_re.match(line)
+                ):
                     headline_text = line
                 if display_url is None:
                     m = url_re.search(line)
@@ -1548,6 +1586,15 @@ class AndroidYouTubeProbeRunner:
             if "." in host:
                 advertiser_domain = host
                 cta_href = logcat_url
+
+        # Skip junk captures: if neither URL nor a meaningful headline was
+        # found, this is most likely a sponsored Shorts shelf (no advertiser
+        # info available) — recording it as a search_banner row would just
+        # add noise like headline_text="Navigate up".
+        if not advertiser_domain and not headline_text:
+            topic_notes.append("search_banner_ad:skipped:no_identity")
+            print("[android-session] stage:search_banner_ad:skipped:no_identity", flush=True)
+            return False
 
         from app.api.modules.emulation.models import AnalysisStatus, LandingStatus
 
