@@ -1537,14 +1537,15 @@ class AndroidYouTubeProbeRunner:
         for _bx in (sponsor_card_bounds or []) + (cta_bounds or []):
             if not _bx or len(_bx) != 4:
                 continue
+            _bx4 = (int(_bx[0]), int(_bx[1]), int(_bx[2]), int(_bx[3]))
             if _banner_region is None:
-                _banner_region = tuple(_bx)
+                _banner_region = _bx4
             else:
                 _banner_region = (
-                    min(_banner_region[0], _bx[0]),
-                    min(_banner_region[1], _bx[1]),
-                    max(_banner_region[2], _bx[2]),
-                    max(_banner_region[3], _bx[3]),
+                    min(_banner_region[0], _bx4[0]),
+                    min(_banner_region[1], _bx4[1]),
+                    max(_banner_region[2], _bx4[2]),
+                    max(_banner_region[3], _bx4[3]),
                 )
 
         def _node_in_banner(node_bounds: str | None) -> bool:
