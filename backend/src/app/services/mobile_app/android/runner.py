@@ -1599,18 +1599,28 @@ class AndroidYouTubeProbeRunner:
                 "navigate up", "subscribe to ", "go to channel",
                 "playlist", "video player", "voice search",
                 "more options", "clear", "home", "shorts", "create",
-                "subscriptions", "new content",
+                "subscriptions", "new content", "shorts remix",
+                "close sheet", "close ad panel", "close mini",
+                "expand mini player", "tap to refresh", "my ad center",
+                "skip ad", "drag handle", "more info", "watch later",
             )
+            junk_exact = {
+                "shorts remix", "new content available",
+                "new content is available", "close sheet",
+            }
             timecode_re = re.compile(r"^\d+\s+(minutes?|seconds?|hours?)\b", re.IGNORECASE)
+            elapsed_re = re.compile(r"\belapsed of\b", re.IGNORECASE)
             for line in visible_lines:
                 ll = line.casefold()
                 if (
                     not headline_text
                     and len(line) > 10
                     and ll not in cta_words
+                    and ll not in junk_exact
                     and ll != topic_norm
                     and not any(ll.startswith(p) for p in junk_prefixes)
                     and not timecode_re.match(line)
+                    and not elapsed_re.search(line)
                 ):
                     headline_text = line
                 if display_url is None:
@@ -1638,6 +1648,26 @@ class AndroidYouTubeProbeRunner:
                 if "." in lc_host:
                     advertiser_domain = lc_host
                     cta_href = logcat_url
+
+        # Final sanity check on the headline: a UI label, timecode or the
+        # search query itself is not real ad copy. Null it so identity check
+        # below can drop pure-junk rows.
+        if headline_text:
+            _hl = headline_text.strip().casefold()
+            if (
+                _hl == (topic or "").strip().casefold()
+                or _hl in {
+                    "shorts remix", "new content available",
+                    "new content is available", "close sheet",
+                    "close ad panel", "expand mini player",
+                    "video player", "navigate up", "my ad center",
+                    "sponsored my ad center",
+                }
+                or _hl.startswith(("subscribe to ", "go to channel"))
+                or re.match(r"^\d+\s+(minutes?|seconds?|hours?)\b", _hl)
+                or "elapsed of" in _hl
+            ):
+                headline_text = None
 
         # Skip junk captures: if neither URL nor a meaningful headline was
         # found, this is most likely a sponsored Shorts shelf (no advertiser

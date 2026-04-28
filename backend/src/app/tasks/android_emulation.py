@@ -282,7 +282,15 @@ async def android_emulation_task(
                 {**ad, "position": idx + 1}
                 for idx, ad in enumerate(raw_ads)
             ]
-            topics_searched = [tr.topic for tr in result.topic_results]
+            # Dedupe topics_searched while preserving search order — over a
+            # multi-hour run the same topic gets searched many times as the
+            # rotation cycles, and a 65-entry list bloats the UI/history.
+            _seen_topics: set[str] = set()
+            topics_searched: list[str] = []
+            for _tr in result.topic_results:
+                if _tr.topic and _tr.topic not in _seen_topics:
+                    _seen_topics.add(_tr.topic)
+                    topics_searched.append(_tr.topic)
             verified_count = sum(1 for tr in result.topic_results if tr.watch_verified)
             _meaningful_results = [
                 tr for tr in result.topic_results

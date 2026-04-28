@@ -99,8 +99,12 @@ _YOUTUBE_SEARCH_NOISE_SUBSTRINGS = (
     "navigate up",
     "go to channel",
     "subscriptions:",
+    "new content available",
     "new content is available",
     "tap to refresh",
+    "shorts remix",
+    "close sheet",
+    "elapsed of",
     "home:",
     "shorts:",
     "you:",
@@ -408,8 +412,11 @@ def build_watched_ad_record(
     if headline_text:
         _h = headline_text.strip()
         _h_low = _h.casefold()
+        # "0 minutes 4 seconds elapsed of 25 minutes 12 seconds", "0:04 of 0:11"
         _is_timecode = bool(re.match(r"^\d+\s+(minutes?|seconds?|hours?)\b", _h, re.IGNORECASE)) \
-            or bool(re.match(r"^\d+\s*[:.]?\d*\s*(of|/)\s*\d+", _h, re.IGNORECASE))
+            or bool(re.match(r"^\d+\s*[:.]?\d*\s*(of|/)\s*\d+", _h, re.IGNORECASE)) \
+            or bool(re.search(r"\belapsed of\b", _h_low)) \
+            or bool(re.search(r"\d+\s*(minutes?|seconds?|hours?)\s+\d+\s*(minutes?|seconds?|hours?)", _h_low))
         _is_channel = (
             _h_low.startswith("subscribe to ")
             or _h_low.startswith("go to channel")
@@ -427,7 +434,35 @@ def build_watched_ad_record(
             "sign up", "subscribe", "open an account", "view channel",
         }
         _is_cta_label = _h_low in _cta_label_set or len(_h) < 6
-        if _is_timecode or _is_channel or _is_live_chat or _is_cta_label:
+        # YouTube UI elements that get scraped as ad headlines.
+        _ui_label_set = {
+            "shorts remix",
+            "new content available",
+            "new content is available",
+            "close sheet",
+            "close ad panel",
+            "close mini player",
+            "expand mini player",
+            "close player",
+            "close video",
+            "tap to refresh",
+            "my ad center",
+            "sponsored my ad center",
+            "skip ad",
+            "skip ads",
+            "drag handle",
+            "more options",
+            "more info",
+            "watch later",
+            "in this video",
+        }
+        _is_ui_label = _h_low in _ui_label_set
+        # "Sponsored · 2 of 2 · 0:04 My Ad Center" — sponsored label dressed up
+        # with a pod counter and timecode is not real headline copy.
+        _is_sponsored_meta = bool(
+            re.match(r"^sponsored\b.*\b(my ad center|of\s+\d|·)", _h_low)
+        )
+        if _is_timecode or _is_channel or _is_live_chat or _is_cta_label or _is_ui_label or _is_sponsored_meta:
             headline_text = None
         elif search_topic and headline_text and headline_text.strip().casefold() == search_topic.strip().casefold():
             headline_text = None
@@ -542,6 +577,13 @@ def build_watched_ad_record(
             display_url=display_url,
             cta=raw_cta_text,
         )
+        # Heuristic must not return the user's search query as a "headline".
+        if (
+            search_topic
+            and headline_text
+            and headline_text.strip().casefold() == search_topic.strip().casefold()
+        ):
+            headline_text = None
     effective_display_url = (
         display_url
         or resolved_landing_url
@@ -620,9 +662,16 @@ def build_watched_ad_record(
             screenshot_paths.append((len(screenshot_paths), watch_debug_screen))
 
     # Drop records that have no advertiser identity at all — junk captures
-    # (e.g. YouTube Live Chat pinned comment mistaken for a midroll ad).
-    if not advertiser_domain and not headline_text and not sponsor_label:
-        logger.info("build_ad_record: returning None — no advertiser identity (domain/headline/sponsor all empty)")
+    # (e.g. YouTube Live Chat pinned comment mistaken for a midroll ad,
+    # or a stray UI/timecode line scraped as an "ad").
+    # `sponsor_label` is just the "Sponsored" badge and is too generic to count
+    # on its own — require at least a real domain or a real headline.
+    _meaningful_sponsor = bool(
+        sponsor_label
+        and sponsor_label.strip().casefold() not in {"sponsored", "ad", "реклама"}
+    )
+    if not advertiser_domain and not headline_text and not _meaningful_sponsor:
+        logger.info("build_ad_record: returning None — no advertiser identity (domain/headline/sponsor all empty or generic)")
         return None
 
     landing_status = LandingStatus.SKIPPED
@@ -936,6 +985,26 @@ def _pick_heuristic_headline(
         if _TIMECODE_PATTERN.fullmatch(s):
             continue
         if _DISPLAY_URL_PATTERN.fullmatch(s):
+            continue
+        # Pure timecode/duration phrases like
+        # "0 minutes 4 seconds elapsed of 25 minutes 12 seconds".
+        if "elapsed of" in lowered:
+            continue
+        if re.match(r"^\d+\s+(minutes?|seconds?|hours?)\b", lowered):
+            continue
+        # YouTube UI labels that surface in page_source noise.
+        if lowered in {
+            "shorts remix",
+            "new content available",
+            "new content is available",
+            "close sheet",
+            "close ad panel",
+            "close mini player",
+            "expand mini player",
+            "tap to refresh",
+            "my ad center",
+            "in this video",
+        }:
             continue
         if best is None or len(s) > len(best):
             best = s
