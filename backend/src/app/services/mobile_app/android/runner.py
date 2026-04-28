@@ -1501,19 +1501,29 @@ class AndroidYouTubeProbeRunner:
             try:
                 adb_bin = require_tool_path("adb")
                 lc = subprocess.run(
-                    [adb_bin, "-s", adb_serial, "logcat", "-d", "-t", "200",
-                     "-s", "chromium:V", "cr_MediaPlayerBridge:S"],
+                    [adb_bin, "-s", adb_serial, "logcat", "-d", "-t", "500"],
                     capture_output=True, check=False, timeout=8, text=True,
                 )
                 _url_pattern = re.compile(
-                    r"https?://(?:www\.)?(?!googleads|doubleclick|googlesyndication|google\.com)"
+                    r"https?://(?:www\.)?(?!googleads|doubleclick|googlesyndication|google\.com|goo\.gl|play\.google)"
                     r"[a-z0-9][a-z0-9\-]{1,62}\.[a-z]{2,}[^\s\"'<>]*",
                     re.IGNORECASE,
                 )
-                for line in reversed((lc.stdout or "").splitlines()):
-                    m = _url_pattern.search(line)
-                    if m:
-                        logcat_url = m.group(0)
+                _logcat_lines = (lc.stdout or "").splitlines()
+                # Debug: log all non-google URLs found in logcat for analysis
+                _debug_urls = []
+                for _line in _logcat_lines:
+                    _m = _url_pattern.search(_line)
+                    if _m:
+                        _debug_urls.append(_m.group(0))
+                if _debug_urls:
+                    print(f"[android-banner-debug] logcat_urls found: {_debug_urls[-10:]!r}", flush=True)
+                else:
+                    print(f"[android-banner-debug] logcat: no external URLs found in {len(_logcat_lines)} lines", flush=True)
+                for _line in reversed(_logcat_lines):
+                    _m = _url_pattern.search(_line)
+                    if _m:
+                        logcat_url = _m.group(0)
                         break
             except Exception:
                 pass
