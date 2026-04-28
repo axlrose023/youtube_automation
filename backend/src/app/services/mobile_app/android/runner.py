@@ -1548,6 +1548,15 @@ class AndroidYouTubeProbeRunner:
                     max(_banner_region[3], _bx4[3]),
                 )
 
+        # If sponsor-card bounds were not detected we end up with a tiny region
+        # around the CTA buttons only — but the headline + display URL sit
+        # *above* those buttons. Pad the region upward (and across full screen
+        # width) so we still capture them. Keep the bottom edge intact so we
+        # don't bleed into organic video titles below the banner.
+        if _banner_region is not None and not sponsor_card_bounds:
+            _x1, _y1, _x2, _y2 = _banner_region
+            _banner_region = (0, max(0, _y1 - 700), max(_x2, 9999), _y2)
+
         def _node_in_banner(node_bounds: str | None) -> bool:
             if _banner_region is None:
                 return True
