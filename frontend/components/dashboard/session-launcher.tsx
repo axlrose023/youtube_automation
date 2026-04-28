@@ -81,7 +81,6 @@ export function SessionLauncher() {
         topics: payloadTopics,
         runner: "android",
         proxy_id: proxyId,
-        headless: true,
       });
       navigate(`/sessions/${response.session_id}`);
     } catch {
