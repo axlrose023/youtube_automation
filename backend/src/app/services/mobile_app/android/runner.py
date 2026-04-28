@@ -1528,6 +1528,35 @@ class AndroidYouTubeProbeRunner:
             except Exception:
                 pass
 
+        # Debug: uiautomator dump to see if Compose nodes expose text there
+        if adb_serial:
+            try:
+                adb_bin = require_tool_path("adb")
+                subprocess.run(
+                    [adb_bin, "-s", adb_serial, "shell", "uiautomator", "dump", "/sdcard/yta_banner_dump.xml"],
+                    capture_output=True, check=False, timeout=10,
+                )
+                _dump_result = subprocess.run(
+                    [adb_bin, "-s", adb_serial, "shell", "cat", "/sdcard/yta_banner_dump.xml"],
+                    capture_output=True, check=False, timeout=8, text=True,
+                )
+                _dump_xml = _dump_result.stdout or ""
+                # Extract all text/content-desc from dump
+                import xml.etree.ElementTree as _ET
+                try:
+                    _dump_root = _ET.fromstring(_dump_xml)
+                    _dump_texts = []
+                    for _n in _dump_root.iter():
+                        for _a in ("text", "content-desc"):
+                            _t = (_n.attrib.get(_a) or "").strip()
+                            if _t and len(_t) > 2:
+                                _dump_texts.append(_t)
+                    print(f"[android-banner-debug] uiautomator dump texts: {_dump_texts[:30]!r}", flush=True)
+                except Exception as _e:
+                    print(f"[android-banner-debug] uiautomator dump parse error: {_e}, raw={_dump_xml[:500]!r}", flush=True)
+            except Exception as _e:
+                print(f"[android-banner-debug] uiautomator dump failed: {_e}", flush=True)
+
         # Extract visible text from page source.
         # Try up to 3 times with a small delay because the banner often loads
         # asynchronously after the search results surface appears.
