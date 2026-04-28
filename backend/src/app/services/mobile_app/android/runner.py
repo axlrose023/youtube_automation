@@ -1459,13 +1459,6 @@ class AndroidYouTubeProbeRunner:
             return False
         if not cta_bounds:
             return False
-        try:
-            sponsor_card_bounds = await asyncio.get_event_loop().run_in_executor(
-                None,
-                navigator._extract_current_sponsored_bounds_sync,  # type: ignore[attr-defined]
-            )
-        except Exception:
-            sponsor_card_bounds = []
 
         # Take screenshot via adb screencap
         artifact_prefix = self._build_safe_artifact_prefix(topic)
