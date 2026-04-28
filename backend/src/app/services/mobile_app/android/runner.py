@@ -1590,8 +1590,6 @@ class AndroidYouTubeProbeRunner:
                 except Exception:
                     continue
                 for node in root.iter():
-                    if not _node_in_banner(node.attrib.get("bounds")):
-                        continue
                     for attr in ("text", "content-desc"):
                         text = (node.attrib.get(attr) or "").strip()
                         if text and text not in seen and len(text) > 1:
