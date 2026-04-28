@@ -1501,34 +1501,24 @@ class AndroidYouTubeProbeRunner:
             try:
                 adb_bin = require_tool_path("adb")
                 lc = subprocess.run(
-                    [adb_bin, "-s", adb_serial, "logcat", "-d", "-t", "500"],
+                    [adb_bin, "-s", adb_serial, "logcat", "-d", "-t", "200",
+                     "-s", "chromium:V", "cr_MediaPlayerBridge:S"],
                     capture_output=True, check=False, timeout=8, text=True,
                 )
                 _url_pattern = re.compile(
-                    r"https?://(?:www\.)?(?!googleads|doubleclick|googlesyndication|google\.com|goo\.gl|play\.google)"
+                    r"https?://(?:www\.)?(?!googleads|doubleclick|googlesyndication|google\.com)"
                     r"[a-z0-9][a-z0-9\-]{1,62}\.[a-z]{2,}[^\s\"'<>]*",
                     re.IGNORECASE,
                 )
-                _logcat_lines = (lc.stdout or "").splitlines()
-                # Debug: log all non-google URLs found in logcat for analysis
-                _debug_urls = []
-                for _line in _logcat_lines:
-                    _m = _url_pattern.search(_line)
-                    if _m:
-                        _debug_urls.append(_m.group(0))
-                if _debug_urls:
-                    print(f"[android-banner-debug] logcat_urls found: {_debug_urls[-10:]!r}", flush=True)
-                else:
-                    print(f"[android-banner-debug] logcat: no external URLs found in {len(_logcat_lines)} lines", flush=True)
-                for _line in reversed(_logcat_lines):
-                    _m = _url_pattern.search(_line)
-                    if _m:
-                        logcat_url = _m.group(0)
+                for line in reversed((lc.stdout or "").splitlines()):
+                    m = _url_pattern.search(line)
+                    if m:
+                        logcat_url = m.group(0)
                         break
             except Exception:
                 pass
 
-        # Debug: uiautomator dump to see if Compose nodes expose text there
+        # Debug: uiautomator dump to check if Compose nodes expose banner text
         if adb_serial:
             try:
                 adb_bin = require_tool_path("adb")
@@ -1541,7 +1531,6 @@ class AndroidYouTubeProbeRunner:
                     capture_output=True, check=False, timeout=8, text=True,
                 )
                 _dump_xml = _dump_result.stdout or ""
-                # Extract all text/content-desc from dump
                 import xml.etree.ElementTree as _ET
                 try:
                     _dump_root = _ET.fromstring(_dump_xml)
@@ -1553,7 +1542,7 @@ class AndroidYouTubeProbeRunner:
                                 _dump_texts.append(_t)
                     print(f"[android-banner-debug] uiautomator dump texts: {_dump_texts[:30]!r}", flush=True)
                 except Exception as _e:
-                    print(f"[android-banner-debug] uiautomator dump parse error: {_e}, raw={_dump_xml[:500]!r}", flush=True)
+                    print(f"[android-banner-debug] uiautomator dump error: {_e}", flush=True)
             except Exception as _e:
                 print(f"[android-banner-debug] uiautomator dump failed: {_e}", flush=True)
 
@@ -1569,47 +1558,6 @@ class AndroidYouTubeProbeRunner:
             "support.google.com", "google.com", "youtube.com",
             "goo.gl", "play.google.com",
         }
-        # Union of all banner area bounds (the sponsored card region + CTA buttons).
-        # We only collect text from nodes that fall inside this region, otherwise
-        # the headline picks up titles of organic videos below the banner.
-        _banner_region: tuple[int, int, int, int] | None = None
-        for _bx in (sponsor_card_bounds or []) + (cta_bounds or []):
-            if not _bx or len(_bx) != 4:
-                continue
-            _bx4 = (int(_bx[0]), int(_bx[1]), int(_bx[2]), int(_bx[3]))
-            if _banner_region is None:
-                _banner_region = _bx4
-            else:
-                _banner_region = (
-                    min(_banner_region[0], _bx4[0]),
-                    min(_banner_region[1], _bx4[1]),
-                    max(_banner_region[2], _bx4[2]),
-                    max(_banner_region[3], _bx4[3]),
-                )
-
-        # If sponsor-card bounds were not detected we end up with a tiny region
-        # around the CTA buttons only — but the headline + display URL sit
-        # *above* those buttons. Pad the region upward (and across full screen
-        # width) so we still capture them. Keep the bottom edge intact so we
-        # don't bleed into organic video titles below the banner.
-        if _banner_region is not None and not sponsor_card_bounds:
-            _x1, _y1, _x2, _y2 = _banner_region
-            _banner_region = (0, max(0, _y1 - 700), max(_x2, 9999), _y2)
-
-        def _node_in_banner(node_bounds: str | None) -> bool:
-            if _banner_region is None:
-                return True
-            if not node_bounds:
-                return False
-            nums = re.findall(r"\d+", node_bounds)
-            if len(nums) != 4:
-                return False
-            x1, y1, x2, y2 = (int(n) for n in nums)
-            cx = (x1 + x2) // 2
-            cy = (y1 + y2) // 2
-            return (_banner_region[0] <= cx <= _banner_region[2]
-                    and _banner_region[1] <= cy <= _banner_region[3])
-
         try:
             import xml.etree.ElementTree as ET
             url_re = re.compile(r"\b((?:https?://)?(?:www\.)?[a-z0-9][a-z0-9\-]{1,62}(?:\.[a-z]{2,})+(?:/[^\s\"'<>]*)?)", re.IGNORECASE)
@@ -1639,36 +1587,22 @@ class AndroidYouTubeProbeRunner:
 
             cta_words = {"sponsored", "visit site", "learn more", "open an account", "watch", "install", "shop now", "sign up"}
             topic_norm = (topic or "").strip().casefold()
-            # Junk prefixes / patterns that aren't real ad headlines —
-            # navigation labels, channel subscribe rows, video timecode.
             junk_prefixes = (
                 "navigate up", "subscribe to ", "go to channel",
                 "playlist", "video player", "voice search",
                 "more options", "clear", "home", "shorts", "create",
-                "subscriptions", "new content", "shorts remix",
-                "close sheet", "close ad panel", "close mini",
-                "expand mini player", "tap to refresh", "my ad center",
-                "skip ad", "drag handle", "more info", "watch later",
-                "view channel",
+                "subscriptions", "new content",
             )
-            junk_exact = {
-                "shorts remix", "new content available",
-                "new content is available", "close sheet",
-                "view channel",
-            }
             timecode_re = re.compile(r"^\d+\s+(minutes?|seconds?|hours?)\b", re.IGNORECASE)
-            elapsed_re = re.compile(r"\belapsed of\b", re.IGNORECASE)
             for line in visible_lines:
                 ll = line.casefold()
                 if (
                     not headline_text
                     and len(line) > 10
                     and ll not in cta_words
-                    and ll not in junk_exact
                     and ll != topic_norm
                     and not any(ll.startswith(p) for p in junk_prefixes)
                     and not timecode_re.match(line)
-                    and not elapsed_re.search(line)
                 ):
                     headline_text = line
                 if display_url is None:
