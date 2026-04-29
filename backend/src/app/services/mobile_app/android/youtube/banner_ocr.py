@@ -35,8 +35,6 @@ _JUNK_LINES: set[str] = {
 }
 _JUNK_PREFIXES = ("about these", "€", "<", "abaiit", "u.—")
 _TRAILING_NOISE_RE = re.compile(r"[\s°•·\-\|]+$")
-_LEADING_LOGO_NOISE_RE = re.compile(r"^[a-z]\s+(?=[A-Z])")
-_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
 _JUNK_DOMAINS = {"google.com", "play.google.com", "goo.gl", "youtube.com"}
 
 
@@ -56,21 +54,11 @@ def _is_junk(line: str) -> bool:
         return True
     if any(ll.startswith(p) for p in _JUNK_PREFIXES):
         return True
-    if ll.startswith("sponsored") or _DOMAIN_RE.search(line):
-        return True
     if not line:
         return True
     # Alpha ratio filters OCR noise like "y | }" where spaces inflate the real-char count
     alpha = sum(1 for c in line if c.isalpha())
     if alpha / len(line) < 0.40:
-        return True
-    alpha_tokens = [
-        token for token in _WORD_RE.findall(line)
-        if any(c.isalpha() for c in token)
-    ]
-    if not alpha_tokens:
-        return True
-    if max(sum(1 for c in token if c.isalpha()) for token in alpha_tokens) < 4:
         return True
     real = sum(1 for c in line if c.isalnum() or c in " .,'-:()")
     return real / len(line) < 0.60
@@ -89,13 +77,6 @@ def _find_domain(lines: list[str]) -> str | None:
                 continue
             return host
     return None
-
-
-def _clean_headline(line: str) -> str:
-    cleaned = _TRAILING_NOISE_RE.sub("", line).strip()
-    # App/brand icons at the left edge sometimes OCR as a single lowercase letter.
-    cleaned = _LEADING_LOGO_NOISE_RE.sub("", cleaned).strip()
-    return cleaned
 
 
 def extract_from_banner_screenshot(path: str | Path) -> tuple[str | None, str | None]:
@@ -118,14 +99,17 @@ def extract_from_banner_screenshot(path: str | Path) -> tuple[str | None, str | 
 
     # --- headline ---
     headline: str | None = None
-    for y_start, y_end in ((0.57, 0.65), (0.25, 0.40)):
-        for line in _ocr_strip(img, y_start, y_end):
-            cleaned = _clean_headline(line)
+    for line in _ocr_strip(img, 0.25, 0.40):
+        cleaned = _TRAILING_NOISE_RE.sub("", line).strip()
+        if not _is_junk(cleaned) and len(cleaned) >= 8:
+            headline = cleaned
+            break
+    if headline is None:
+        for line in _ocr_strip(img, 0.57, 0.65):
+            cleaned = _TRAILING_NOISE_RE.sub("", line).strip()
             if not _is_junk(cleaned) and len(cleaned) >= 8:
                 headline = cleaned
                 break
-        if headline is not None:
-            break
 
     return domain, headline
 
