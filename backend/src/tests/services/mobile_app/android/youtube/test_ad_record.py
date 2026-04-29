@@ -54,9 +54,39 @@ def test_build_watched_ad_record_extracts_display_url_from_overlay_text() -> Non
 
     assert record is not None
     assert record["display_url"] == "www.traffic-one.academy/"
-    assert record["advertiser_domain"] == "www.traffic-one.academy"
+    assert record["advertiser_domain"] == "traffic-one.academy"
     assert record["capture"]["landing_url"] == "www.traffic-one.academy/"
     assert record["capture"]["landing_status"] == LandingStatus.SKIPPED
+
+
+def test_build_watched_ad_record_strips_www_from_landing_domain() -> None:
+    record = build_watched_ad_record(
+        watch_samples=[
+            AndroidWatchSample(
+                offset_seconds=0,
+                ad_detected=True,
+                ad_signal_labels=[
+                    "Sponsored - A Fully Regulated Provider Since 2009\nwww.vantagemarkets.com/ - Visit site"
+                ],
+                ad_cta_labels=["Visit site"],
+            )
+        ],
+        watch_debug_screen_path=None,
+        watch_debug_page_source_path=None,
+        ad_cta_result=AndroidAdCtaProbeResult(
+            clicked=True,
+            label="Visit site",
+            destination_package="com.android.chrome",
+            destination_activity="org.chromium.chrome.browser.ChromeTabbedActivity",
+            landing_url="https://www.vantagemarkets.com/open-live-account/?gad_source=2",
+            returned_to_youtube=True,
+        ),
+        recorded_video_path=None,
+        recorded_video_duration_seconds=None,
+    )
+
+    assert record is not None
+    assert record["advertiser_domain"] == "vantagemarkets.com"
 
 
 def test_build_watched_ad_record_clamps_short_ad_duration_from_sponsor_label() -> None:

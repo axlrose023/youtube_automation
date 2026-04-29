@@ -1277,6 +1277,8 @@ def _extract_domain(value: str | None) -> str | None:
         return None
     parsed = urlsplit(stripped if "://" in stripped else f"https://{stripped}")
     host = (parsed.netloc or parsed.path or "").strip().lower()
+    if host.startswith("www."):
+        host = host[4:]
     return host or None
 
 

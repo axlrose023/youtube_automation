@@ -982,6 +982,40 @@ def test_main_watch_ad_detected_after_seconds_parses_numeric_note() -> None:
     )
 
 
+def test_samples_have_video_ad_signal_rejects_static_search_ad() -> None:
+    samples = [
+        AndroidWatchSample(offset_seconds=3, ad_detected=True),
+        AndroidWatchSample(offset_seconds=4, ad_detected=True),
+        AndroidWatchSample(offset_seconds=5, ad_detected=True),
+    ]
+
+    assert AndroidYouTubeSessionRunner._samples_have_video_ad_signal(samples) is False
+
+
+def test_samples_have_video_ad_signal_accepts_video_ad_controls() -> None:
+    assert AndroidYouTubeSessionRunner._samples_have_video_ad_signal(
+        [
+            AndroidWatchSample(offset_seconds=3, ad_detected=True),
+            AndroidWatchSample(
+                offset_seconds=4,
+                ad_detected=True,
+                skip_available=True,
+            ),
+        ]
+    ) is True
+
+    assert AndroidYouTubeSessionRunner._samples_have_video_ad_signal(
+        [
+            AndroidWatchSample(
+                offset_seconds=4,
+                ad_detected=True,
+                ad_progress_seconds=7.0,
+                ad_duration_seconds=20.0,
+            ),
+        ]
+    ) is True
+
+
 @pytest.mark.asyncio
 async def test_discard_recording_handle_deletes_duplicate_segment(tmp_path) -> None:
     runner = AndroidYouTubeSessionRunner.__new__(AndroidYouTubeSessionRunner)

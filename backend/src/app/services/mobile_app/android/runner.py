@@ -1300,6 +1300,19 @@ class AndroidYouTubeProbeRunner:
                 ),
                 elapsed_since_samples=_stage_cta_elapsed,
             )
+            if recorded_video_path and not self._samples_have_video_ad_signal(probe_samples):
+                topic_notes.append(f"{stage_label}:recording_discarded:no_video_signal")
+                logger.info(
+                    "recorder[%s]: discarded non-video ad recording path=%s",
+                    stage_label,
+                    recorded_video_path,
+                )
+                with contextlib.suppress(Exception):
+                    (
+                        self._config.storage.base_path / recorded_video_path
+                    ).unlink(missing_ok=True)
+                recorded_video_path = None
+                recorded_video_duration_seconds = None
 
         built_ad = build_watched_ad_record(
             watch_samples=probe_samples,
