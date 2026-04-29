@@ -1634,6 +1634,15 @@ class AndroidYouTubeProbeRunner:
             except Exception as _ocr_err:
                 print(f"[android-session] banner_ocr:error={_ocr_err!r}", flush=True)
 
+        # Play Store app-install banners have no Sponsored·domain line — OCR
+        # can't extract a domain. Use "play.google.com" as the domain so these
+        # captures are not dropped by the identity guard.
+        if advertiser_domain is None:
+            _vl_lower = {ln.strip().casefold() for ln in visible_lines}
+            if "install" in _vl_lower and "learn more" not in _vl_lower and "visit site" not in _vl_lower:
+                advertiser_domain = "play.google.com"
+                print(f"[android-session] banner_ocr:play_store headline={headline_text!r}", flush=True)
+
         # Skip junk captures: if neither URL nor a meaningful headline was
         # found, this is most likely a sponsored Shorts shelf (no advertiser
         # info available) — recording it as a search_banner row would just
