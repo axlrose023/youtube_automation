@@ -1477,14 +1477,16 @@ class AndroidYouTubeProbeRunner:
                 if result.returncode == 0 and result.stdout:
                     screen_path.write_bytes(result.stdout)
                     written_screen = screen_path
-            except Exception:
-                pass
+                else:
+                    print(f"[android-session] banner_screenshot:adb_failed rc={result.returncode} stderr={result.stderr[:100]!r}", flush=True)
+            except Exception as _e:
+                print(f"[android-session] banner_screenshot:adb_error={_e!r}", flush=True)
         if written_screen is None and driver is not None:
             try:
                 driver.save_screenshot(str(screen_path))  # type: ignore[attr-defined]
                 written_screen = screen_path
-            except Exception:
-                pass
+            except Exception as _e:
+                print(f"[android-session] banner_screenshot:driver_error={_e!r}", flush=True)
 
         # Try to extract advertiser URL from recent adb logcat entries.
         # The YouTube app logs ad click URLs via ChromeActivity / AdRequest
