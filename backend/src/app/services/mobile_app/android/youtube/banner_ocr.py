@@ -35,6 +35,8 @@ _JUNK_LINES: set[str] = {
 }
 _JUNK_PREFIXES = ("about these", "€", "<", "abaiit", "u.—")
 _TRAILING_NOISE_RE = re.compile(r"[\s°•·\-\|]+$")
+_LEADING_LOGO_NOISE_RE = re.compile(r"^[a-z]\s+(?=[A-Z])")
+_LEADING_SHORT_LOGO_RE = re.compile(r"^[A-Za-z]{1,2}\s+(?=[a-z])")
 _JUNK_DOMAINS = {"google.com", "play.google.com", "goo.gl", "youtube.com"}
 
 
@@ -53,6 +55,8 @@ def _is_junk(line: str) -> bool:
     if ll in _JUNK_LINES:
         return True
     if any(ll.startswith(p) for p in _JUNK_PREFIXES):
+        return True
+    if ll.startswith("sponsored") or _DOMAIN_RE.search(line):
         return True
     if not line:
         return True
@@ -79,6 +83,28 @@ def _find_domain(lines: list[str]) -> str | None:
     return None
 
 
+def _find_domain_with_band(img) -> tuple[str | None, str | None]:
+    for band, y_start, y_end in (
+        ("middle", 0.45, 0.52),
+        ("lower", 0.55, 0.72),
+        ("top", 0.08, 0.18),
+    ):
+        domain = _find_domain(_ocr_strip(img, y_start, y_end))
+        if domain is not None:
+            return domain, band
+    return None, None
+
+
+def _clean_headline(line: str) -> str:
+    cleaned = _TRAILING_NOISE_RE.sub("", line).strip()
+    # App/brand icons at the left edge sometimes OCR as a short prefix.
+    cleaned = _LEADING_LOGO_NOISE_RE.sub("", cleaned).strip()
+    first = cleaned.split(maxsplit=1)[0] if cleaned.split(maxsplit=1) else ""
+    if first.casefold() not in {"ai", "al"}:
+        cleaned = _LEADING_SHORT_LOGO_RE.sub("", cleaned).strip()
+    return cleaned
+
+
 def extract_from_banner_screenshot(path: str | Path) -> tuple[str | None, str | None]:
     """
     Returns (advertiser_domain, headline_text) from a banner screencap.
@@ -91,25 +117,25 @@ def extract_from_banner_screenshot(path: str | Path) -> tuple[str | None, str | 
         return None, None
 
     # --- domain ---
-    domain = _find_domain(_ocr_strip(img, 0.45, 0.52))
-    if domain is None:
-        domain = _find_domain(_ocr_strip(img, 0.55, 0.72))
-    if domain is None:
-        domain = _find_domain(_ocr_strip(img, 0.08, 0.18))
+    domain, domain_band = _find_domain_with_band(img)
 
     # --- headline ---
     headline: str | None = None
-    for line in _ocr_strip(img, 0.25, 0.40):
-        cleaned = _TRAILING_NOISE_RE.sub("", line).strip()
-        if not _is_junk(cleaned) and len(cleaned) >= 8:
-            headline = cleaned
-            break
-    if headline is None:
-        for line in _ocr_strip(img, 0.57, 0.65):
-            cleaned = _TRAILING_NOISE_RE.sub("", line).strip()
+    if domain_band == "lower":
+        headline_bands = ((0.57, 0.65), (0.55, 0.72), (0.25, 0.40), (0.40, 0.52))
+    elif domain_band == "top":
+        headline_bands = ((0.10, 0.24), (0.08, 0.18), (0.25, 0.40), (0.40, 0.52))
+    else:
+        headline_bands = ((0.25, 0.40), (0.40, 0.52), (0.57, 0.65))
+
+    for y_start, y_end in headline_bands:
+        for line in _ocr_strip(img, y_start, y_end):
+            cleaned = _clean_headline(line)
             if not _is_junk(cleaned) and len(cleaned) >= 8:
                 headline = cleaned
                 break
+        if headline is not None:
+            break
 
     return domain, headline
 
