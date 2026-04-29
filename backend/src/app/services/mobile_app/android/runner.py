@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 import random
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 _MAX_RELIABLE_AD_DURATION_SECONDS = 600.0
@@ -1654,6 +1655,46 @@ class AndroidYouTubeProbeRunner:
 
         from app.api.modules.emulation.models import AnalysisStatus, LandingStatus
 
+        def _normalize_banner_landing_url(raw: str | None) -> str | None:
+            raw = (raw or "").strip()
+            if not raw:
+                return None
+            if not re.match(r"^https?://", raw, re.IGNORECASE):
+                raw = "https://" + raw
+            try:
+                parts = urlsplit(raw)
+                if not parts.netloc:
+                    return None
+                return urlunsplit(parts)
+            except Exception:
+                return None
+
+        def _host_for_landing(raw: str | None) -> str:
+            normalized = _normalize_banner_landing_url(raw)
+            if not normalized:
+                return ""
+            try:
+                return re.sub(
+                    r"^www\.",
+                    "",
+                    urlsplit(normalized).netloc.casefold(),
+                    flags=re.IGNORECASE,
+                )
+            except Exception:
+                return ""
+
+        banner_landing_url: str | None = None
+        ad_host = re.sub(r"^www\.", "", (advertiser_domain or "").casefold(), flags=re.IGNORECASE)
+        skip_landing_hosts = {"play.google.com", "google.com", "youtube.com", "support.google.com", "goo.gl"}
+        if ad_host and ad_host not in skip_landing_hosts:
+            for raw_url in (display_url, cta_href):
+                candidate_url = _normalize_banner_landing_url(raw_url)
+                if candidate_url and _host_for_landing(candidate_url) not in skip_landing_hosts:
+                    banner_landing_url = candidate_url
+                    break
+            if banner_landing_url is None and "." in ad_host:
+                banner_landing_url = f"https://{ad_host}"
+
         screenshot_paths: list[tuple[int, str]] = []
         if written_screen is not None:
             screenshot_paths.append((0, str(written_screen)))
@@ -1663,8 +1704,8 @@ class AndroidYouTubeProbeRunner:
             "video_src_url": None,
             "video_status": VideoStatus.FALLBACK_SCREENSHOTS if screenshot_paths else VideoStatus.NO_SRC,
             "video_file": None,
-            "landing_url": None,
-            "landing_status": LandingStatus.SKIPPED,
+            "landing_url": banner_landing_url,
+            "landing_status": LandingStatus.PENDING if banner_landing_url else LandingStatus.SKIPPED,
             "landing_dir": None,
             "screenshot_paths": screenshot_paths,
             "cta_href": cta_href,
@@ -1688,7 +1729,7 @@ class AndroidYouTubeProbeRunner:
             "skip_text": None,
             "cta_text": None,
             "cta_candidates": [],
-            "cta_href": cta_href,
+            "cta_href": cta_href or banner_landing_url,
             "sponsor_label": "Sponsored",
             "advertiser_domain": advertiser_domain,
             "display_url": display_url,
