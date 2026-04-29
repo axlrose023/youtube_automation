@@ -54,8 +54,14 @@ def _is_junk(line: str) -> bool:
         return True
     if any(ll.startswith(p) for p in _JUNK_PREFIXES):
         return True
+    if not line:
+        return True
+    # Alpha ratio filters OCR noise like "y | }" where spaces inflate the real-char count
+    alpha = sum(1 for c in line if c.isalpha())
+    if alpha / len(line) < 0.40:
+        return True
     real = sum(1 for c in line if c.isalnum() or c in " .,'-:()")
-    return len(line) > 0 and real / len(line) < 0.60
+    return real / len(line) < 0.60
 
 
 def _find_domain(lines: list[str]) -> str | None:

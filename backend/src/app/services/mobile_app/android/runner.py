@@ -1639,7 +1639,7 @@ class AndroidYouTubeProbeRunner:
         # captures are not dropped by the identity guard.
         if advertiser_domain is None:
             _vl_lower = {ln.strip().casefold() for ln in visible_lines}
-            if "install" in _vl_lower and "learn more" not in _vl_lower and "visit site" not in _vl_lower:
+            if "install" in _vl_lower:
                 advertiser_domain = "play.google.com"
                 print(f"[android-session] banner_ocr:play_store headline={headline_text!r}", flush=True)
 
