@@ -1610,9 +1610,12 @@ class AndroidYouTubeProbeRunner:
                     advertiser_domain = lc_host
                     cta_href = logcat_url
 
-        # Fallback: OCR the saved screenshot to extract domain + headline that
-        # are rendered inside WebView/Compose and invisible to UiAutomator.
-        if written_screen is not None and (advertiser_domain is None or headline_text is None):
+        # OCR the saved screenshot to extract real ad domain + headline.
+        # Banner text is rendered inside WebView/Compose — invisible to UiAutomator.
+        # Always run OCR when a screenshot exists: OCR headline replaces whatever
+        # page_source found (which is usually an organic video title below the banner,
+        # not the actual ad copy).
+        if written_screen is not None:
             try:
                 from app.services.mobile_app.android.youtube.banner_ocr import (
                     extract_from_banner_screenshot,
@@ -1623,7 +1626,9 @@ class AndroidYouTubeProbeRunner:
                     if advertiser_domain is None and _ocr_domain:
                         advertiser_domain = _ocr_domain
                         print(f"[android-session] banner_ocr:domain={_ocr_domain!r}", flush=True)
-                    if headline_text is None and _ocr_headline:
+                    if _ocr_headline:
+                        # OCR headline is always preferred — it reads the actual ad text,
+                        # while page_source headline is typically an organic video title
                         headline_text = _ocr_headline
                         print(f"[android-session] banner_ocr:headline={_ocr_headline!r}", flush=True)
             except Exception as _ocr_err:
