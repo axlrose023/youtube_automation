@@ -101,6 +101,7 @@ apt-get install -y \
   libasound2t64 \
   novnc \
   qemu-kvm \
+  tesseract-ocr \
   websockify \
   x11-utils \
   x11vnc \

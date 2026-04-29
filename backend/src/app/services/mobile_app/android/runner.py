@@ -1608,6 +1608,25 @@ class AndroidYouTubeProbeRunner:
                     advertiser_domain = lc_host
                     cta_href = logcat_url
 
+        # Fallback: OCR the saved screenshot to extract domain + headline that
+        # are rendered inside WebView/Compose and invisible to UiAutomator.
+        if written_screen is not None and (advertiser_domain is None or headline_text is None):
+            try:
+                from app.services.mobile_app.android.youtube.banner_ocr import (
+                    extract_from_banner_screenshot,
+                    is_available as _ocr_available,
+                )
+                if _ocr_available():
+                    _ocr_domain, _ocr_headline = extract_from_banner_screenshot(written_screen)
+                    if advertiser_domain is None and _ocr_domain:
+                        advertiser_domain = _ocr_domain
+                        print(f"[android-session] banner_ocr:domain={_ocr_domain!r}", flush=True)
+                    if headline_text is None and _ocr_headline:
+                        headline_text = _ocr_headline
+                        print(f"[android-session] banner_ocr:headline={_ocr_headline!r}", flush=True)
+            except Exception as _ocr_err:
+                print(f"[android-session] banner_ocr:error={_ocr_err!r}", flush=True)
+
         # Skip junk captures: if neither URL nor a meaningful headline was
         # found, this is most likely a sponsored Shorts shelf (no advertiser
         # info available) — recording it as a search_banner row would just
