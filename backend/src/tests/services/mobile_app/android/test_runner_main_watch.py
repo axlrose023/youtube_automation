@@ -774,6 +774,95 @@ def test_midroll_continuation_rejects_next_ad_with_new_duration() -> None:
     ) is False
 
 
+def test_samples_have_video_ad_signal_for_skippable_app_ad() -> None:
+    samples = [
+        AndroidWatchSample(
+            offset_seconds=0,
+            ad_detected=True,
+            skip_available=True,
+            ad_visible_lines=[
+                "Sponsored",
+                "Math Makers: Kids School Games",
+                "Google Play",
+                "Install",
+            ],
+        )
+    ]
+
+    assert AndroidYouTubeSessionRunner._samples_have_video_ad_signal(samples) is True
+
+
+def test_samples_have_video_ad_signal_rejects_plain_banner_overlay() -> None:
+    samples = [
+        AndroidWatchSample(
+            offset_seconds=0,
+            ad_detected=True,
+            ad_display_url="Finance.ua",
+            ad_visible_lines=["Sponsored", "Finance.ua"],
+        )
+    ]
+
+    assert AndroidYouTubeSessionRunner._samples_have_video_ad_signal(samples) is False
+
+
+def test_result_is_app_install_video_ad_requires_video_signal() -> None:
+    result = AndroidWatchResult(
+        verified=True,
+        samples=[
+            AndroidWatchSample(
+                offset_seconds=0,
+                ad_detected=True,
+                skip_available=True,
+                ad_visible_lines=[
+                    "Sponsored",
+                    "Credit7 кредит онлайн на карту",
+                    "Google Play",
+                    "Install",
+                ],
+            )
+        ],
+    )
+
+    assert AndroidYouTubeSessionRunner._result_is_app_install_video_ad(result) is True
+
+
+def test_result_is_app_install_video_ad_detects_install_cta_without_google_play() -> None:
+    result = AndroidWatchResult(
+        verified=True,
+        samples=[
+            AndroidWatchSample(
+                offset_seconds=0,
+                ad_detected=True,
+                skip_available=True,
+                ad_cta_text="Install",
+                ad_visible_lines=["Sponsored", "XTrend Speed Trading App"],
+            )
+        ],
+    )
+
+    assert AndroidYouTubeSessionRunner._result_is_app_install_video_ad(result) is True
+
+
+def test_result_is_app_install_video_ad_rejects_banner_without_video_signal() -> None:
+    result = AndroidWatchResult(
+        verified=True,
+        samples=[
+            AndroidWatchSample(
+                offset_seconds=0,
+                ad_detected=True,
+                ad_visible_lines=[
+                    "Sponsored",
+                    "Credit7 кредит онлайн на карту",
+                    "Google Play",
+                    "Install",
+                ],
+            )
+        ],
+    )
+
+    assert AndroidYouTubeSessionRunner._result_is_app_install_video_ad(result) is False
+
+
 def test_ad_trim_window_uses_detected_midroll_offset() -> None:
     window = AndroidYouTubeSessionRunner._calculate_ad_trim_window(
         recorded_duration_seconds=148.936,
@@ -813,6 +902,69 @@ def test_ad_trim_window_keeps_head_when_ad_started_with_recording() -> None:
     )
 
     assert window == pytest.approx((0.0, 7.0), abs=0.01)
+
+
+def test_sample_based_recording_ad_window_uses_progress_to_find_true_start() -> None:
+    samples = [
+        AndroidWatchSample(
+            offset_seconds=6,
+            ad_detected=True,
+            ad_progress_seconds=5,
+            ad_duration_seconds=38,
+        ),
+        AndroidWatchSample(
+            offset_seconds=12,
+            ad_detected=True,
+            ad_progress_seconds=11,
+            ad_duration_seconds=38,
+        ),
+    ]
+
+    window = AndroidYouTubeSessionRunner._sample_based_recording_ad_window_seconds(
+        samples,
+        recording_watch_start_offset_seconds=None,
+        recorded_duration_seconds=55.9,
+    )
+
+    assert window == pytest.approx((0.5, 40.0), abs=0.01)
+
+
+def test_ad_trim_window_prefers_sample_based_window_over_late_detected_offset() -> None:
+    window = AndroidYouTubeSessionRunner._calculate_ad_trim_window(
+        recorded_duration_seconds=55.9,
+        ad_seconds=38.0,
+        ad_sample_start_seconds=6.0,
+        ad_detected_after_watch_seconds=12.0,
+        sample_based_ad_start_seconds=0.5,
+        sample_based_ad_end_seconds=40.0,
+    )
+
+    assert window == pytest.approx((0.5, 39.5), abs=0.01)
+
+
+def test_sample_based_recording_ad_window_handles_preopen_recording_offset() -> None:
+    samples = [
+        AndroidWatchSample(
+            offset_seconds=2,
+            ad_detected=True,
+            ad_progress_seconds=6,
+            ad_duration_seconds=10,
+        ),
+        AndroidWatchSample(
+            offset_seconds=7,
+            ad_detected=True,
+            ad_progress_seconds=8,
+            ad_duration_seconds=10,
+        ),
+    ]
+
+    window = AndroidYouTubeSessionRunner._sample_based_recording_ad_window_seconds(
+        samples,
+        recording_watch_start_offset_seconds=40.194,
+        recorded_duration_seconds=48.994,
+    )
+
+    assert window == pytest.approx((35.694, 48.994), abs=0.01)
 
 
 def test_main_watch_ad_detected_after_seconds_parses_numeric_note() -> None:

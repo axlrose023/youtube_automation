@@ -3,9 +3,34 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.api.modules.emulation.models import LandingStatus
-from app.services.mobile_app.android.youtube.ad_record import build_watched_ad_record
+from app.services.mobile_app.android.youtube.ad_record import (
+    _parse_landing_metadata,
+    build_watched_ad_record,
+)
 from app.services.mobile_app.android.youtube.ads import AndroidAdCtaProbeResult
 from app.services.mobile_app.models import AndroidWatchSample
+
+
+def test_parse_play_store_landing_metadata_skips_close_sheet(tmp_path: Path) -> None:
+    xml_path = tmp_path / "play_store.xml"
+    xml_path.write_text(
+        """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<hierarchy>
+  <android.view.View content-desc="Close sheet" />
+  <android.widget.TextView text="TradeBuddy - AI Chart Analyst (Early Access)" />
+  <android.widget.TextView text="Trusted Android App" />
+  <android.widget.TextView text="Install" />
+  <android.view.View content-desc="Google Play" />
+</hierarchy>
+""",
+        encoding="utf-8",
+    )
+
+    metadata = _parse_landing_metadata(xml_path, "com.android.vending")
+
+    assert metadata["title"] == "TradeBuddy - AI Chart Analyst (Early Access)"
+    assert metadata["developer"] == "Trusted Android App"
+    assert metadata["install_cta"] == "Install"
 
 
 def test_build_watched_ad_record_extracts_display_url_from_overlay_text() -> None:
@@ -109,12 +134,14 @@ def test_build_watched_ad_record_uses_skip_floor_for_short_observed_window() -> 
                 offset_seconds=0,
                 ad_detected=True,
                 skip_available=True,
+                ad_display_url="example.com",
                 ad_cta_text="Visit site",
             ),
             AndroidWatchSample(
                 offset_seconds=2,
                 ad_detected=True,
                 skip_available=True,
+                ad_display_url="example.com",
                 ad_cta_text="Visit site",
             ),
         ],
@@ -135,6 +162,7 @@ def test_build_watched_ad_record_uses_ad_seekbar_without_resource_id(tmp_path: P
         """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
 <hierarchy>
   <android.widget.TextView text="Sponsored" />
+  <android.widget.TextView text="example.com" />
   <android.widget.SeekBar content-desc="0 minutes 3 seconds of 0 minutes 22 seconds" />
   <android.widget.TextView text="Visit advertiser" />
 </hierarchy>
@@ -147,7 +175,7 @@ def test_build_watched_ad_record_uses_ad_seekbar_without_resource_id(tmp_path: P
             AndroidWatchSample(
                 offset_seconds=0,
                 ad_detected=True,
-                ad_signal_labels=["Sponsored", "Visit advertiser"],
+                ad_signal_labels=["Sponsored", "example.com", "Visit advertiser"],
             )
         ],
         watch_debug_screen_path=None,
@@ -224,12 +252,12 @@ def test_build_watched_ad_record_persists_ad_offsets_and_video_duration() -> Non
             AndroidWatchSample(
                 offset_seconds=4,
                 ad_detected=True,
-                ad_visible_lines=["Sponsored", "Visit site"],
+                ad_visible_lines=["Sponsored", "example.com", "Visit site"],
             ),
             AndroidWatchSample(
                 offset_seconds=11,
                 ad_detected=True,
-                ad_visible_lines=["Sponsored", "Visit site"],
+                ad_visible_lines=["Sponsored", "example.com", "Visit site"],
             ),
         ],
         watch_debug_screen_path=None,
@@ -289,10 +317,11 @@ def test_build_watched_ad_record_filters_generic_overlay_lines() -> None:
                 offset_seconds=0,
                 ad_detected=True,
                 ad_visible_lines=[
-                    "Sponsored",
-                    "Visit site",
-                    "Video player",
-                    "Expand Mini Player",
+                        "Sponsored",
+                        "example.com",
+                        "Visit site",
+                        "Video player",
+                        "Expand Mini Player",
                     "0 minutes 7 seconds of 0 minutes 33 seconds",
                 ],
             )
@@ -305,8 +334,8 @@ def test_build_watched_ad_record_filters_generic_overlay_lines() -> None:
     )
 
     assert record is not None
-    assert record["visible_lines"] == ["Visit site", "Sponsored"]
-    assert record["full_text"] == "Visit site\nSponsored"
+    assert record["visible_lines"] == ["Visit site", "Sponsored", "example.com"]
+    assert record["full_text"] == "Visit site\nSponsored\nexample.com"
 
 
 def test_build_watched_ad_record_marks_duration_completed_without_skip_click() -> None:
@@ -350,14 +379,14 @@ def test_build_watched_ad_record_does_not_treat_absolute_progress_as_watched_dur
             AndroidWatchSample(
                 offset_seconds=0,
                 ad_detected=True,
-                ad_signal_labels=["Sponsored", "Visit advertiser"],
+                ad_signal_labels=["Sponsored", "example.com", "Visit advertiser"],
             ),
             AndroidWatchSample(
                 offset_seconds=22,
                 ad_detected=True,
                 ad_progress_seconds=42,
                 ad_duration_seconds=60,
-                ad_signal_labels=["Sponsored", "Visit advertiser"],
+                ad_signal_labels=["Sponsored", "example.com", "Visit advertiser"],
             ),
         ],
         watch_debug_screen_path=None,

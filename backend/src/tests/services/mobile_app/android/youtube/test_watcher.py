@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 
 import app.services.mobile_app.android.youtube.watcher as watcher_module
+from app.services.mobile_app.models import AndroidWatchSample
 from app.services.mobile_app.android.youtube.watcher import AndroidYouTubeWatcher
 from app.settings import AndroidAppConfig
 
@@ -29,6 +30,7 @@ class _WatcherWithCounters(AndroidYouTubeWatcher):
         self.adb_dump_calls = 0
         self.dialog_adb_calls = 0
         self.adb_hierarchy = ""
+        self.tapped_bounds: list[tuple[int, int, int, int]] = []
 
     def _dump_ui_hierarchy_via_adb_sync(self, *, timeout_seconds: float = 6.0) -> str | None:
         self.adb_dump_calls += 1
@@ -37,6 +39,10 @@ class _WatcherWithCounters(AndroidYouTubeWatcher):
     def _dismiss_system_dialog_via_adb_sync(self) -> bool:
         self.dialog_adb_calls += 1
         return False
+
+    def _tap_bounds_via_adb(self, bounds: tuple[int, int, int, int]) -> bool:
+        self.tapped_bounds.append(bounds)
+        return True
 
 
 class _WatcherWithoutDialogProbe(_WatcherWithCounters):
@@ -107,11 +113,129 @@ def _sponsored_bottom_sheet_page_source() -> str:
     """
 
 
+def _play_store_bottom_sheet_ad_page_source() -> str:
+    return """
+    <hierarchy>
+      <android.widget.FrameLayout resource-id="com.google.android.youtube:id/watch_player" />
+      <android.view.ViewGroup resource-id="com.google.android.youtube:id/watch_panel" />
+      <android.widget.TextView text="Sponsored" />
+      <android.widget.TextView text="CT Pool: Crypto Mining App" />
+      <android.widget.TextView text="Google Play" />
+      <android.widget.Button text="Learn more" />
+      <android.widget.Button text="Install" />
+      <android.widget.TextView text="4.6" />
+      <android.widget.TextView text="100K reviews" />
+      <android.widget.TextView text="3M+" />
+      <android.widget.TextView text="Downloads" />
+      <android.widget.TextView text="Tools" />
+      <android.widget.TextView text="Category" />
+    </hierarchy>
+    """
+
+
+def _play_store_close_sheet_page_source() -> str:
+    return """
+    <hierarchy>
+      <android.widget.FrameLayout resource-id="com.google.android.youtube:id/watch_player" />
+      <android.widget.TextView text="Google Play" />
+      <android.view.View content-desc="Close sheet" bounds="[950,630][1030,710]" />
+      <android.widget.TextView text="Lords Mobile: Kingdom Wars" />
+      <android.widget.Button text="Install" />
+    </hierarchy>
+    """
+
+
 def test_dismiss_system_dialog_skips_adb_probe_when_page_has_no_dialog_hints() -> None:
     watcher = _WatcherWithCounters(_FakeDriver(page_source=_clean_watch_page_source()), AndroidAppConfig())
 
     assert watcher._dismiss_system_dialog_sync() is False
     assert watcher.dialog_adb_calls == 0
+
+
+def test_dismiss_play_store_bottom_sheet_taps_close_sheet() -> None:
+    watcher = _WatcherWithCounters(
+        _FakeDriver(page_source=_play_store_close_sheet_page_source()),
+        AndroidAppConfig(),
+    )
+
+    assert watcher._dismiss_play_store_bottom_sheet_if_present_sync() is True
+    assert watcher.tapped_bounds == [(950, 630, 1030, 710)]
+
+
+def test_dismiss_play_store_bottom_sheet_ignores_non_play_store_sheet() -> None:
+    watcher = _WatcherWithCounters(
+        _FakeDriver(
+            page_source="""
+            <hierarchy>
+              <android.view.View content-desc="Close sheet" bounds="[950,630][1030,710]" />
+              <android.widget.TextView text="Description" />
+            </hierarchy>
+            """
+        ),
+        AndroidAppConfig(),
+    )
+
+    assert watcher._dismiss_play_store_bottom_sheet_if_present_sync() is False
+    assert watcher.tapped_bounds == []
+
+
+def test_should_nudge_playback_ignores_ad_samples() -> None:
+    samples = [
+        AndroidWatchSample(
+            offset_seconds=0,
+            player_visible=True,
+            watch_panel_visible=True,
+            ad_detected=True,
+            ad_progress_seconds=5,
+            ad_duration_seconds=25,
+        ),
+        AndroidWatchSample(
+            offset_seconds=1,
+            player_visible=True,
+            watch_panel_visible=True,
+            ad_detected=True,
+            ad_progress_seconds=5,
+            ad_duration_seconds=25,
+        ),
+    ]
+
+    assert AndroidYouTubeWatcher._should_nudge_playback(samples) is False
+
+
+def test_should_nudge_playback_still_handles_stalled_regular_video() -> None:
+    samples = [
+        AndroidWatchSample(
+            offset_seconds=0,
+            player_visible=True,
+            watch_panel_visible=True,
+            progress_seconds=12,
+        ),
+        AndroidWatchSample(
+            offset_seconds=1,
+            player_visible=True,
+            watch_panel_visible=True,
+            progress_seconds=12,
+        ),
+    ]
+
+    assert AndroidYouTubeWatcher._should_nudge_playback(samples) is True
+
+
+def test_current_page_has_ad_signal_detects_skip_button() -> None:
+    watcher = _WatcherWithCounters(
+        _FakeDriver(
+            page_source="""
+            <hierarchy>
+              <android.widget.FrameLayout resource-id="com.google.android.youtube:id/watch_player" />
+              <android.widget.FrameLayout resource-id="com.google.android.youtube:id/skip_ad_button" />
+              <android.widget.TextView text="Sponsored" />
+            </hierarchy>
+            """
+        ),
+        AndroidAppConfig(),
+    )
+
+    assert watcher._current_page_has_ad_signal_sync() is True
 
 
 def test_collect_sample_sync_skips_adb_fallback_for_clean_watch_surface() -> None:
@@ -123,7 +247,7 @@ def test_collect_sample_sync_skips_adb_fallback_for_clean_watch_surface() -> Non
 
     sample, page_source = watcher._collect_sample_sync(0)
 
-    assert watcher.adb_dump_calls == 1
+    assert watcher.adb_dump_calls == 0
     assert page_source is not None
     assert sample.player_visible is True
     assert sample.watch_panel_visible is True
@@ -185,6 +309,23 @@ def test_collect_sample_sync_detects_sponsored_bottom_sheet_ad() -> None:
     assert sample.ad_headline_text == "BeCyprus"
     assert sample.ad_display_url == "becyprus.com"
     assert sample.ad_cta_text == "Book now"
+
+
+def test_collect_sample_sync_detects_play_store_bottom_sheet_ad() -> None:
+    watcher = _WatcherWithoutDialogProbe(
+        _FakeDriver(page_source=_play_store_bottom_sheet_ad_page_source()),
+        AndroidAppConfig(),
+    )
+
+    sample, _page_source = watcher._collect_sample_sync(0)
+
+    assert sample.player_visible is True
+    assert sample.watch_panel_visible is True
+    assert sample.ad_detected is True
+    assert sample.ad_sponsor_label == "Sponsored"
+    assert sample.ad_headline_text == "CT Pool: Crypto Mining App"
+    assert sample.ad_display_url == "play.google.com"
+    assert sample.ad_cta_text == "Learn more"
 
 
 def test_dump_ui_hierarchy_via_adb_returns_none_on_timeout(monkeypatch) -> None:

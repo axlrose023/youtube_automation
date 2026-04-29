@@ -860,17 +860,26 @@ def _parse_landing_metadata(path: Path | None, destination_package: str | None) 
         title = None
         developer = None
         install_cta = None
+        generic_play_store_lines = {
+            "close sheet",
+            "google play",
+            "search google play",
+            "install",
+            "open",
+            "cancel",
+            "learn more about this app",
+        }
         for value in visible_lines:
             lowered = value.casefold()
             if install_cta is None and lowered in {"install", "установить"}:
                 install_cta = value
                 continue
-            if title is None and len(value) >= 6 and lowered not in {"install", "open", "cancel"}:
+            if title is None and len(value) >= 6 and lowered not in generic_play_store_lines:
                 title = value
                 continue
             if developer is None and title is not None and value != title:
                 developer = value
-                break
+                continue
         return {
             "title": title,
             "developer": developer,

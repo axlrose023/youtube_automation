@@ -66,6 +66,10 @@ class AndroidYouTubeProbeRunner:
         self._adspower_client = AdsPowerProfileClient(config.adspower)
         self._proxy_bridge = AndroidHttpProxyBridge()
 
+    @staticmethod
+    def _local_early_recording_enabled() -> bool:
+        return False
+
     async def _prepare_emulator_proxy(
         self,
         *,
@@ -1361,6 +1365,18 @@ class AndroidYouTubeProbeRunner:
         )
 
     @staticmethod
+    def _samples_have_video_ad_signal(samples: list[object]) -> bool:
+        return any(
+            getattr(sample, "ad_detected", False)
+            and (
+                getattr(sample, "skip_available", False)
+                or isinstance(getattr(sample, "ad_duration_seconds", None), (int, float))
+                or isinstance(getattr(sample, "ad_progress_seconds", None), (int, float))
+            )
+            for sample in samples
+        )
+
+    @staticmethod
     def _result_is_banner_only_ad(result: object | None) -> bool:
         """Return True when the detected ad is a banner overlay, not a video ad.
 
@@ -1401,6 +1417,14 @@ class AndroidYouTubeProbeRunner:
         """
         samples = list(getattr(result, "samples", []) or [])
         ad_samples = [s for s in samples if getattr(s, "ad_detected", False)]
+        has_video_ad_signal = any(
+            getattr(s, "skip_available", False)
+            or isinstance(getattr(s, "ad_duration_seconds", None), (int, float))
+            or isinstance(getattr(s, "ad_progress_seconds", None), (int, float))
+            for s in ad_samples
+        )
+        if has_video_ad_signal:
+            return False
         for s in ad_samples:
             display = str(getattr(s, "ad_display_url", "") or "").casefold()
             if "play.google.com" in display:
@@ -1409,6 +1433,34 @@ class AndroidYouTubeProbeRunner:
             for line in list(getattr(s, "ad_visible_lines", []) or []):
                 if "play.google.com" in str(line).casefold():
                     return True
+        return False
+
+    @classmethod
+    def _result_is_app_install_video_ad(cls, result: object | None) -> bool:
+        samples = list(getattr(result, "samples", []) or [])
+        ad_samples = [s for s in samples if getattr(s, "ad_detected", False)]
+        if not ad_samples or not cls._samples_have_video_ad_signal(ad_samples):
+            return False
+
+        for sample in ad_samples:
+            values: list[object] = [
+                getattr(sample, "ad_display_url", None),
+                getattr(sample, "ad_headline_text", None),
+                getattr(sample, "ad_cta_text", None),
+                *(getattr(sample, "ad_visible_lines", []) or []),
+                *(getattr(sample, "ad_signal_labels", []) or []),
+                *(getattr(sample, "ad_cta_labels", []) or []),
+            ]
+            normalized_values = [
+                str(value).strip().casefold()
+                for value in values
+                if isinstance(value, str) and value.strip()
+            ]
+            visible_text = " ".join(normalized_values)
+            if "google play" in visible_text or "play.google.com" in visible_text:
+                return True
+            if any(value in {"install", "open app", "download", "get"} for value in normalized_values):
+                return True
         return False
 
     async def _capture_search_banner_ad_if_present(
@@ -1833,6 +1885,33 @@ class AndroidYouTubeProbeRunner:
         )
         if ad_seconds <= 0:
             return
+        local_trim_experiment = self._local_early_recording_enabled()
+        recording_ad_start_seconds = (
+            self._coerce_float(built_ad.get("recording_watch_start_offset_seconds"))
+            if local_trim_experiment
+            else None
+        )
+        visible_text = " ".join(
+            str(built_ad.get(key) or "")
+            for key in (
+                "advertiser_domain",
+                "headline_text",
+                "full_text",
+                "full_visible_text",
+            )
+        ).casefold()
+        prefer_tail_when_head_sample = (
+            local_trim_experiment
+            and recording_ad_start_seconds is None
+            and ad_duration_hint is not None
+            and rec_dur - ad_seconds > 6.0
+            and ("google play" in visible_text or "close sheet" in visible_text)
+        )
+        sample_window = self._sample_based_recording_ad_window_seconds(
+            extension_samples or [],
+            recording_watch_start_offset_seconds=recording_ad_start_seconds,
+            recorded_duration_seconds=rec_dur,
+        )
         trim_window = self._calculate_ad_trim_window(
             recorded_duration_seconds=rec_dur,
             ad_seconds=ad_seconds,
@@ -1840,19 +1919,26 @@ class AndroidYouTubeProbeRunner:
                 built_ad.get("first_ad_offset_seconds")
             ),
             ad_detected_after_watch_seconds=ad_detected_after_watch_seconds,
+            recording_ad_start_seconds=recording_ad_start_seconds,
+            sample_based_ad_start_seconds=sample_window[0] if sample_window else None,
+            sample_based_ad_end_seconds=sample_window[1] if sample_window else None,
+            prefer_tail_when_head_sample=prefer_tail_when_head_sample,
         )
         if trim_window is None:
             return
         start_seconds, ad_span = trim_window
         remainder_after_ad = rec_dur - start_seconds - ad_span
         logger.info(
-            "trim_recording: rec_dur=%.1fs start=%.1fs ad_span=%.1fs remainder=%.1fs detected_after=%s sample_start=%s",
+            "trim_recording: rec_dur=%.1fs start=%.1fs ad_span=%.1fs remainder=%.1fs detected_after=%s sample_start=%s recording_start=%s sample_window=%s prefer_tail=%s",
             rec_dur,
             start_seconds,
             ad_span,
             remainder_after_ad,
             ad_detected_after_watch_seconds,
             built_ad.get("first_ad_offset_seconds"),
+            recording_ad_start_seconds,
+            sample_window,
+            prefer_tail_when_head_sample,
         )
         if start_seconds < 0.5 and rec_dur - ad_span < 1.0:
             return
@@ -1887,8 +1973,14 @@ class AndroidYouTubeProbeRunner:
         if proc.returncode != 0 or not trimmed_path.exists() or trimmed_path.stat().st_size == 0:
             trimmed_path.unlink(missing_ok=True)
             return
-        with contextlib.suppress(Exception):
-            source_path.unlink(missing_ok=True)
+        if local_trim_experiment:
+            logger.info(
+                "trim_recording: kept raw recording for local experiment path=%s",
+                source_path,
+            )
+        else:
+            with contextlib.suppress(Exception):
+                source_path.unlink(missing_ok=True)
         try:
             trimmed_rel = str(trimmed_path.relative_to(self._config.storage.base_path))
         except ValueError:
@@ -1910,6 +2002,10 @@ class AndroidYouTubeProbeRunner:
         ad_seconds: float,
         ad_sample_start_seconds: float | None = None,
         ad_detected_after_watch_seconds: float | None = None,
+        recording_ad_start_seconds: float | None = None,
+        sample_based_ad_start_seconds: float | None = None,
+        sample_based_ad_end_seconds: float | None = None,
+        prefer_tail_when_head_sample: bool = False,
     ) -> tuple[float, float] | None:
         if recorded_duration_seconds <= 0.0 or ad_seconds <= 0.0:
             return None
@@ -1918,9 +2014,35 @@ class AndroidYouTubeProbeRunner:
         tail_start = max(0.0, recorded_duration_seconds - desired_span)
         start_seconds = tail_start
         if (
+            isinstance(sample_based_ad_start_seconds, (int, float))
+            and 0.0 <= float(sample_based_ad_start_seconds) < recorded_duration_seconds
+        ):
+            start_seconds = float(sample_based_ad_start_seconds)
+            if (
+                isinstance(sample_based_ad_end_seconds, (int, float))
+                and float(sample_based_ad_end_seconds) > start_seconds
+            ):
+                sample_end = min(recorded_duration_seconds, float(sample_based_ad_end_seconds))
+                ad_span = sample_end - start_seconds
+            else:
+                ad_span = min(desired_span, recorded_duration_seconds - start_seconds)
+            if ad_span <= 0.0:
+                return None
+            return start_seconds, ad_span
+        if (
+            isinstance(recording_ad_start_seconds, (int, float))
+            and 0.0 <= float(recording_ad_start_seconds) < recorded_duration_seconds
+        ):
+            start_seconds = float(recording_ad_start_seconds)
+            ad_span = min(desired_span, recorded_duration_seconds - start_seconds)
+            if ad_span <= 0.0:
+                return None
+            return start_seconds, ad_span
+        if (
             isinstance(ad_sample_start_seconds, (int, float))
             and 0.0 <= float(ad_sample_start_seconds) <= 3.0
             and ad_detected_after_watch_seconds is None
+            and not prefer_tail_when_head_sample
         ):
             # When recorder starts while an ad is already on screen, tail-trimming
             # can keep only the CTA/landing tail and drop the ad creative. In that
@@ -1942,6 +2064,59 @@ class AndroidYouTubeProbeRunner:
         if ad_span <= 0.0:
             return None
         return start_seconds, ad_span
+
+    @staticmethod
+    def _sample_based_recording_ad_window_seconds(
+        samples: list[object],
+        *,
+        recording_watch_start_offset_seconds: float | None,
+        recorded_duration_seconds: float,
+    ) -> tuple[float, float] | None:
+        if recorded_duration_seconds <= 0.0:
+            return None
+        base_offset = (
+            float(recording_watch_start_offset_seconds)
+            if isinstance(recording_watch_start_offset_seconds, (int, float))
+            else 0.0
+        )
+        start_candidates: list[float] = []
+        end_candidates: list[float] = []
+        for sample in samples:
+            if not getattr(sample, "ad_detected", False):
+                continue
+            sample_offset = getattr(sample, "offset_seconds", None)
+            progress = getattr(sample, "ad_progress_seconds", None)
+            duration = getattr(sample, "ad_duration_seconds", None)
+            if not isinstance(sample_offset, (int, float)) or not isinstance(progress, (int, float)):
+                continue
+            sample_start = base_offset + float(sample_offset) - float(progress)
+            start_candidates.append(sample_start)
+            if isinstance(duration, (int, float)) and float(duration) > float(progress):
+                sample_end = base_offset + float(sample_offset) + (
+                    float(duration) - float(progress)
+                )
+                end_candidates.append(sample_end)
+        if not start_candidates:
+            return None
+
+        lead_seconds = 0.5
+        tail_seconds = 1.0
+        start_seconds = max(0.0, min(start_candidates) - lead_seconds)
+        if start_seconds >= recorded_duration_seconds:
+            return None
+        if end_candidates:
+            end_seconds = min(recorded_duration_seconds, max(end_candidates) + tail_seconds)
+        else:
+            last_ad_offset = max(
+                base_offset + float(getattr(sample, "offset_seconds"))
+                for sample in samples
+                if getattr(sample, "ad_detected", False)
+                and isinstance(getattr(sample, "offset_seconds", None), (int, float))
+            )
+            end_seconds = min(recorded_duration_seconds, last_ad_offset + tail_seconds)
+        if end_seconds <= start_seconds:
+            return None
+        return start_seconds, end_seconds
 
     @staticmethod
     def _main_watch_ad_detected_after_seconds(note: str | None) -> float | None:
@@ -3222,6 +3397,50 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                 retry_same_topic = False
                 pending_midroll_result: object | None = None
                 pending_midroll_samples_ended_monotonic: float | None = None
+                local_early_recording_enabled = (
+                    self._config.android_app.probe_screenrecord_enabled
+                    and self._local_early_recording_enabled()
+                )
+                early_recorder: AndroidScreenRecorder | None = None
+                early_recording_handle: object | None = None
+
+                async def _ensure_local_early_recording(stage_label: str) -> None:
+                    nonlocal early_recorder, early_recording_handle
+                    if not local_early_recording_enabled:
+                        return
+                    if early_recorder is not None and early_recording_handle is not None:
+                        return
+                    adb_serial = device.adb_serial if device is not None else None
+                    if not adb_serial:
+                        topic_notes.append(f"local_early_recording_skipped:{stage_label}:no_adb")
+                        return
+                    (
+                        early_recorder,
+                        early_recording_handle,
+                    ) = await self._start_recording_handle(
+                        label=f"preopen:{stage_label}",
+                        topic=topic,
+                        adb_serial=adb_serial,
+                    )
+                    topic_notes.append(f"local_early_recording_started:{stage_label}")
+                    print(
+                        f"[android-session] local_early_recording:started stage={stage_label}",
+                        flush=True,
+                    )
+
+                async def _discard_local_early_recording(reason: str) -> None:
+                    nonlocal early_recorder, early_recording_handle
+                    if early_recorder is None or early_recording_handle is None:
+                        return
+                    await self._discard_recording_handle(
+                        label="preopen",
+                        topic=topic,
+                        recorder=early_recorder,
+                        recording_handle=early_recording_handle,
+                        reason=reason,
+                    )
+                    early_recorder = None
+                    early_recording_handle = None
 
                 try:
                     _net_ok = await self._ensure_topic_network_ready(
@@ -3355,6 +3574,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             )
                     if results_ready_confirmed and not opened_title:
                         print("[android-session] stage:open_first_result", flush=True)
+                        await _ensure_local_early_recording("open_first_result")
                         opened_title = await self._open_first_result_with_timeout(
                             navigator=navigator,
                             topic=topic,
@@ -3371,6 +3591,9 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                         print(
                             "[android-session] stage:open_first_result_no_surface_fallback",
                             flush=True,
+                        )
+                        await _ensure_local_early_recording(
+                            "open_first_result_no_surface_fallback"
                         )
                         opened_title = await self._open_first_result_with_timeout(
                             navigator=navigator,
@@ -3547,6 +3770,9 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                         )
                                 if retry_results_ready_confirmed:
                                     print("[android-session] stage:open_first_result_retry", flush=True)
+                                    await _ensure_local_early_recording(
+                                        "open_first_result_retry"
+                                    )
                                     opened_title = await self._open_first_result_with_timeout(
                                         navigator=navigator,
                                         topic=topic,
@@ -3562,6 +3788,9 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     print(
                                         "[android-session] stage:open_first_result_no_surface_fallback_retry",
                                         flush=True,
+                                    )
+                                    await _ensure_local_early_recording(
+                                        "open_first_result_no_surface_fallback_retry"
                                     )
                                     opened_title = await self._open_first_result_with_timeout(
                                         navigator=navigator,
@@ -3682,6 +3911,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 )
                             except Exception:
                                 pass
+                        await _ensure_local_early_recording("no_result_opened_last_resort")
                         last_resort_title = await self._last_resort_open_any_result(
                             navigator=navigator,
                             topic=topic,
@@ -3690,9 +3920,13 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                         )
                         if last_resort_title:
                             opened_title = last_resort_title
+                            await _discard_local_early_recording(
+                                "last_resort_opened_without_watch"
+                            )
                         else:
                             topic_notes.append("no_result_opened")
                             print("[android-session] topic:no_result_opened attempt=2", flush=True)
+                            await _discard_local_early_recording("no_result_opened")
                         if session is not None:
                             debug_screen_path, debug_page_source_path = self._write_watch_debug_artifacts(
                                 driver=session.driver,
@@ -3727,23 +3961,72 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 )
                             except Exception:
                                 pass
-                        recording_handle = None
-                        recorder = None
+                        recording_handle = early_recording_handle
+                        recorder = early_recorder
+                        recording_label = "preopen" if recording_handle is not None else "session"
+                        early_recording_handle = None
+                        early_recorder = None
+                        if recorder is not None and recording_handle is not None:
+                            topic_notes.append("local_early_recording_attached:watch")
+                            print(
+                                "[android-session] local_early_recording:attached_to_watch",
+                                flush=True,
+                            )
                         recorded_video_path = None
                         recorded_video_duration_seconds = None
+                        recording_watch_start_offset_seconds = None
                         try:
+                            pre_watch_result = None
+                            if recording_label == "preopen" and recording_handle is not None:
+                                recording_watch_start_offset_seconds = (
+                                    self._recording_runtime_seconds(recording_handle)
+                                )
+                                if recording_watch_start_offset_seconds is not None:
+                                    topic_notes.append(
+                                        "local_early_recording_watch_offset:"
+                                        f"{recording_watch_start_offset_seconds:.1f}"
+                                    )
+                                    print(
+                                        "[android-session] local_early_recording:"
+                                        f"watch_offset={recording_watch_start_offset_seconds:.1f}",
+                                        flush=True,
+                                    )
+                                print("[android-session] stage:pre_watch_current", flush=True)
+                                pre_watch_result = await watcher.watch_current(
+                                    watch_seconds=4,
+                                    timeout_grace_seconds=3.0,
+                                    timeout_floor_seconds=7.0,
+                                    sample_interval_seconds=1,
+                                )
+                                pre_watch_ad_detected = any(
+                                    sample.ad_detected for sample in pre_watch_result.samples
+                                )
+                                print(
+                                    "[android-session] stage:pre_watch_done "
+                                    f"ad_detected={str(pre_watch_ad_detected).lower()} "
+                                    f"samples={len(pre_watch_result.samples)}",
+                                    flush=True,
+                                )
+                                if pre_watch_ad_detected:
+                                    topic_notes.append("pre_watch_ad_detected")
                             # Dismiss any engagement/landing panel that may be
                             # covering the player right after video opens.
-                            with contextlib.suppress(Exception):
-                                await watcher.dismiss_residual_ad_if_present()
-                            with contextlib.suppress(Exception):
-                                await watcher.restore_primary_watch_surface()
-                            if self._config.android_app.probe_screenrecord_enabled:
+                            if pre_watch_result is None or not any(
+                                sample.ad_detected for sample in pre_watch_result.samples
+                            ):
+                                with contextlib.suppress(Exception):
+                                    await watcher.dismiss_residual_ad_if_present()
+                                with contextlib.suppress(Exception):
+                                    await watcher.restore_primary_watch_surface()
+                            if (
+                                self._config.android_app.probe_screenrecord_enabled
+                                and recording_handle is None
+                            ):
                                 (
                                     recorder,
                                     recording_handle,
                                 ) = await self._start_recording_handle(
-                                    label="session",
+                                    label=recording_label,
                                     topic=topic,
                                     adb_serial=device.adb_serial,
                                 )
@@ -3751,10 +4034,15 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 4,
                                 min(6, self._config.android_app.probe_watch_seconds),
                             )
-                            print("[android-session] stage:watch_current", flush=True)
-                            watch_result = await watcher.watch_current(
-                                watch_seconds=initial_watch_seconds
-                            )
+                            if pre_watch_result is not None and any(
+                                sample.ad_detected for sample in pre_watch_result.samples
+                            ):
+                                watch_result = pre_watch_result
+                            else:
+                                print("[android-session] stage:watch_current", flush=True)
+                                watch_result = await watcher.watch_current(
+                                    watch_seconds=initial_watch_seconds
+                                )
                             watch_result, watch_extension_note = await self._extend_ad_watch_if_needed(
                                 watcher=watcher,
                                 watch_result=watch_result,
@@ -3936,12 +4224,34 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             try:
                                 local_video = await recorder.stop(recording_handle, keep_local=True)
                                 if local_video is not None:
-                                    logger.info(
-                                        "recorder[session]: discarded no-ad recording topic=%s path=%s",
-                                        topic,
-                                        local_video,
-                                    )
-                                    local_video.unlink(missing_ok=True)
+                                    if (
+                                        self._local_early_recording_enabled()
+                                        and recording_label == "preopen"
+                                        and not _is_banner_ad
+                                    ):
+                                        logger.info(
+                                            "recorder[%s]: kept local missed-ad candidate topic=%s path=%s",
+                                            recording_label,
+                                            topic,
+                                            local_video,
+                                        )
+                                        topic_notes.append(
+                                            "local_early_recording_kept_no_ad:"
+                                            f"{local_video}"
+                                        )
+                                        print(
+                                            "[android-session] local_early_recording:"
+                                            f"kept_no_ad path={local_video}",
+                                            flush=True,
+                                        )
+                                    else:
+                                        logger.info(
+                                            "recorder[%s]: discarded no-ad recording topic=%s path=%s",
+                                            recording_label,
+                                            topic,
+                                            local_video,
+                                        )
+                                        local_video.unlink(missing_ok=True)
                             except Exception:
                                 pass
                             recording_handle = None
@@ -3952,23 +4262,32 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             try:
                                 built_ad = None
                                 ad_cta_result = None
-                                try:
-                                    ad_interactor = AndroidYouTubeAdInteractor(
-                                        session.driver,
-                                        self._config.android_app,
-                                        adb_serial=device.adb_serial,
+                                skip_cta_probe = self._result_is_app_install_video_ad(watch_result)
+                                if skip_cta_probe:
+                                    topic_notes.append("ad_cta_probe_skipped:app_install_video")
+                                    print(
+                                        "[android-session] stage:ad_probe_cta_skipped "
+                                        "reason=app_install_video",
+                                        flush=True,
                                     )
-                                    ad_cta_result = await ad_interactor.probe_cta(
-                                        artifact_dir=(
-                                            self._config.storage.base_path
-                                            / self._config.android_app.artifacts_subdir
-                                        ),
-                                        artifact_prefix=self._build_safe_artifact_prefix(topic),
-                                    )
-                                except Exception as exc:
-                                    topic_notes.append(
-                                        f"ad_cta_probe_failed:{type(exc).__name__}:{exc}"
-                                    )
+                                else:
+                                    try:
+                                        ad_interactor = AndroidYouTubeAdInteractor(
+                                            session.driver,
+                                            self._config.android_app,
+                                            adb_serial=device.adb_serial,
+                                        )
+                                        ad_cta_result = await ad_interactor.probe_cta(
+                                            artifact_dir=(
+                                                self._config.storage.base_path
+                                                / self._config.android_app.artifacts_subdir
+                                            ),
+                                            artifact_prefix=self._build_safe_artifact_prefix(topic),
+                                        )
+                                    except Exception as exc:
+                                        topic_notes.append(
+                                            f"ad_cta_probe_failed:{type(exc).__name__}:{exc}"
+                                        )
                                 # Total elapsed since last sample = debug artifacts + CTA probe
                                 _cta_probe_elapsed = time.monotonic() - _samples_ended_monotonic
                                 print(
@@ -3986,7 +4305,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                         recorded_video_path,
                                         recorded_video_duration_seconds,
                                     ) = await self._finalize_recording_after_cta(
-                                        label="session",
+                                        label=recording_label,
                                         recorder=recorder,
                                         recording_handle=recording_handle,
                                         samples=_watch_samples,
@@ -4030,6 +4349,18 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                         search_topic=topic,
                                     )
                                 if built_ad is not None:
+                                    if (
+                                        recording_label == "preopen"
+                                        and recording_watch_start_offset_seconds is not None
+                                    ):
+                                        built_ad["recording_watch_start_offset_seconds"] = (
+                                            recording_watch_start_offset_seconds
+                                        )
+                                        capture = built_ad.get("capture")
+                                        if isinstance(capture, dict):
+                                            capture["recording_watch_start_offset_seconds"] = (
+                                                recording_watch_start_offset_seconds
+                                            )
                                     built_ad = self._with_watched_ad_position(
                                         built_ad,
                                         len(watched_ads) + 1,
@@ -4059,6 +4390,18 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                         f"ad_cta_returned:{str(ad_cta_result.returned_to_youtube).lower()}"
                                     )
                                 if ad_cta_result is not None and ad_cta_result.returned_to_youtube:
+                                    try:
+                                        if await watcher.dismiss_play_store_bottom_sheet_if_present():
+                                            topic_notes.append("play_store_sheet:dismissed_after_cta")
+                                            print(
+                                                "[android-session] stage:play_store_sheet_dismissed",
+                                                flush=True,
+                                            )
+                                    except Exception as dismiss_exc:
+                                        topic_notes.append(
+                                            "play_store_sheet_dismiss_failed:"
+                                            f"{type(dismiss_exc).__name__}"
+                                        )
                                     post_ad_watch = None
                                     try:
                                         print("[android-session] stage:post_ad_watch", flush=True)
@@ -4231,17 +4574,35 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 "like ad", "share ad", "more options", "close ad panel", "more info",
                                 "minimize", "captions", "pause video", "enter fullscreen",
                                 "expand mini player", "drag handle", "my ad center",
+                                "google play", "open", "download", "downloads", "category",
+                                "in-app purchases", "close sheet", "search google play",
                             }
+                            _DEDUP_GENERIC_FRAGMENTS = (
+                                " reviews",
+                                " downloads",
+                                " category",
+                                "rated for",
+                                " mb",
+                                "google play services",
+                                "in-app purchases",
+                            )
                             def _dedup_key(lines: list) -> set:
                                 result = set()
                                 for line in lines:
                                     s = str(line).strip()
                                     if not s or len(s) < 4:
                                         continue
+                                    lowered = s.casefold()
                                     # Skip generic labels and pod position indicators ("1 of 2")
-                                    if s.casefold() in _DEDUP_GENERIC:
+                                    if lowered in _DEDUP_GENERIC:
                                         continue
-                                    if s.casefold().startswith("sponsored"):
+                                    if lowered.startswith("sponsored"):
+                                        continue
+                                    if any(fragment in lowered for fragment in _DEDUP_GENERIC_FRAGMENTS):
+                                        continue
+                                    if re.fullmatch(r"[\d.,]+\s*[mk+]?", lowered):
+                                        continue
+                                    if re.fullmatch(r"\d+(?:\.\d+)?", lowered):
                                         continue
                                     result.add(s[:80])
                                 return result
@@ -4249,6 +4610,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             # Use only NEW extension samples for dedup key — avoids matching
                             # the original pre-roll ad's lines (which are in the merged watch_result)
                             _mr_new_samples = list(getattr(_extension_extra_result, "samples", []) or []) if _extension_extra_result is not None else []
+                            _mr_has_video_signal = self._samples_have_video_ad_signal(_mr_new_samples)
                             if (
                                 topic_watched_ads
                                 and self._midroll_continues_previous_ad(
@@ -4292,8 +4654,6 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     with contextlib.suppress(Exception):
                                         await watcher.restore_primary_watch_surface()
                                     with contextlib.suppress(Exception):
-                                        await watcher.dismiss_residual_ad_if_present()
-                                    with contextlib.suppress(Exception):
                                         await watcher.ensure_playing()
                                     _midroll_continuation_duplicate_rounds = 0
                                     topic_notes.append(
@@ -4325,15 +4685,20 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     _mr_raw_hints.extend(getattr(_s, "ad_visible_lines", []) or [])
                             _mr_sponsor_hints = _dedup_key(_mr_raw_hints)
                             _mr_is_duplicate = False
-                            if topic_watched_ads and _mr_sponsor_hints:
+                            if not _mr_has_video_signal and topic_watched_ads and _mr_sponsor_hints:
                                 for _prev_ad in topic_watched_ads:
                                     _prev_lines = _dedup_key(
                                         (_prev_ad.get("visible_lines") or [])
                                     )
                                     if _prev_lines and _prev_lines & _mr_sponsor_hints:
                                         _mr_is_duplicate = True
+                                        logger.info(
+                                            "midroll_dedup: text duplicate new=%s prev=%s",
+                                            sorted(_mr_sponsor_hints)[:6],
+                                            sorted(_prev_lines)[:6],
+                                        )
                                         break
-                            if not _mr_is_duplicate and topic_watched_ads:
+                            if not _mr_has_video_signal and not _mr_is_duplicate and topic_watched_ads:
                                 def _host(u):
                                     if not isinstance(u, str) or not u:
                                         return None
@@ -4350,6 +4715,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 _mr_new_hosts.discard(None)
                                 _mr_new_hosts.discard("www.googleadservices.com")
                                 _mr_new_hosts.discard("googleadservices.com")
+                                _mr_new_hosts.discard("play.google.com")
                                 _prev_hosts: set = set()
                                 for _prev_ad in topic_watched_ads:
                                     cap = _prev_ad.get("capture") or {}
@@ -4360,10 +4726,19 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                         cap.get("pre_click_display_url"),
                                     ):
                                         h = _host(u)
-                                        if h and h not in {"googleadservices.com", "www.googleadservices.com"}:
+                                        if h and h not in {
+                                            "googleadservices.com",
+                                            "www.googleadservices.com",
+                                            "play.google.com",
+                                        }:
                                             _prev_hosts.add(h)
                                 if _mr_new_hosts and _mr_new_hosts & _prev_hosts:
                                     _mr_is_duplicate = True
+                                    logger.info(
+                                        "midroll_dedup: host duplicate new=%s prev=%s",
+                                        sorted(_mr_new_hosts),
+                                        sorted(_prev_hosts),
+                                    )
                             if _mr_is_duplicate:
                                 if recorder is not None and recording_handle is not None:
                                     await self._discard_recording_handle(
@@ -4385,8 +4760,6 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 )
                                 with contextlib.suppress(Exception):
                                     await watcher.restore_primary_watch_surface()
-                                with contextlib.suppress(Exception):
-                                    await watcher.dismiss_residual_ad_if_present()
                                 with contextlib.suppress(Exception):
                                     await watcher.ensure_playing()
                                 topic_notes.append(
@@ -4419,7 +4792,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     except Exception as _cap_exc:
                                         topic_notes.append(f"midroll_cap_fill_failed:{type(_cap_exc).__name__}")
                                     break
-                                continue  # same banner — clear it and keep filling watch target
+                                continue  # same ad identity — keep watching without clicking Skip Ad
                             _midroll_duplicate_rounds = 0
 
                             topic_notes.append(f"midroll_ad_catch:round{_midroll_round + 1}")
@@ -4476,21 +4849,34 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                 _mr_video_path = None
                                 _mr_video_dur = None
                                 _mr_cta_result = None
-                                try:
-                                    _mr_interactor = AndroidYouTubeAdInteractor(
-                                        session.driver,
-                                        self._config.android_app,
-                                        adb_serial=device.adb_serial,
+                                _mr_skip_cta_probe = self._result_is_app_install_video_ad(
+                                    _extension_extra_result or watch_result
+                                )
+                                if _mr_skip_cta_probe:
+                                    topic_notes.append(
+                                        f"midroll_cta_skipped:app_install_video:round{_midroll_round + 1}"
                                     )
-                                    _mr_cta_result = await _mr_interactor.probe_cta(
-                                        artifact_dir=(
-                                            self._config.storage.base_path
-                                            / self._config.android_app.artifacts_subdir
-                                        ),
-                                        artifact_prefix=self._build_safe_artifact_prefix(topic),
+                                    print(
+                                        "[android-session] stage:midroll_cta_skipped "
+                                        f"round={_midroll_round + 1} reason=app_install_video",
+                                        flush=True,
                                     )
-                                except Exception as exc:
-                                    topic_notes.append(f"midroll_cta_failed:{type(exc).__name__}:{exc}")
+                                else:
+                                    try:
+                                        _mr_interactor = AndroidYouTubeAdInteractor(
+                                            session.driver,
+                                            self._config.android_app,
+                                            adb_serial=device.adb_serial,
+                                        )
+                                        _mr_cta_result = await _mr_interactor.probe_cta(
+                                            artifact_dir=(
+                                                self._config.storage.base_path
+                                                / self._config.android_app.artifacts_subdir
+                                            ),
+                                            artifact_prefix=self._build_safe_artifact_prefix(topic),
+                                        )
+                                    except Exception as exc:
+                                        topic_notes.append(f"midroll_cta_failed:{type(exc).__name__}:{exc}")
                                 # Full elapsed from last sample: debug artifact write + CTA probe.
                                 _mr_cta_elapsed = time.monotonic() - _mr_samples_ended_monotonic
                                 if recorder is not None and recording_handle is not None:
@@ -4760,6 +5146,9 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     f"engagement_skipped:{self._engagement_gate_reason(engagement_samples)}"
                                 )
                 except Exception as exc:
+                    await _discard_local_early_recording(
+                        f"topic_error:{type(exc).__name__}"
+                    )
                     print(
                         f"[android-session] topic:error topic={topic} error={type(exc).__name__}:{exc}",
                         flush=True,
@@ -7348,9 +7737,12 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
             )
             return opened_title
 
-        fallback_title = await navigator.await_current_watch_title(
+        fallback_title = await self._await_current_watch_title_with_hard_timeout(
+            navigator=navigator,
+            topic=topic,
+            topic_notes=topic_notes,
+            stage_label=f"await_current_watch_title_{attempt_label}_fallback",
             timeout_seconds=3.0,
-            deadline=time.monotonic() + 3.0,
         )
         fallback_watch_surface = await navigator.has_watch_surface_for_query()
         if fallback_title and fallback_watch_surface:

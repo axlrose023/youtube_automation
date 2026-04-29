@@ -123,6 +123,16 @@ class AndroidYouTubeWatcher:
             raise AndroidUiError("Timed out dismissing residual ad")
         return result
 
+    async def dismiss_play_store_bottom_sheet_if_present(self) -> bool:
+        with anyio.move_on_after(8) as scope:
+            result = await anyio.to_thread.run_sync(
+                self._dismiss_play_store_bottom_sheet_if_present_sync,
+                abandon_on_cancel=True,
+            )
+        if scope.cancel_called:
+            raise AndroidUiError("Timed out dismissing Play Store bottom sheet")
+        return result
+
     async def restore_primary_watch_surface(self) -> bool:
         with anyio.move_on_after(20) as scope:
             result = await anyio.to_thread.run_sync(
@@ -953,6 +963,13 @@ class AndroidYouTubeWatcher:
             return {}
         cta_candidates = cls._extract_cta_candidates_from_lines(normalized)
         display_url = cls._extract_display_url_from_lines(normalized)
+        play_store_metadata = cls._extract_play_store_overlay_metadata(
+            normalized,
+            sponsored_idx=sponsored_idx,
+            cta_candidates=cta_candidates,
+        )
+        if play_store_metadata:
+            return play_store_metadata
         # A plain "Sponsored" label can appear in stale/miniplayer text. Require
         # either an actionable CTA or advertiser-like domain to mark the surface.
         if not cta_candidates and not display_url:
@@ -993,6 +1010,65 @@ class AndroidYouTubeWatcher:
             **({"headline_text": headline} if headline else {}),
             **({"display_url": display_url} if display_url else {}),
             **({"cta_text": cta_candidates[0]} if cta_candidates else {}),
+        }
+
+    @staticmethod
+    def _extract_play_store_overlay_metadata(
+        lines: list[str],
+        *,
+        sponsored_idx: int,
+        cta_candidates: list[str],
+    ) -> dict[str, str]:
+        lowered = [line.casefold() for line in lines]
+        if not any("google play" in line for line in lowered):
+            return {}
+        has_install_action = bool(cta_candidates) or any(
+            line in {"install", "learn more", "open app", "download", "get"}
+            for line in lowered
+        )
+        if not has_install_action:
+            return {}
+        generic = {
+            "sponsored",
+            "google play",
+            "learn more",
+            "install",
+            "open app",
+            "download",
+            "get",
+            "like ad",
+            "share ad",
+            "more options",
+            "close ad panel",
+            "close",
+            "drag handle",
+            "skip",
+            "skip ad",
+            "visit advertiser",
+            "captions",
+            "settings",
+            "cast",
+            "enter fullscreen",
+        }
+        app_title = None
+        for line in lines[sponsored_idx + 1:]:
+            cleaned = line.strip()
+            lowered_line = cleaned.casefold()
+            if not cleaned or lowered_line in generic:
+                continue
+            if "google play" in lowered_line:
+                continue
+            if re.fullmatch(r"[\d.,]+\s*[mk+]?", lowered_line):
+                continue
+            if any(token in lowered_line for token in ("reviews", "downloads", "category")):
+                continue
+            app_title = cleaned
+            break
+        return {
+            "sponsor_label": lines[sponsored_idx],
+            **({"headline_text": app_title} if app_title else {}),
+            "display_url": "play.google.com",
+            **({"cta_text": cta_candidates[0]} if cta_candidates else {"cta_text": "Install"}),
         }
 
     @staticmethod
@@ -1105,6 +1181,8 @@ class AndroidYouTubeWatcher:
 
     @staticmethod
     def _should_nudge_playback(samples: list[AndroidWatchSample]) -> bool:
+        if any(AndroidYouTubeWatcher._sample_has_ad_playback_signal(sample) for sample in samples[-3:]):
+            return False
         stable_samples = [
             sample
             for sample in samples
@@ -1124,6 +1202,28 @@ class AndroidYouTubeWatcher:
         if all(point is not None for point in progress_points):
             return progress_points[-1] <= progress_points[0]
         return False
+
+    @staticmethod
+    def _sample_has_ad_playback_signal(sample: AndroidWatchSample) -> bool:
+        if sample.ad_detected or sample.skip_available:
+            return True
+        if sample.ad_progress_seconds is not None or sample.ad_duration_seconds is not None:
+            return True
+        visible_text = " ".join(
+            [
+                sample.ad_sponsor_label or "",
+                sample.ad_headline_text or "",
+                sample.ad_display_url or "",
+                sample.ad_cta_text or "",
+                *(sample.ad_visible_lines or []),
+                *(sample.ad_signal_labels or []),
+                *(sample.ad_cta_labels or []),
+            ]
+        ).casefold()
+        return any(
+            token in visible_text
+            for token in ("sponsored", "skip ad", "visit advertiser", "google play")
+        )
 
     @staticmethod
     def _sample_progress_seconds(sample: AndroidWatchSample) -> int | None:
@@ -1166,6 +1266,8 @@ class AndroidYouTubeWatcher:
         for _ in range(attempts):
             if self._dismiss_system_dialog_sync():
                 time.sleep(0.8)
+            if self._current_page_has_ad_signal_sync():
+                return True
             playback_state = self._playback_control_state_sync()
             if playback_state == "playing":
                 return True
@@ -1181,6 +1283,27 @@ class AndroidYouTubeWatcher:
                     return True
             time.sleep(0.5)
         return False
+
+    def _current_page_has_ad_signal_sync(self) -> bool:
+        page_source = self._safe_page_source_sync()
+        if not page_source:
+            return False
+        try:
+            root = ET.fromstring(page_source)
+        except ET.ParseError:
+            return False
+        if self._root_has_any_resource_id(
+            root,
+            (*selectors.AD_SKIP_BUTTON_IDS, *selectors.AD_TIME_BAR_IDS),
+        ):
+            return True
+        if self._collect_ad_signal_labels(root):
+            return True
+        visible_text = " ".join(self._collect_visible_lines(root)).casefold()
+        return any(
+            token in visible_text
+            for token in ("sponsored", "skip ad", "visit advertiser")
+        )
 
     def _playback_control_state_sync(self) -> str | None:
         page_source = self._safe_page_source_sync()
@@ -1291,6 +1414,38 @@ class AndroidYouTubeWatcher:
 
         return False
 
+    def _dismiss_play_store_bottom_sheet_if_present_sync(self) -> bool:
+        page_source = self._safe_page_source_sync()
+        if not page_source:
+            return False
+        try:
+            root = ET.fromstring(page_source)
+        except ET.ParseError:
+            return False
+
+        lowered_lines = [line.casefold() for line in self._collect_visible_lines(root)]
+        if not any("google play" in line for line in lowered_lines):
+            return False
+        if not any("close sheet" in line for line in lowered_lines):
+            return False
+
+        for node in root.iter():
+            values = (
+                (node.attrib.get("text") or "").strip(),
+                (node.attrib.get("content-desc") or "").strip(),
+            )
+            if not any(value.casefold() == "close sheet" for value in values if value):
+                continue
+            bounds = self._parse_bounds(node.attrib.get("bounds"))
+            if bounds is None:
+                continue
+            if self._tap_bounds_via_adb(bounds):
+                return True
+
+        if self._tap_first_bounds_for_fragment("Close sheet"):
+            return True
+        return self._press_back_via_adb_or_driver_sync()
+
     def _tap_first_bounds_for_fragment(self, fragment: str) -> bool:
         if not self._adb_serial:
             return False
@@ -1344,6 +1499,34 @@ class AndroidYouTubeWatcher:
             time.sleep(0.8)
             return True
         return False
+
+    def _press_back_via_adb_or_driver_sync(self) -> bool:
+        if self._adb_serial:
+            adb_bin = require_tool_path("adb")
+            result = subprocess.run(
+                [
+                    adb_bin,
+                    "-s",
+                    self._adb_serial,
+                    "shell",
+                    "input",
+                    "keyevent",
+                    "4",
+                ],
+                check=False,
+                capture_output=True,
+                env=build_android_runtime_env(),
+                timeout=10,
+            )
+            if result.returncode == 0:
+                time.sleep(0.8)
+                return True
+        try:
+            self._driver.back()
+            time.sleep(0.8)
+            return True
+        except Exception:
+            return False
 
     def _extract_bounds_by_ids_sync(self, candidate_ids: tuple[str, ...]) -> tuple[int, int, int, int] | None:
         page_source = self._safe_page_source_sync()
