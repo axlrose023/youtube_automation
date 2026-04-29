@@ -1624,8 +1624,8 @@ class AndroidYouTubeProbeRunner:
                 if _ocr_available():
                     _ocr_domain, _ocr_headline = extract_from_banner_screenshot(written_screen)
                     if advertiser_domain is None and _ocr_domain:
-                        advertiser_domain = _ocr_domain
-                        print(f"[android-session] banner_ocr:domain={_ocr_domain!r}", flush=True)
+                        advertiser_domain = _ocr_domain.removeprefix("www.")
+                        print(f"[android-session] banner_ocr:domain={advertiser_domain!r}", flush=True)
                     if _ocr_headline:
                         # OCR headline is always preferred — it reads the actual ad text,
                         # while page_source headline is typically an organic video title

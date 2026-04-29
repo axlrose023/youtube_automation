@@ -101,13 +101,13 @@ def extract_from_banner_screenshot(path: str | Path) -> tuple[str | None, str | 
     headline: str | None = None
     for line in _ocr_strip(img, 0.25, 0.40):
         cleaned = _TRAILING_NOISE_RE.sub("", line).strip()
-        if not _is_junk(cleaned) and len(cleaned) >= 5:
+        if not _is_junk(cleaned) and len(cleaned) >= 8:
             headline = cleaned
             break
     if headline is None:
         for line in _ocr_strip(img, 0.57, 0.65):
             cleaned = _TRAILING_NOISE_RE.sub("", line).strip()
-            if not _is_junk(cleaned) and len(cleaned) >= 5:
+            if not _is_junk(cleaned) and len(cleaned) >= 8:
                 headline = cleaned
                 break
 
