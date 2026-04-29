@@ -162,6 +162,14 @@ _YOUTUBE_SEARCH_NOISE_SUBSTRINGS = (
     "replay",
     "expand description",
     "collapse description",
+    # HTTP error pages returned by landing scraper
+    "access denied",
+    "403 forbidden",
+    "404 not found",
+    "just a moment",
+    "enable javascript",
+    "checking your browser",
+    "please wait",
 )
 _SUPPRESSED_ADVERTISER_HOSTS = {
     "www.googleadservices.com",
