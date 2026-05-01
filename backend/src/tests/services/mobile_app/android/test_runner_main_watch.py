@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -1051,6 +1052,144 @@ def test_samples_have_video_ad_signal_accepts_video_ad_timer() -> None:
     ) is True
 
 
+def test_close_external_browser_surface_uses_back_for_custom_tab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    foreground_index = 0
+    run_calls: list[list[str]] = []
+
+    def fake_foreground(adb_serial):
+        assert adb_serial == "emulator-5554"
+        if foreground_index == 0:
+            return {
+                "package": "com.android.chrome",
+                "activity": "org.chromium.chrome.browser.customtabs.CustomTabActivity",
+            }
+        return {
+            "package": "com.google.android.youtube",
+            "activity": ".app.honeycomb.Shell$HomeActivity",
+        }
+
+    def fake_run(args, **kwargs):
+        nonlocal foreground_index
+        run_calls.append(list(args))
+        if "keyevent" in args:
+            foreground_index = 1
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(
+        AndroidYouTubeProbeRunner,
+        "_foreground_activity_sync",
+        staticmethod(fake_foreground),
+    )
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    result = AndroidYouTubeProbeRunner._close_external_browser_surface_sync(
+        "emulator-5554",
+        adb_bin="adb",
+        sleep_seconds=0,
+    )
+
+    assert result["closed"] is True
+    assert result["reason"] == "back"
+    assert result["actions"] == ["back"]
+    assert any(call[-2:] == ["keyevent", "4"] for call in run_calls)
+
+
+def test_close_external_browser_surface_taps_close_when_back_does_not_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed = False
+    run_calls: list[list[str]] = []
+
+    def fake_foreground(adb_serial):
+        assert adb_serial == "emulator-5554"
+        if closed:
+            return {
+                "package": "com.google.android.youtube",
+                "activity": ".app.honeycomb.Shell$HomeActivity",
+            }
+        return {
+            "package": "com.android.chrome",
+            "activity": "org.chromium.chrome.browser.customtabs.CustomTabActivity",
+        }
+
+    def fake_size(adb_serial, *, adb_bin):
+        assert adb_serial == "emulator-5554"
+        assert adb_bin == "adb"
+        return (1080, 2400)
+
+    def fake_run(args, **kwargs):
+        nonlocal closed
+        run_calls.append(list(args))
+        if "tap" in args:
+            closed = True
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(
+        AndroidYouTubeProbeRunner,
+        "_foreground_activity_sync",
+        staticmethod(fake_foreground),
+    )
+    monkeypatch.setattr(
+        AndroidYouTubeProbeRunner,
+        "_adb_display_size_sync",
+        staticmethod(fake_size),
+    )
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    result = AndroidYouTubeProbeRunner._close_external_browser_surface_sync(
+        "emulator-5554",
+        adb_bin="adb",
+        max_back_attempts=1,
+        sleep_seconds=0,
+    )
+
+    assert result["closed"] is True
+    assert result["reason"] == "tap_close_fallback"
+    assert result["actions"] == ["back", "tap_close:1015,300"]
+    assert any(call[-3:] == ["tap", "1015", "300"] for call in run_calls)
+
+
+def test_close_external_browser_surface_ignores_stale_url_when_youtube_foreground(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_calls: list[list[str]] = []
+
+    def fake_foreground(adb_serial):
+        assert adb_serial == "emulator-5554"
+        return {
+            "package": "com.google.android.youtube",
+            "activity": ".app.honeycomb.Shell$HomeActivity",
+        }
+
+    def fake_run(args, **kwargs):
+        run_calls.append(list(args))
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(
+        AndroidYouTubeProbeRunner,
+        "_foreground_activity_sync",
+        staticmethod(fake_foreground),
+    )
+    monkeypatch.setattr(
+        AndroidYouTubeProbeRunner,
+        "_extract_activity_url_sync",
+        staticmethod(lambda adb_serial: "https://landing.example.test/old"),
+    )
+    monkeypatch.setattr(runner_module.subprocess, "run", fake_run)
+
+    result = AndroidYouTubeProbeRunner._close_external_browser_surface_sync(
+        "emulator-5554",
+        adb_bin="adb",
+        sleep_seconds=0,
+    )
+
+    assert result["closed"] is True
+    assert result["reason"] == "already_youtube"
+    assert run_calls == []
+
+
 @pytest.mark.asyncio
 async def test_discard_recording_handle_deletes_duplicate_segment(tmp_path) -> None:
     runner = AndroidYouTubeSessionRunner.__new__(AndroidYouTubeSessionRunner)
@@ -1072,6 +1211,74 @@ async def test_discard_recording_handle_deletes_duplicate_segment(tmp_path) -> N
     )
 
     assert not local_video.exists()
+
+
+@pytest.mark.asyncio
+async def test_capture_search_banner_uses_sponsored_bounds_without_cta(tmp_path) -> None:
+    runner = AndroidYouTubeProbeRunner.__new__(AndroidYouTubeProbeRunner)
+    runner._config = SimpleNamespace(storage=SimpleNamespace(base_path=tmp_path))
+    page_source = """<?xml version='1.0' encoding='UTF-8'?>
+<hierarchy>
+  <node text="Search YouTube" bounds="[0,0][1080,120]" />
+  <node text="AI Quant Trading Signals" bounds="[160,900][900,970]" />
+  <node text="Sponsored" bounds="[160,1010][330,1060]" />
+  <node text="www.aiquantlab.io/" bounds="[345,1010][720,1060]" />
+</hierarchy>
+"""
+
+    class FakeNavigator:
+        def _extract_sponsor_cta_bounds_sync(self):
+            return []
+
+        def _extract_current_sponsored_bounds_sync(self):
+            return [(0, 214, 1080, 1137)]
+
+    class FakeDriver:
+        def __init__(self, source):
+            self.page_source = source
+
+        def save_screenshot(self, path):
+            Path(path).write_bytes(b"not-a-real-png")
+
+    submitted: list[dict[str, object]] = []
+    scraped: list[dict[str, object]] = []
+    notifications = 0
+
+    class FakeSubmitter:
+        def __init__(self, target):
+            self._target = target
+
+        def submit(self, ad):
+            self._target.append(ad)
+
+    async def notify():
+        nonlocal notifications
+        notifications += 1
+
+    watched_ads: list[dict[str, object]] = []
+    topic_watched_ads: list[dict[str, object]] = []
+
+    captured = await runner._capture_search_banner_ad_if_present(
+        navigator=FakeNavigator(),
+        session=SimpleNamespace(driver=FakeDriver(page_source)),
+        adb_serial=None,
+        topic="immediate earn trade ai",
+        topic_notes=[],
+        watched_ads=watched_ads,
+        topic_watched_ads=topic_watched_ads,
+        ad_analysis=FakeSubmitter(submitted),
+        landing_scraper=FakeSubmitter(scraped),
+        notify_ad_captured=notify,
+    )
+
+    assert captured is True
+    assert notifications == 1
+    assert len(watched_ads) == 1
+    assert watched_ads[0]["headline_text"] == "AI Quant Trading Signals"
+    assert watched_ads[0]["advertiser_domain"] == "aiquantlab.io"
+    assert watched_ads[0]["capture"]["landing_url"] == "https://www.aiquantlab.io/"
+    assert submitted == watched_ads
+    assert scraped == watched_ads
 
 
 def test_session_summary_counts_ad_debug_metrics() -> None:

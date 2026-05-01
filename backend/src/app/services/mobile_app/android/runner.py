@@ -1896,16 +1896,21 @@ class AndroidYouTubeProbeRunner:
                 "foreground_checks": foreground_checks,
             }
 
-        # Chrome Custom Tab survives back+tap — force-stop Chrome as last resort
+        # Chrome Custom Tab / Play Store survive back+tap — force-stop as last resort
         package = (foreground.get("package") or "").casefold()
+        _force_stop_pkg: str | None = None
         if "chrome" in package:
+            _force_stop_pkg = "com.android.chrome"
+        elif "vending" in package or "android.vending" in package:
+            _force_stop_pkg = "com.android.vending"
+        if _force_stop_pkg:
             subprocess.run(
-                [adb_bin, "-s", adb_serial, "shell", "am", "force-stop", "com.android.chrome"],
+                [adb_bin, "-s", adb_serial, "shell", "am", "force-stop", _force_stop_pkg],
                 capture_output=True,
                 check=False,
                 timeout=5,
             )
-            actions.append("force_stop_chrome")
+            actions.append(f"force_stop:{_force_stop_pkg}")
             time.sleep(sleep_seconds)
             foreground = cls._foreground_activity_sync(adb_serial)
             foreground_checks.append(foreground)
@@ -2419,6 +2424,8 @@ class AndroidYouTubeProbeRunner:
                     click_result.get("landing_url")
                     or click_result.get("click_tracking_url")
                     or click_result.get("activity_url_after_click")
+                    or "chrome" in (click_result.get("opened_package") or "").casefold()
+                    or "vending" in (click_result.get("opened_package") or "").casefold()
                 ),
             )
             click_result["return_to_youtube_result"] = return_to_youtube_result
@@ -2926,6 +2933,8 @@ class AndroidYouTubeProbeRunner:
                     click_result.get("landing_url")
                     or click_result.get("click_tracking_url")
                     or click_result.get("activity_url_after_click")
+                    or "chrome" in (click_result.get("opened_package") or "").casefold()
+                    or "vending" in (click_result.get("opened_package") or "").casefold()
                 ),
             )
             click_result["return_to_youtube_result"] = return_to_youtube_result

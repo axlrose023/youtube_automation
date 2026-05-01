@@ -85,6 +85,8 @@ def _find_domain(lines: list[str]) -> str | None:
 
 def _find_domain_with_band(img) -> tuple[str | None, str | None]:
     for band, y_start, y_end in (
+        ("upper_card", 0.36, 0.46),
+        ("upper_card_lower", 0.39, 0.48),
         ("middle", 0.45, 0.52),
         ("lower", 0.55, 0.72),
         ("top", 0.08, 0.18),
@@ -125,8 +127,10 @@ def extract_from_banner_screenshot(path: str | Path) -> tuple[str | None, str | 
         headline_bands = ((0.57, 0.65), (0.55, 0.72), (0.25, 0.40), (0.40, 0.52))
     elif domain_band == "top":
         headline_bands = ((0.10, 0.24), (0.08, 0.18), (0.25, 0.40), (0.40, 0.52))
+    elif domain_band in {"upper_card", "upper_card_lower"}:
+        headline_bands = ((0.36, 0.43), (0.39, 0.46), (0.25, 0.40), (0.40, 0.52))
     else:
-        headline_bands = ((0.25, 0.40), (0.40, 0.52), (0.57, 0.65))
+        headline_bands = ((0.36, 0.43), (0.39, 0.46), (0.25, 0.40), (0.40, 0.52), (0.57, 0.65))
 
     for y_start, y_end in headline_bands:
         for line in _ocr_strip(img, y_start, y_end):
@@ -138,6 +142,32 @@ def extract_from_banner_screenshot(path: str | Path) -> tuple[str | None, str | 
             break
 
     return domain, headline
+
+
+def extract_banner_screenshot_lines(path: str | Path) -> list[str]:
+    """Return OCR text lines across known YouTube banner card bands."""
+    try:
+        from PIL import Image  # noqa: PLC0415
+        img = Image.open(str(path))
+    except Exception:
+        return []
+
+    lines: list[str] = []
+    seen: set[str] = set()
+    for y_start, y_end in (
+        (0.20, 0.40),
+        (0.36, 0.50),
+        (0.45, 0.62),
+        (0.55, 0.75),
+        (0.08, 0.18),
+    ):
+        for line in _ocr_strip(img, y_start, y_end):
+            normalized = line.strip()
+            key = normalized.casefold()
+            if normalized and key not in seen:
+                seen.add(key)
+                lines.append(normalized)
+    return lines
 
 
 def is_available() -> bool:

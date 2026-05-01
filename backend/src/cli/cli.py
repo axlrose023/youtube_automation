@@ -304,6 +304,7 @@ def android_manual_debug(
     """Start AVD + Appium + YouTube, then wait for manual 'capture' commands.
 
     Usage: type 'c' + Enter to snapshot current screen and run ad detection.
+    Type 'x' + Enter to close an open external landing tab and return to YouTube.
     Type 'q' + Enter to quit.
     """
     import datetime
@@ -386,6 +387,9 @@ def android_manual_debug(
             "landing_title": capture.get("landing_title") if isinstance(capture, dict) else None,
             "landing_screenshot_path": (
                 capture.get("landing_screenshot_path") if isinstance(capture, dict) else None
+            ),
+            "return_to_youtube_result": (
+                capture.get("return_to_youtube_result") if isinstance(capture, dict) else None
             ),
             "click_tracking_url": (
                 capture.get("click_tracking_url") if isinstance(capture, dict) else None
@@ -476,18 +480,20 @@ def android_manual_debug(
                 landing_scraper=landing_scraper,
                 notify_ad_captured=_notify_ad_captured,
             )
-            search_banner_captured = await runner._capture_search_banner_ad_if_present(
-                navigator=navigator,
-                session=session,
-                adb_serial=serial,
-                topic=f"manual_capture_{idx:03d}",
-                topic_notes=topic_notes,
-                watched_ads=watched_ads,
-                topic_watched_ads=topic_watched_ads,
-                ad_analysis=ad_analysis,
-                landing_scraper=landing_scraper,
-                notify_ad_captured=_notify_ad_captured,
-            )
+            search_banner_captured = False
+            if not feed_card_captured:
+                search_banner_captured = await runner._capture_search_banner_ad_if_present(
+                    navigator=navigator,
+                    session=session,
+                    adb_serial=serial,
+                    topic=f"manual_capture_{idx:03d}",
+                    topic_notes=topic_notes,
+                    watched_ads=watched_ads,
+                    topic_watched_ads=topic_watched_ads,
+                    ad_analysis=ad_analysis,
+                    landing_scraper=landing_scraper,
+                    notify_ad_captured=_notify_ad_captured,
+                )
             await ad_analysis.drain(timeout_seconds=45.0)
             await landing_scraper.drain(timeout_seconds=45.0)
         finally:
@@ -539,7 +545,7 @@ def android_manual_debug(
             typer.style(
                 f"Ready. serial={device.adb_serial}  snapshots -> {out_dir}\n"
                 f"Proxy: {', '.join(proxy_notes) if proxy_notes else 'none'}\n"
-                "Commands: [c] capture+detect  [q] quit",
+                "Commands: [c] capture+detect  [x] close landing  [q] quit",
                 fg=typer.colors.GREEN,
             )
         )
@@ -549,6 +555,16 @@ def android_manual_debug(
                 cmd = await anyio.to_thread.run_sync(lambda: input("ad_debug> ").strip().lower())
                 if cmd in ("q", "quit", "exit"):
                     break
+                if cmd in ("x", "close", "back"):
+                    result = await anyio.to_thread.run_sync(
+                        lambda: runner._close_external_browser_surface_sync(device.adb_serial)
+                    )
+                    try:
+                        await navigator.ensure_app_ready()
+                    except Exception:
+                        pass
+                    typer.echo(typer.style(json.dumps(result, ensure_ascii=False, indent=2), fg=typer.colors.YELLOW))
+                    continue
                 if cmd in ("c", "capture", ""):
                     idx += 1
                     typer.echo(f"Capturing snapshot #{idx}...")
