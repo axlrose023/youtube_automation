@@ -63,6 +63,8 @@ class AndroidAdCtaProbeResult:
     returned_to_youtube: bool = False
     debug_screen_path: Path | None = None
     debug_page_source_path: Path | None = None
+    pre_click_screen_path: Path | None = None
+    pre_click_page_source_path: Path | None = None
     pre_click_display_url: str | None = None
     pre_click_headline_text: str | None = None
 
@@ -105,9 +107,8 @@ class AndroidYouTubeAdInteractor:
 
         # --- pre-click snapshot: captures the ad with the CTA button visible ---
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        self._write_debug_screenshot_via_adb_sync(
-            artifact_dir / f"{artifact_prefix}_pre_click.png"
-        )
+        _pre_click_screen_path = artifact_dir / f"{artifact_prefix}_pre_click.png"
+        self._write_debug_screenshot_via_adb_sync(_pre_click_screen_path)
         _pre_click_xml_path = artifact_dir / f"{artifact_prefix}_pre_click.xml"
         self._write_debug_hierarchy_file_via_adb_sync(_pre_click_xml_path)
 
@@ -134,6 +135,8 @@ class AndroidYouTubeAdInteractor:
             return AndroidAdCtaProbeResult(
                 clicked=False,
                 label=label,
+                pre_click_screen_path=_pre_click_screen_path,
+                pre_click_page_source_path=_pre_click_xml_path,
                 pre_click_display_url=pre_click_display_url,
                 pre_click_headline_text=pre_click_headline_text,
             )
@@ -149,6 +152,8 @@ class AndroidYouTubeAdInteractor:
                 return AndroidAdCtaProbeResult(
                     clicked=False,
                     label=label,
+                    pre_click_screen_path=_pre_click_screen_path,
+                    pre_click_page_source_path=_pre_click_xml_path,
                     pre_click_display_url=pre_click_display_url,
                     pre_click_headline_text=pre_click_headline_text,
                 )
@@ -318,6 +323,8 @@ class AndroidYouTubeAdInteractor:
             returned_to_youtube=returned_to_youtube,
             debug_screen_path=debug_screen_path,
             debug_page_source_path=debug_page_source_path,
+            pre_click_screen_path=_pre_click_screen_path,
+            pre_click_page_source_path=_pre_click_xml_path,
             pre_click_display_url=pre_click_display_url,
             pre_click_headline_text=pre_click_headline_text,
         )

@@ -89,6 +89,42 @@ def test_build_watched_ad_record_strips_www_from_landing_domain() -> None:
     assert record["advertiser_domain"] == "vantagemarkets.com"
 
 
+def test_build_watched_ad_record_prefers_pre_click_screenshot(tmp_path: Path) -> None:
+    pre_click = tmp_path / "ad_pre_click.png"
+    watch_debug = tmp_path / "ad_watch.png"
+    post_click = tmp_path / "ad_cta.png"
+
+    record = build_watched_ad_record(
+        watch_samples=[
+            AndroidWatchSample(
+                offset_seconds=0,
+                ad_detected=True,
+                ad_signal_labels=["Sponsored - Trade AI\ntrilon.ai - Visit site"],
+                ad_cta_labels=["Visit site"],
+            )
+        ],
+        watch_debug_screen_path=watch_debug,
+        watch_debug_page_source_path=None,
+        ad_cta_result=AndroidAdCtaProbeResult(
+            clicked=True,
+            label="Visit site",
+            landing_url="https://trilon.ai/",
+            returned_to_youtube=True,
+            pre_click_screen_path=pre_click,
+            debug_screen_path=post_click,
+        ),
+        recorded_video_path=None,
+        recorded_video_duration_seconds=None,
+    )
+
+    assert record is not None
+    assert record["capture"]["screenshot_paths"] == [
+        (0, str(pre_click)),
+        (1, str(watch_debug)),
+        (2, str(post_click)),
+    ]
+
+
 def test_build_watched_ad_record_clamps_short_ad_duration_from_sponsor_label() -> None:
     record = build_watched_ad_record(
         watch_samples=[

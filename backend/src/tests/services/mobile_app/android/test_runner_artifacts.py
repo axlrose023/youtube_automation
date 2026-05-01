@@ -153,6 +153,49 @@ def test_cleanup_irrelevant_ad_videos_keeps_debug_artifacts(tmp_path) -> None:
     assert watched_ads[0]["capture"]["landing_dir"] == "android_landing/session-1"
 
 
+def test_watched_ad_identity_seen_matches_same_final_landing() -> None:
+    runner = AndroidYouTubeProbeRunner.__new__(AndroidYouTubeProbeRunner)
+
+    previous = {
+        "display_url": "https://www.factset.com/solutions/portfolio-management-and-trading?utm_source=one",
+        "capture": {},
+    }
+    duplicate = {
+        "display_url": "https://www.factset.com/solutions/portfolio-management-and-trading?utm_source=two",
+        "capture": {},
+    }
+    different = {
+        "display_url": "https://pipxpert.com/",
+        "capture": {},
+    }
+
+    assert runner._watched_ad_identity_seen(duplicate, [previous]) is True
+    assert runner._watched_ad_identity_seen(different, [previous]) is False
+
+
+def test_discard_duplicate_ad_media_removes_only_duplicate_files(tmp_path) -> None:
+    video_path = tmp_path / "android_probe" / "video" / "duplicate.mp4"
+    source_path = tmp_path / "android_probe" / "video" / "duplicate_source.mp4"
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"video")
+    source_path.write_bytes(b"source")
+
+    runner = AndroidYouTubeProbeRunner.__new__(AndroidYouTubeProbeRunner)
+    runner._config = SimpleNamespace(storage=SimpleNamespace(base_path=tmp_path))
+
+    runner._discard_duplicate_ad_media(
+        {
+            "video_file": "android_probe/video/duplicate.mp4",
+            "capture": {
+                "source_video_file": "android_probe/video/duplicate_source.mp4",
+            },
+        }
+    )
+
+    assert not video_path.exists()
+    assert not source_path.exists()
+
+
 @pytest.mark.asyncio
 async def test_finalize_recording_after_cta_uses_debug_xml_remaining_fallback(
     tmp_path,

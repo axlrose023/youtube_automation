@@ -1379,11 +1379,13 @@ class AndroidYouTubeProbeRunner:
 
     @staticmethod
     def _samples_have_video_ad_signal(samples: list[object]) -> bool:
+        # A visible skip button alone is not enough. Overlay/banner ads can expose
+        # a dismiss/skip control while the underlying YouTube video keeps playing;
+        # treating those as video ads records the organic video instead of the ad.
         return any(
             getattr(sample, "ad_detected", False)
             and (
-                getattr(sample, "skip_available", False)
-                or isinstance(getattr(sample, "ad_duration_seconds", None), (int, float))
+                isinstance(getattr(sample, "ad_duration_seconds", None), (int, float))
                 or isinstance(getattr(sample, "ad_progress_seconds", None), (int, float))
             )
             for sample in samples
@@ -1401,13 +1403,15 @@ class AndroidYouTubeProbeRunner:
         ad_samples = [s for s in samples if getattr(s, "ad_detected", False)]
         if not ad_samples:
             return False
-        # If any sample has an ad timer or skip button → definitely a video ad
+        # If any sample has an ad timer/progress → definitely a video ad.
+        # Skip-only overlays are handled as banner-like captures to avoid saving
+        # the underlying organic video as the ad creative.
         has_timer = any(
             isinstance(getattr(s, "ad_duration_seconds", None), (int, float))
+            or isinstance(getattr(s, "ad_progress_seconds", None), (int, float))
             for s in ad_samples
         )
-        has_skip = any(getattr(s, "skip_available", False) for s in ad_samples)
-        if has_timer or has_skip:
+        if has_timer:
             return False
         # Check if main video progress advances → video is still playing → banner
         progress_values = [
@@ -1417,8 +1421,9 @@ class AndroidYouTubeProbeRunner:
         ]
         if len(progress_values) >= 2:
             return progress_values[-1] > progress_values[0]
-        # Only one sample with no timer/skip — can't tell, assume video ad to be safe
-        return False
+        # No timer/progress signal: treat as banner-like rather than recording
+        # potentially unrelated organic video.
+        return True
 
     @staticmethod
     def _result_is_play_store_ad(result: object | None) -> bool:
@@ -1430,12 +1435,7 @@ class AndroidYouTubeProbeRunner:
         """
         samples = list(getattr(result, "samples", []) or [])
         ad_samples = [s for s in samples if getattr(s, "ad_detected", False)]
-        has_video_ad_signal = any(
-            getattr(s, "skip_available", False)
-            or isinstance(getattr(s, "ad_duration_seconds", None), (int, float))
-            or isinstance(getattr(s, "ad_progress_seconds", None), (int, float))
-            for s in ad_samples
-        )
+        has_video_ad_signal = cls._samples_have_video_ad_signal(ad_samples)
         if has_video_ad_signal:
             return False
         for s in ad_samples:
@@ -1452,7 +1452,11 @@ class AndroidYouTubeProbeRunner:
     def _result_is_app_install_video_ad(cls, result: object | None) -> bool:
         samples = list(getattr(result, "samples", []) or [])
         ad_samples = [s for s in samples if getattr(s, "ad_detected", False)]
-        if not ad_samples or not cls._samples_have_video_ad_signal(ad_samples):
+        has_dismiss_or_video_signal = cls._samples_have_video_ad_signal(ad_samples) or any(
+            getattr(sample, "skip_available", False)
+            for sample in ad_samples
+        )
+        if not ad_samples or not has_dismiss_or_video_signal:
             return False
 
         for sample in ad_samples:
@@ -3563,6 +3567,33 @@ class AndroidYouTubeProbeRunner:
             del watched_ads[idx]
         if to_remove:
             print(f"[android-session] dedup: removed {len(to_remove)} duplicate ads", flush=True)
+
+    def _watched_ad_identity_seen(
+        self,
+        ad: dict[str, object] | None,
+        previous_ads: list[dict[str, object]],
+    ) -> bool:
+        key = self._watched_ad_identity_key(ad)
+        if not key:
+            return False
+        return any(self._watched_ad_identity_key(prev) == key for prev in previous_ads)
+
+    def _discard_duplicate_ad_media(self, ad: dict[str, object] | None) -> None:
+        if not isinstance(ad, dict):
+            return
+        capture = ad.get("capture")
+        if not isinstance(capture, dict):
+            capture = {}
+        for value in (
+            ad.get("video_file"),
+            ad.get("source_video_file"),
+            capture.get("video_file"),
+            capture.get("source_video_file"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                continue
+            with contextlib.suppress(Exception):
+                (self._config.storage.base_path / value).unlink(missing_ok=True)
 
     def _midroll_continues_previous_ad(
         self,
@@ -5814,42 +5845,62 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     recorded_video_duration_seconds=_mr_video_dur,
                                     search_topic=topic,
                                 )
-                                _mr_identity_matches_previous = bool(
-                                    _mr_built_ad is not None
-                                    and topic_watched_ads
-                                    and self._watched_ad_identity_key(_mr_built_ad)
-                                    == self._watched_ad_identity_key(topic_watched_ads[-1])
+                                _mr_identity_matches_previous = self._watched_ad_identity_seen(
+                                    _mr_built_ad,
+                                    topic_watched_ads,
                                 )
+                                _mr_duplicate_after_build = False
                                 if _mr_built_ad is not None:
                                     _mr_built_ad = self._with_watched_ad_position(
                                         _mr_built_ad,
                                         len(watched_ads) + 1,
                                     )
-                                    await self._trim_recording_tail_to_ad(
-                                        built_ad=_mr_built_ad,
-                                        ad_sample_count=len(_mr_new_samples),
-                                        extension_samples=_mr_new_samples,
-                                        ad_detected_after_watch_seconds=(
-                                            self._main_watch_ad_detected_after_seconds(
-                                                main_watch_extension_note
-                                            )
-                                        ),
-                                    )
-                                    await self._focus_captured_ad_video_if_needed(_mr_built_ad)
-                                    ad_analysis.submit(_mr_built_ad)
-                                    landing_scraper.submit(_mr_built_ad)
-                                    topic_watched_ads.append(_mr_built_ad)
-                                    watched_ads.append(_mr_built_ad)
-                                    await _notify_ad_captured()
-                                    print(
-                                        f"[android-session] stage:midroll_ad_done total_ads={len(watched_ads)}",
-                                        flush=True,
-                                    )
+                                    if self._watched_ad_identity_seen(
+                                        _mr_built_ad,
+                                        topic_watched_ads,
+                                    ):
+                                        _mr_duplicate_after_build = True
+                                        _midroll_duplicate_rounds += 1
+                                        self._discard_duplicate_ad_media(_mr_built_ad)
+                                        topic_notes.append(
+                                            f"midroll_ad_skip_duplicate:round{_midroll_round + 1}:post_build"
+                                        )
+                                        print(
+                                            "[android-session] stage:midroll_ad_skip_duplicate "
+                                            f"round={_midroll_round + 1} reason=post_build_identity",
+                                            flush=True,
+                                        )
+                                    else:
+                                        await self._trim_recording_tail_to_ad(
+                                            built_ad=_mr_built_ad,
+                                            ad_sample_count=len(_mr_new_samples),
+                                            extension_samples=_mr_new_samples,
+                                            ad_detected_after_watch_seconds=(
+                                                self._main_watch_ad_detected_after_seconds(
+                                                    main_watch_extension_note
+                                                )
+                                            ),
+                                        )
+                                        await self._focus_captured_ad_video_if_needed(_mr_built_ad)
+                                        ad_analysis.submit(_mr_built_ad)
+                                        landing_scraper.submit(_mr_built_ad)
+                                        topic_watched_ads.append(_mr_built_ad)
+                                        watched_ads.append(_mr_built_ad)
+                                        await _notify_ad_captured()
+                                        print(
+                                            f"[android-session] stage:midroll_ad_done total_ads={len(watched_ads)}",
+                                            flush=True,
+                                        )
                                 # Return to YouTube and resume
                                 if _mr_cta_result is not None and _mr_cta_result.returned_to_youtube:
                                     try:
                                         _mr_post_ad, _mr_post_notes = await self._resume_after_ad_return(
-                                            watcher=watcher, built_ad=_mr_built_ad,
+                                            watcher=watcher,
+                                            built_ad=(
+                                                None
+                                                if _mr_duplicate_after_build
+                                                else _mr_built_ad
+                                            ),
                                         )
                                         topic_notes.extend(_mr_post_notes)
                                         _midroll_residual_detected = any(
@@ -5875,8 +5926,8 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                             if self._result_has_ad_samples(_mr_post_ad):
                                                 if (
                                                     _mr_identity_matches_previous
-                                                    and _midroll_residual_detected
-                                                ):
+                                                    or _mr_duplicate_after_build
+                                                ) and _midroll_residual_detected:
                                                     topic_notes.append(
                                                         f"midroll_repeat_identity_cap_reached:round{_midroll_round + 1}"
                                                     )
@@ -5905,10 +5956,22 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                                             watch_verified = bool(getattr(watch_result, "verified", False))
                                                         if _cap_note:
                                                             topic_notes.append(f"identity_cap_fill:{_cap_note}")
-                                                        if _cap_note and "main_watch_ad_detected" in _cap_note:
+                                                        if (
+                                                            _cap_note
+                                                            and "main_watch_ad_detected" in _cap_note
+                                                            and not _mr_duplicate_after_build
+                                                        ):
                                                             pending_midroll_result = _cap_extra
                                                             pending_midroll_samples_ended_monotonic = time.monotonic()
                                                             continue
+                                                        if (
+                                                            _cap_note
+                                                            and "main_watch_ad_detected" in _cap_note
+                                                            and _mr_duplicate_after_build
+                                                        ):
+                                                            topic_notes.append(
+                                                                "identity_cap_fill_suppressed:duplicate_residual"
+                                                            )
                                                     except Exception as _cap_exc:
                                                         topic_notes.append(f"identity_cap_fill_failed:{type(_cap_exc).__name__}")
                                                     break

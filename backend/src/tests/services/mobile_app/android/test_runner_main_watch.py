@@ -774,7 +774,7 @@ def test_midroll_continuation_rejects_next_ad_with_new_duration() -> None:
     ) is False
 
 
-def test_samples_have_video_ad_signal_for_skippable_app_ad() -> None:
+def test_samples_have_video_ad_signal_rejects_skip_only_app_overlay() -> None:
     samples = [
         AndroidWatchSample(
             offset_seconds=0,
@@ -789,7 +789,7 @@ def test_samples_have_video_ad_signal_for_skippable_app_ad() -> None:
         )
     ]
 
-    assert AndroidYouTubeSessionRunner._samples_have_video_ad_signal(samples) is True
+    assert AndroidYouTubeSessionRunner._samples_have_video_ad_signal(samples) is False
 
 
 def test_samples_have_video_ad_signal_rejects_plain_banner_overlay() -> None:
@@ -992,7 +992,7 @@ def test_samples_have_video_ad_signal_rejects_static_search_ad() -> None:
     assert AndroidYouTubeSessionRunner._samples_have_video_ad_signal(samples) is False
 
 
-def test_samples_have_video_ad_signal_accepts_video_ad_controls() -> None:
+def test_samples_have_video_ad_signal_rejects_skip_only_overlay() -> None:
     assert AndroidYouTubeSessionRunner._samples_have_video_ad_signal(
         [
             AndroidWatchSample(offset_seconds=3, ad_detected=True),
@@ -1002,8 +1002,10 @@ def test_samples_have_video_ad_signal_accepts_video_ad_controls() -> None:
                 skip_available=True,
             ),
         ]
-    ) is True
+    ) is False
 
+
+def test_samples_have_video_ad_signal_accepts_video_ad_timer() -> None:
     assert AndroidYouTubeSessionRunner._samples_have_video_ad_signal(
         [
             AndroidWatchSample(

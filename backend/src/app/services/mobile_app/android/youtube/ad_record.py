@@ -662,12 +662,16 @@ def build_watched_ad_record(
         visible_lines = raw_visible_lines
     capture_id = f"android-{int(time.time() * 1000)}"
     screenshot_paths: list[tuple[int, str]] = []
-    if ad_cta_result and ad_cta_result.debug_screen_path is not None:
-        screenshot_paths.append((0, str(ad_cta_result.debug_screen_path)))
+    if ad_cta_result and getattr(ad_cta_result, "pre_click_screen_path", None) is not None:
+        screenshot_paths.append((0, str(ad_cta_result.pre_click_screen_path)))
     if watch_debug_screen_path is not None:
         watch_debug_screen = str(watch_debug_screen_path)
         if all(existing_path != watch_debug_screen for _, existing_path in screenshot_paths):
             screenshot_paths.append((len(screenshot_paths), watch_debug_screen))
+    if ad_cta_result and ad_cta_result.debug_screen_path is not None:
+        post_click_screen = str(ad_cta_result.debug_screen_path)
+        if all(existing_path != post_click_screen for _, existing_path in screenshot_paths):
+            screenshot_paths.append((len(screenshot_paths), post_click_screen))
 
     # Drop records that have no advertiser identity at all — junk captures
     # (e.g. YouTube Live Chat pinned comment mistaken for a midroll ad,
