@@ -1786,6 +1786,144 @@ class AndroidYouTubeProbeRunner:
         return {"package": match.group(1), "activity": match.group(2)}
 
     @staticmethod
+    def _adb_display_size_sync(adb_serial: str, *, adb_bin: str) -> tuple[int, int] | None:
+        try:
+            result = subprocess.run(
+                [adb_bin, "-s", adb_serial, "shell", "wm", "size"],
+                capture_output=True,
+                check=False,
+                timeout=5,
+                text=True,
+            )
+        except Exception:
+            return None
+        match = re.search(r"Physical size:\s*(\d+)x(\d+)", result.stdout or "")
+        if not match:
+            return None
+        return int(match.group(1)), int(match.group(2))
+
+    @classmethod
+    def _close_external_browser_surface_sync(
+        cls,
+        adb_serial: str | None,
+        *,
+        adb_bin: str | None = None,
+        max_back_attempts: int = 4,
+        sleep_seconds: float = 1.0,
+    ) -> dict[str, object]:
+        if not adb_serial:
+            return {"closed": False, "reason": "no_adb_serial", "actions": []}
+        if adb_bin is None:
+            try:
+                adb_bin = require_tool_path("adb")
+            except Exception as exc:
+                return {
+                    "closed": False,
+                    "reason": f"adb_unavailable:{type(exc).__name__}",
+                    "actions": [],
+                }
+
+        def _is_youtube_foreground(foreground: dict[str, str | None]) -> bool:
+            return "youtube" in (foreground.get("package") or "").casefold()
+
+        actions: list[str] = []
+        foreground_checks: list[dict[str, str | None]] = []
+        foreground = cls._foreground_activity_sync(adb_serial)
+        foreground_checks.append(foreground)
+        logger.info("[android-session] close_external_surface:start foreground=%s", foreground)
+        if _is_youtube_foreground(foreground):
+            return {
+                "closed": True,
+                "reason": "already_youtube",
+                "actions": actions,
+                "initial_foreground": foreground,
+                "foreground": foreground,
+                "foreground_checks": foreground_checks,
+            }
+
+        for _ in range(max(1, max_back_attempts)):
+            package = (foreground.get("package") or "").casefold()
+            if not package:
+                break
+            subprocess.run(
+                [adb_bin, "-s", adb_serial, "shell", "input", "keyevent", "4"],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+            actions.append("back")
+            time.sleep(sleep_seconds)
+            foreground = cls._foreground_activity_sync(adb_serial)
+            foreground_checks.append(foreground)
+            logger.info(
+                "[android-session] close_external_surface:after_back foreground=%s",
+                foreground,
+            )
+            if _is_youtube_foreground(foreground):
+                return {
+                    "closed": True,
+                    "reason": "back",
+                    "actions": actions,
+                    "initial_foreground": foreground_checks[0],
+                    "foreground": foreground,
+                    "foreground_checks": foreground_checks,
+                }
+
+        size = cls._adb_display_size_sync(adb_serial, adb_bin=adb_bin) or (1080, 2400)
+        tap_x = int(size[0] * 0.94)
+        tap_y = max(96, min(320, int(size[1] * 0.125)))
+        subprocess.run(
+            [adb_bin, "-s", adb_serial, "shell", "input", "tap", str(tap_x), str(tap_y)],
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+        actions.append(f"tap_close:{tap_x},{tap_y}")
+        time.sleep(sleep_seconds)
+        foreground = cls._foreground_activity_sync(adb_serial)
+        foreground_checks.append(foreground)
+        logger.info(
+            "[android-session] close_external_surface:after_tap_close foreground=%s",
+            foreground,
+        )
+        if _is_youtube_foreground(foreground):
+            return {
+                "closed": True,
+                "reason": "tap_close_fallback",
+                "actions": actions,
+                "initial_foreground": foreground_checks[0],
+                "foreground": foreground,
+                "foreground_checks": foreground_checks,
+            }
+
+        # Chrome Custom Tab survives back+tap — force-stop Chrome as last resort
+        package = (foreground.get("package") or "").casefold()
+        if "chrome" in package:
+            subprocess.run(
+                [adb_bin, "-s", adb_serial, "shell", "am", "force-stop", "com.android.chrome"],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+            actions.append("force_stop_chrome")
+            time.sleep(sleep_seconds)
+            foreground = cls._foreground_activity_sync(adb_serial)
+            foreground_checks.append(foreground)
+            logger.info(
+                "[android-session] close_external_surface:after_force_stop foreground=%s",
+                foreground,
+            )
+
+        return {
+            "closed": _is_youtube_foreground(foreground),
+            "reason": "force_stop_chrome" if "force_stop_chrome" in actions else "tap_close_fallback",
+            "actions": actions,
+            "initial_foreground": foreground_checks[0],
+            "foreground": foreground,
+            "foreground_checks": foreground_checks,
+        }
+
+    @staticmethod
     def _reserve_local_tcp_port() -> int:
         import socket
 
@@ -1970,11 +2108,20 @@ class AndroidYouTubeProbeRunner:
         adb_serial: str,
         candidate: dict[str, object],
         artifact_prefix: str,
+        landing_screenshot_label: str = "feed_sponsored_card_landing",
     ) -> dict[str, object]:
-        bounds = candidate.get("bounds")
-        if not isinstance(bounds, tuple):
-            return {"clicked": False, "error": "no_bounds"}
-        tap_x, tap_y = self._feed_card_tap_point(bounds)
+        raw_tap_point = candidate.get("tap_point")
+        if (
+            isinstance(raw_tap_point, (list, tuple))
+            and len(raw_tap_point) == 2
+            and all(isinstance(value, (int, float)) for value in raw_tap_point)
+        ):
+            tap_x, tap_y = (int(raw_tap_point[0]), int(raw_tap_point[1]))
+        else:
+            bounds = candidate.get("bounds")
+            if not isinstance(bounds, tuple):
+                return {"clicked": False, "error": "no_bounds"}
+            tap_x, tap_y = self._feed_card_tap_point(bounds)
         baseline_urls: set[str] = set()
         local_port: int | None = None
         with contextlib.suppress(Exception):
@@ -2054,7 +2201,7 @@ class AndroidYouTubeProbeRunner:
         landing_screen_path = (
             Path(storage)
             / "android_probe"
-            / f"{artifact_prefix}_feed_sponsored_card_landing.png"
+            / f"{artifact_prefix}_{landing_screenshot_label}.png"
         )
         landing_screenshot: dict[str, object] = {
             "path": None,
@@ -2100,14 +2247,38 @@ class AndroidYouTubeProbeRunner:
         navigator: object,
         adb_serial: str | None,
         topic_notes: list[str],
-    ) -> None:
+        note_prefix: str = "feed_sponsored_card",
+        close_external_surface: bool = False,
+    ) -> dict[str, object]:
+        result: dict[str, object] = {
+            "requested": close_external_surface,
+            "attempts": [],
+            "verified_after_delay": False,
+        }
         if not adb_serial:
-            return
+            result["reason"] = "no_adb_serial"
+            return result
         loop = asyncio.get_running_loop()
         try:
             adb_bin = require_tool_path("adb")
         except Exception:
-            return
+            result["reason"] = "adb_unavailable"
+            return result
+        if close_external_surface:
+            close_result = await loop.run_in_executor(
+                None,
+                lambda: self._close_external_browser_surface_sync(
+                    adb_serial,
+                    adb_bin=adb_bin,
+                ),
+            )
+            result["attempts"].append(close_result)
+            actions = close_result.get("actions")
+            if isinstance(actions, list) and actions:
+                actions_label = ";".join(str(action) for action in actions)
+                topic_notes.append(
+                    f"{note_prefix}:external_close:{close_result.get('reason')}:{actions_label}"
+                )
         for _ in range(3):
             foreground = await loop.run_in_executor(
                 None,
@@ -2129,7 +2300,42 @@ class AndroidYouTubeProbeRunner:
                 break
         with contextlib.suppress(Exception):
             await navigator.ensure_app_ready()
-        topic_notes.append("feed_sponsored_card:return_to_youtube_attempted")
+        await asyncio.sleep(2.0)
+        foreground_after_delay = await loop.run_in_executor(
+            None,
+            self._foreground_activity_sync,
+            adb_serial,
+        )
+        result["foreground_after_delay"] = foreground_after_delay
+        if "youtube" in (foreground_after_delay.get("package") or "").casefold():
+            result["verified_after_delay"] = True
+        elif close_external_surface:
+            retry_close_result = await loop.run_in_executor(
+                None,
+                lambda: self._close_external_browser_surface_sync(
+                    adb_serial,
+                    adb_bin=adb_bin,
+                ),
+            )
+            result["attempts"].append(retry_close_result)
+            retry_actions = retry_close_result.get("actions")
+            if isinstance(retry_actions, list) and retry_actions:
+                retry_actions_label = ";".join(str(action) for action in retry_actions)
+                topic_notes.append(
+                    f"{note_prefix}:external_close_retry:{retry_close_result.get('reason')}:{retry_actions_label}"
+                )
+            await asyncio.sleep(1.0)
+            foreground_after_retry = await loop.run_in_executor(
+                None,
+                self._foreground_activity_sync,
+                adb_serial,
+            )
+            result["foreground_after_retry"] = foreground_after_retry
+            result["verified_after_delay"] = "youtube" in (
+                foreground_after_retry.get("package") or ""
+            ).casefold()
+        topic_notes.append(f"{note_prefix}:return_to_youtube_attempted")
+        return result
 
     async def _capture_feed_sponsored_card_if_present(
         self,
@@ -2205,11 +2411,17 @@ class AndroidYouTubeProbeRunner:
                 candidate=candidate,
                 artifact_prefix=artifact_prefix,
             )
-            await self._return_to_youtube_after_external_click(
+            return_to_youtube_result = await self._return_to_youtube_after_external_click(
                 navigator=navigator,
                 adb_serial=adb_serial,
                 topic_notes=topic_notes,
+                close_external_surface=bool(
+                    click_result.get("landing_url")
+                    or click_result.get("click_tracking_url")
+                    or click_result.get("activity_url_after_click")
+                ),
             )
+            click_result["return_to_youtube_result"] = return_to_youtube_result
 
         from app.api.modules.emulation.models import AnalysisStatus, LandingStatus
 
@@ -2273,6 +2485,7 @@ class AndroidYouTubeProbeRunner:
             "landing_screenshot_path": click_result.get("landing_screenshot_path"),
             "landing_screenshot_stable": click_result.get("landing_screenshot_stable"),
             "landing_screenshot_attempts": click_result.get("landing_screenshot_attempts"),
+            "return_to_youtube_result": click_result.get("return_to_youtube_result"),
             "devtools_stable_count": click_result.get("devtools_stable_count"),
             "devtools_poll": click_result.get("devtools_poll"),
         }
@@ -2377,16 +2590,22 @@ class AndroidYouTubeProbeRunner:
             )
             if on_player_surface and not on_results_surface:
                 return False
+        sponsor_bounds: list[tuple[int, int, int, int]] = []
         try:
             cta_bounds = await asyncio.get_event_loop().run_in_executor(
                 None,
                 navigator._extract_sponsor_cta_bounds_sync,  # type: ignore[attr-defined]
             )
         except Exception:
-            return False
+            cta_bounds = []
         if not cta_bounds:
-            return False
-
+            try:
+                sponsor_bounds = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    navigator._extract_current_sponsored_bounds_sync,  # type: ignore[attr-defined]
+                )
+            except Exception:
+                sponsor_bounds = []
         # Take screenshot via adb screencap
         artifact_prefix = self._build_safe_artifact_prefix(topic)
         storage = self._config.storage.base_path
@@ -2446,6 +2665,9 @@ class AndroidYouTubeProbeRunner:
         visible_lines: list[str] = []
         display_url: str | None = None
         headline_text: str | None = None
+        headline_source: str | None = None
+        description_lines: list[str] = []
+        advertiser_name: str | None = None
         cta_href: str | None = None
         advertiser_domain: str | None = None
         _junk_domains = {
@@ -2494,12 +2716,36 @@ class AndroidYouTubeProbeRunner:
                 "more info", "watch later", "shorts remix",
                 "new content available", "new content is available",
                 "comment...", "recently uploaded", "stream nu", "kom langs",
-                "action menu",
+                "action menu", "search youtube",
             }
             timecode_re = re.compile(r"^\d+\s+(minutes?|seconds?|hours?)\b", re.IGNORECASE)
             elapsed_re = re.compile(r"\belapsed of\b", re.IGNORECASE)
+            duration_line_re = re.compile(
+                r"^\d+\s+(?:seconds?|minutes?|hours?)"
+                r"(?:,\s*\d+\s+(?:seconds?|minutes?|hours?))*$",
+                re.IGNORECASE,
+            )
             for line in visible_lines:
                 ll = line.casefold()
+                if ll.startswith("sponsored - "):
+                    parts = [
+                        part.strip()
+                        for part in line.split(" - ")
+                        if part.strip()
+                    ]
+                    payload_parts = [
+                        part
+                        for part in parts[1:]
+                        if part.casefold() not in {"play video", "more options"}
+                        and not duration_line_re.match(part)
+                    ]
+                    if payload_parts:
+                        headline_text = payload_parts[0]
+                        headline_source = "xml_sponsored_content_desc"
+                        if len(payload_parts) >= 2:
+                            advertiser_name = payload_parts[-1]
+                            description_lines = payload_parts[1:-1]
+                    continue
                 if (
                     not headline_text
                     and len(line) > 10
@@ -2511,6 +2757,7 @@ class AndroidYouTubeProbeRunner:
                     and not elapsed_re.search(ll)
                 ):
                     headline_text = line
+                    headline_source = "xml_visible_line"
                 if display_url is None:
                     m = url_re.search(line)
                     if m:
@@ -2542,21 +2789,40 @@ class AndroidYouTubeProbeRunner:
         # Always run OCR when a screenshot exists: OCR headline replaces whatever
         # page_source found (which is usually an organic video title below the banner,
         # not the actual ad copy).
+        ocr_sponsored_marker = False
         if written_screen is not None:
             try:
                 from app.services.mobile_app.android.youtube.banner_ocr import (
+                    extract_banner_screenshot_lines,
                     extract_from_banner_screenshot,
                     is_available as _ocr_available,
                 )
                 if _ocr_available():
+                    _ocr_lines = extract_banner_screenshot_lines(written_screen)
+                    ocr_sponsored_marker = any(
+                        "sponsored" in line.casefold() or "спонс" in line.casefold()
+                        for line in _ocr_lines
+                    )
+                    if advertiser_name is None:
+                        for line in _ocr_lines:
+                            if line.casefold().startswith("sponsored"):
+                                parts = [
+                                    part.strip()
+                                    for part in re.split(r"\s*[·•\-]\s*", line, maxsplit=1)
+                                    if part.strip()
+                                ]
+                                if len(parts) >= 2 and len(parts[1]) <= 80:
+                                    advertiser_name = parts[1]
+                                    break
                     _ocr_domain, _ocr_headline = extract_from_banner_screenshot(written_screen)
                     if advertiser_domain is None and _ocr_domain:
                         advertiser_domain = _ocr_domain.removeprefix("www.")
                         print(f"[android-session] banner_ocr:domain={advertiser_domain!r}", flush=True)
-                    if _ocr_headline:
+                    if _ocr_headline and headline_source != "xml_sponsored_content_desc":
                         # OCR headline is always preferred — it reads the actual ad text,
                         # while page_source headline is typically an organic video title
                         headline_text = _ocr_headline
+                        headline_source = "ocr"
                         print(f"[android-session] banner_ocr:headline={_ocr_headline!r}", flush=True)
             except Exception as _ocr_err:
                 print(f"[android-session] banner_ocr:error={_ocr_err!r}", flush=True)
@@ -2569,6 +2835,20 @@ class AndroidYouTubeProbeRunner:
             if "install" in _vl_lower:
                 advertiser_domain = "play.google.com"
                 print(f"[android-session] banner_ocr:play_store headline={headline_text!r}", flush=True)
+
+        fallback_tap_point: tuple[int, int] | None = None
+        if not cta_bounds and not sponsor_bounds:
+            if not (written_screen is not None and ocr_sponsored_marker and headline_text):
+                return False
+            try:
+                from PIL import Image  # noqa: PLC0415
+
+                with Image.open(written_screen) as _img:
+                    width, height = _img.size
+                fallback_tap_point = (int(width * 0.76), int(height * 0.72))
+                topic_notes.append("search_banner_ad:ocr_sponsored_fallback")
+            except Exception:
+                return False
 
         # Skip junk captures: if neither URL nor a meaningful headline was
         # found, this is most likely a sponsored Shorts shelf (no advertiser
@@ -2621,17 +2901,70 @@ class AndroidYouTubeProbeRunner:
             if banner_landing_url is None and "." in ad_host:
                 banner_landing_url = f"https://{ad_host}"
 
+        click_result: dict[str, object] = {"clicked": False}
+        if adb_serial and (cta_bounds or sponsor_bounds or fallback_tap_point):
+            if fallback_tap_point is not None:
+                click_candidate = {"tap_point": fallback_tap_point}
+            else:
+                click_bounds = max(
+                    (tuple(bounds) for bounds in (cta_bounds or sponsor_bounds)),
+                    key=lambda item: max(0, item[2] - item[0]) * max(0, item[3] - item[1]),
+                )
+                click_candidate = {"bounds": click_bounds}
+            click_result = await self._click_feed_card_and_capture_landing(
+                adb_serial=adb_serial,
+                candidate=click_candidate,
+                artifact_prefix=artifact_prefix,
+                landing_screenshot_label="search_banner_landing",
+            )
+            return_to_youtube_result = await self._return_to_youtube_after_external_click(
+                navigator=navigator,
+                adb_serial=adb_serial,
+                topic_notes=topic_notes,
+                note_prefix="search_banner",
+                close_external_surface=bool(
+                    click_result.get("landing_url")
+                    or click_result.get("click_tracking_url")
+                    or click_result.get("activity_url_after_click")
+                ),
+            )
+            click_result["return_to_youtube_result"] = return_to_youtube_result
+            click_landing_url = (
+                click_result.get("landing_url")
+                if isinstance(click_result.get("landing_url"), str)
+                and not self._is_tracking_redirect_url(click_result.get("landing_url"))
+                else None
+            )
+            if click_landing_url:
+                banner_landing_url = click_landing_url
+                display_url = click_landing_url
+                cta_href = click_landing_url
+                advertiser_domain = self._host_from_landing_url(click_landing_url) or advertiser_domain
+
         screenshot_paths: list[tuple[int, str]] = []
         if written_screen is not None:
             screenshot_paths.append((0, str(written_screen)))
 
         _now = time.time()
+        landing_status = LandingStatus.SKIPPED
+        if banner_landing_url:
+            landing_status = LandingStatus.PENDING
+        elif click_result.get("clicked"):
+            landing_status = LandingStatus.FAILED
+
+        capture_notes = ["search_banner"]
+        if click_result.get("clicked"):
+            capture_notes.extend([
+                "final_url_from_chrome_devtools",
+                "landing_screenshot_after_stable_url",
+            ])
+
         capture_payload: dict[str, object] = {
             "video_src_url": None,
             "video_status": VideoStatus.FALLBACK_SCREENSHOTS if screenshot_paths else VideoStatus.NO_SRC,
             "video_file": None,
             "landing_url": banner_landing_url,
-            "landing_status": LandingStatus.PENDING if banner_landing_url else LandingStatus.SKIPPED,
+            "landing_status": landing_status,
             "landing_dir": None,
             "screenshot_paths": screenshot_paths,
             "cta_href": cta_href,
@@ -2640,9 +2973,24 @@ class AndroidYouTubeProbeRunner:
             "last_ad_offset_seconds": None,
             "analysis_status": AnalysisStatus.PENDING,
             "analysis_summary": None,
-            "capture_notes": ["search_banner"],
+            "capture_notes": capture_notes,
             "pre_click_display_url": display_url,
             "pre_click_headline_text": headline_text,
+            "pre_click_headline_source": headline_source,
+            "search_banner_bounds": (cta_bounds or sponsor_bounds),
+            "search_banner_tap_point": click_result.get("tap_point"),
+            "click_tracking_url": click_result.get("click_tracking_url"),
+            "activity_url_after_click": click_result.get("activity_url_after_click"),
+            "opened_package": click_result.get("opened_package"),
+            "opened_activity": click_result.get("opened_activity"),
+            "landing_url_source": click_result.get("landing_url_source"),
+            "landing_title": click_result.get("landing_title"),
+            "landing_screenshot_path": click_result.get("landing_screenshot_path"),
+            "landing_screenshot_stable": click_result.get("landing_screenshot_stable"),
+            "landing_screenshot_attempts": click_result.get("landing_screenshot_attempts"),
+            "return_to_youtube_result": click_result.get("return_to_youtube_result"),
+            "devtools_stable_count": click_result.get("devtools_stable_count"),
+            "devtools_poll": click_result.get("devtools_poll"),
         }
         built_ad: dict[str, object] = {
             "position": 0,
@@ -2658,12 +3006,13 @@ class AndroidYouTubeProbeRunner:
             "cta_href": cta_href or banner_landing_url,
             "sponsor_label": "Sponsored",
             "advertiser_domain": advertiser_domain,
+            "advertiser_name": advertiser_name,
             "display_url": display_url,
             "display_url_decoded": display_url,
             "landing_urls": [],
             "headline_text": headline_text,
-            "description_text": None,
-            "description_lines": [],
+            "description_text": "\n".join(description_lines) or None,
+            "description_lines": description_lines,
             "ad_pod_position": None,
             "ad_pod_total": None,
             "ad_duration_seconds": None,
