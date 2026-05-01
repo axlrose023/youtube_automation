@@ -863,6 +863,39 @@ def test_result_is_app_install_video_ad_rejects_banner_without_video_signal() ->
     assert AndroidYouTubeSessionRunner._result_is_app_install_video_ad(result) is False
 
 
+def test_result_is_play_store_ad_handles_video_timer_without_name_error() -> None:
+    result = AndroidWatchResult(
+        verified=True,
+        samples=[
+            AndroidWatchSample(
+                offset_seconds=0,
+                ad_detected=True,
+                ad_progress_seconds=7,
+                ad_duration_seconds=22,
+                ad_visible_lines=["Sponsored", "Google Play", "Install"],
+            )
+        ],
+    )
+
+    assert AndroidYouTubeSessionRunner._result_is_play_store_ad(result) is False
+
+
+def test_result_is_play_store_ad_detects_banner_google_play_url() -> None:
+    result = AndroidWatchResult(
+        verified=True,
+        samples=[
+            AndroidWatchSample(
+                offset_seconds=0,
+                ad_detected=True,
+                ad_display_url="https://play.google.com/store/apps/details?id=com.example",
+                ad_visible_lines=["Sponsored", "Install"],
+            )
+        ],
+    )
+
+    assert AndroidYouTubeSessionRunner._result_is_play_store_ad(result) is True
+
+
 def test_ad_trim_window_uses_detected_midroll_offset() -> None:
     window = AndroidYouTubeSessionRunner._calculate_ad_trim_window(
         recorded_duration_seconds=148.936,

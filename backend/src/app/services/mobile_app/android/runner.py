@@ -1425,8 +1425,8 @@ class AndroidYouTubeProbeRunner:
         # potentially unrelated organic video.
         return True
 
-    @staticmethod
-    def _result_is_play_store_ad(result: object | None) -> bool:
+    @classmethod
+    def _result_is_play_store_ad(cls, result: object | None) -> bool:
         """Return True when the detected ad is a Google Play Store app-install banner.
 
         These banners are irrelevant (no landing page, no video) and should be skipped.
