@@ -2014,6 +2014,8 @@ class AndroidYouTubeNavigator:
                 # never tap a candidate whose top edge sits inside the ad block.
                 if cta_bounds and candidate.bounds[1] <= candidate_cutoff + 24:
                     continue
+                if candidate.is_sponsored:
+                    continue
                 any_search_candidates.append(candidate)
             if any_search_candidates:
                 any_search_candidates.sort(
@@ -4325,6 +4327,20 @@ class AndroidYouTubeNavigator:
             return None
         x = int(left + width * 0.5)
         y = int(top + max(220, height * 0.20))
+        sponsor_bounds = self._extract_current_sponsored_bounds_sync()
+        tap_probe_bounds = (x - 1, y - 1, x + 1, y + 1)
+        if any(
+            self._bounds_overlap_sync(tap_probe_bounds, sponsor_bound)
+            for sponsor_bound in sponsor_bounds
+        ):
+            self._update_last_open_result_diagnostics_sync(
+                reason="top_region_inside_sponsored_block",
+                watch_opened=False,
+                results_surface=True,
+                search_context=self._has_search_context_sync(),
+                sponsor_bounds=sponsor_bounds[:4],
+            )
+            return None
         if not self._tap_via_adb_sync(x, y):
             return None
         time.sleep(2.2)

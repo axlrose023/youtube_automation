@@ -326,7 +326,7 @@ def test_tap_first_playable_candidate_prefers_non_sponsored_finance_match(monkey
     assert taps == [(540, 2158)]
 
 
-def test_tap_first_playable_candidate_uses_high_score_sponsored_candidate_when_alone(monkeypatch) -> None:
+def test_tap_first_playable_candidate_does_not_use_sponsored_candidate_when_alone(monkeypatch) -> None:
     page_source = """
     <hierarchy>
       <android.view.ViewGroup resource-id="com.google.android.youtube:id/results" bounds="[0,902][1080,2274]" />
@@ -404,8 +404,53 @@ def test_tap_first_playable_candidate_uses_high_score_sponsored_candidate_when_a
 
     title = navigator._tap_first_playable_candidate_below_sponsor_sync("forex trading strategy")
 
-    assert title == "The Only Trading Strategy You'll Ever Need"
-    assert taps == [(540, 1688)]
+    assert title is None
+    assert taps == []
+
+
+def test_tap_top_result_region_skips_point_inside_sponsored_block(monkeypatch) -> None:
+    navigator = AndroidYouTubeNavigator.__new__(AndroidYouTubeNavigator)
+    navigator._last_open_result_diagnostics = {}
+    taps: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(
+        navigator,
+        "_has_watch_surface_sync",
+        lambda: False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_extract_results_bounds_sync",
+        lambda: (0, 235, 1080, 1993),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_extract_current_sponsored_bounds_sync",
+        lambda: [(0, 235, 1080, 1597)],
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_has_search_context_sync",
+        lambda: True,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_tap_via_adb_sync",
+        lambda x, y: taps.append((x, y)) or True,
+        raising=False,
+    )
+
+    opened = navigator._tap_top_result_region_sync("quantum ai trading bot")
+
+    assert opened is None
+    assert taps == []
+    assert navigator._last_open_result_diagnostics["reason"] == (
+        "top_region_inside_sponsored_block"
+    )
 
 
 def test_tap_first_playable_candidate_scrolls_past_fullscreen_sponsor_block(monkeypatch) -> None:
@@ -560,6 +605,8 @@ def test_tap_result_candidate_hotspots_keeps_candidate_title_when_watch_opens_of
     navigator._rejected_result_titles = set()
     navigator._last_tapped_result_title = None
     navigator._last_tapped_result_is_short = False
+    navigator._results_source_cache_xml = None
+    navigator._results_source_cache_at = 0.0
 
     candidate = NativeResultCandidate(
         title="Best Top Down Analysis Strategy for 2026 | Forex Trading Guide",

@@ -293,5 +293,297 @@ def android_bootstrap_warm_snapshot(
     )
 
 
+@app.command("android_manual_debug")
+def android_manual_debug(
+    avd_name: Annotated[str | None, typer.Option()] = None,
+    proxy_url: Annotated[str | None, typer.Option()] = None,
+    headless: Annotated[bool, typer.Option("--headless/--visible")] = False,
+    snapshot_dir: Annotated[str | None, typer.Option()] = None,
+    stop_after: Annotated[bool, typer.Option("--stop-after/--keep-open")] = True,
+) -> None:
+    """Start AVD + Appium + YouTube, then wait for manual 'capture' commands.
+
+    Usage: type 'c' + Enter to snapshot current screen and run ad detection.
+    Type 'q' + Enter to quit.
+    """
+    import datetime
+    import json
+    import subprocess
+    from pathlib import Path
+
+    from app.services.mobile_app.android.analysis import AndroidAdAnalysisCoordinator
+    from app.services.mobile_app.android.avd_manager import AndroidEmulatorLaunchOptions
+    from app.services.mobile_app.android.landing_scraper import AndroidLandingPageScraper
+    from app.services.mobile_app.android.runner import AndroidYouTubeSessionRunner
+    from app.services.mobile_app.android.runtime import build_android_probe_runtime
+    from app.services.mobile_app.android.youtube.navigator import AndroidYouTubeNavigator
+    from app.services.mobile_app.android.youtube.watcher import AndroidYouTubeWatcher
+
+    config = get_config()
+    out_dir = (
+        Path(snapshot_dir)
+        if snapshot_dir is not None
+        else config.storage.base_path / "android_manual_debug"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    runner = AndroidYouTubeSessionRunner(config)
+    runtime = build_android_probe_runtime(config.android_app)
+    resolved_avd = avd_name or config.android_app.default_avd_name
+
+    async def _start():
+        emulator_proxy, host_proxy, proxy_notes, bridge = await runner._prepare_emulator_proxy(
+            proxy_url=proxy_url, adspower_profile_id=None,
+        )
+        device = await runtime.avd_manager.ensure_device(
+            avd_name=resolved_avd,
+            launch=AndroidEmulatorLaunchOptions(
+                headless=headless,
+                gpu_mode=config.android_app.emulator_gpu_mode,
+                accel_mode=config.android_app.emulator_accel_mode,
+                http_proxy=emulator_proxy,
+                load_snapshot=config.android_app.emulator_use_snapshots,
+                save_snapshot=False,
+                snapshot_name=(
+                    config.android_app.runtime_snapshot_name
+                    if config.android_app.emulator_use_snapshots else None
+                ),
+                force_snapshot_load=config.android_app.emulator_use_snapshots,
+                skip_adb_auth=config.android_app.emulator_skip_adb_auth,
+                force_stop_running=False,
+            ),
+        )
+        session = await runtime.appium_provider.create_youtube_session(
+            adb_serial=device.adb_serial,
+            avd_name=device.avd_name,
+        )
+        navigator = AndroidYouTubeNavigator(
+            session.driver, config.android_app, adb_serial=device.adb_serial,
+        )
+        await navigator.ensure_app_ready()
+        return device, session, navigator, host_proxy, proxy_notes, bridge
+
+    def _ad_summary(ad: dict) -> dict:
+        capture = ad.get("capture") if isinstance(ad.get("capture"), dict) else {}
+        analysis_summary = (
+            capture.get("analysis_summary")
+            if isinstance(capture, dict)
+            else ad.get("analysis_summary")
+        )
+        return {
+            "position": ad.get("position"),
+            "ad_type": ad.get("ad_type"),
+            "advertiser_domain": ad.get("advertiser_domain"),
+            "display_url": ad.get("display_url"),
+            "headline_text": ad.get("headline_text"),
+            "cta_text": ad.get("cta_text"),
+            "cta_href": ad.get("cta_href"),
+            "sponsor_label": ad.get("sponsor_label"),
+            "video_status": capture.get("video_status") if isinstance(capture, dict) else None,
+            "video_file": capture.get("video_file") if isinstance(capture, dict) else None,
+            "landing_status": capture.get("landing_status") if isinstance(capture, dict) else None,
+            "landing_url": capture.get("landing_url") if isinstance(capture, dict) else None,
+            "landing_title": capture.get("landing_title") if isinstance(capture, dict) else None,
+            "landing_screenshot_path": (
+                capture.get("landing_screenshot_path") if isinstance(capture, dict) else None
+            ),
+            "click_tracking_url": (
+                capture.get("click_tracking_url") if isinstance(capture, dict) else None
+            ),
+            "screenshot_paths": capture.get("screenshot_paths") if isinstance(capture, dict) else [],
+            "analysis_status": capture.get("analysis_status") if isinstance(capture, dict) else None,
+            "analysis_summary": analysis_summary,
+        }
+
+    async def _capture(device, session, navigator, idx: int, host_proxy: str | None) -> dict:
+        serial = device.adb_serial
+        ts = datetime.datetime.now().strftime("%H%M%S")
+        stem = f"snap_{idx:03d}_{ts}"
+
+        png = out_dir / f"{stem}.png"
+        with png.open("wb") as screen_file:
+            subprocess.run(
+                ["adb", "-s", serial, "exec-out", "screencap", "-p"],
+                stdout=screen_file,
+                check=False,
+            )
+
+        xml_path = out_dir / f"{stem}.xml"
+        try:
+            src = session.driver.page_source
+            xml_path.write_text(src, encoding="utf-8")
+        except Exception:
+            src = ""
+
+        watcher = AndroidYouTubeWatcher(session.driver, config.android_app, adb_serial=serial)
+        try:
+            snap, _ = await anyio.to_thread.run_sync(
+                lambda: watcher._collect_sample_sync(0)
+            )
+            watcher_result = {
+                "ad_detected": snap.ad_detected,
+                "player_visible": snap.player_visible,
+                "watch_panel_visible": snap.watch_panel_visible,
+                "results_visible": snap.results_visible,
+                "is_reel_surface": snap.is_reel_surface,
+                "skip_available": snap.skip_available,
+                "ad_sponsor_label": snap.ad_sponsor_label,
+                "ad_headline_text": snap.ad_headline_text,
+                "ad_display_url": snap.ad_display_url,
+                "ad_cta_text": snap.ad_cta_text,
+                "ad_visible_lines": snap.ad_visible_lines,
+                "ad_signal_labels": snap.ad_signal_labels,
+                "ad_cta_labels": snap.ad_cta_labels,
+                "error_messages": snap.error_messages,
+            }
+        except Exception as e:
+            watcher_result = {"error": str(e)}
+
+        ocr_result = {}
+        try:
+            from app.services.mobile_app.android.youtube.banner_ocr import (
+                extract_from_banner_screenshot, is_available as ocr_ok,
+            )
+            if ocr_ok():
+                ocr_domain, ocr_headline = extract_from_banner_screenshot(png)
+                ocr_result["ocr_domain"] = ocr_domain
+                ocr_result["ocr_headline"] = ocr_headline
+            else:
+                ocr_result["ocr_available"] = False
+        except Exception as e:
+            ocr_result["ocr_error"] = str(e)
+
+        topic_notes: list[str] = []
+        watched_ads: list[dict[str, object]] = []
+        topic_watched_ads: list[dict[str, object]] = []
+        ad_analysis = AndroidAdAnalysisCoordinator(config.gemini, config.storage)
+        landing_scraper = AndroidLandingPageScraper(config.storage, proxy_url=host_proxy)
+        await landing_scraper.start()
+
+        async def _notify_ad_captured() -> None:
+            return None
+
+        try:
+            feed_card_captured = await runner._capture_feed_sponsored_card_if_present(
+                navigator=navigator,
+                session=session,
+                adb_serial=serial,
+                topic=f"manual_capture_{idx:03d}",
+                topic_notes=topic_notes,
+                watched_ads=watched_ads,
+                topic_watched_ads=topic_watched_ads,
+                ad_analysis=ad_analysis,
+                landing_scraper=landing_scraper,
+                notify_ad_captured=_notify_ad_captured,
+            )
+            search_banner_captured = await runner._capture_search_banner_ad_if_present(
+                navigator=navigator,
+                session=session,
+                adb_serial=serial,
+                topic=f"manual_capture_{idx:03d}",
+                topic_notes=topic_notes,
+                watched_ads=watched_ads,
+                topic_watched_ads=topic_watched_ads,
+                ad_analysis=ad_analysis,
+                landing_scraper=landing_scraper,
+                notify_ad_captured=_notify_ad_captured,
+            )
+            await ad_analysis.drain(timeout_seconds=45.0)
+            await landing_scraper.drain(timeout_seconds=45.0)
+        finally:
+            await landing_scraper.stop()
+
+        result = {
+            "captured_at": datetime.datetime.now(datetime.UTC).isoformat(),
+            "serial": serial,
+            "snapshot": {
+                "screenshot": str(png),
+                "page_source_xml": str(xml_path),
+            },
+            "watcher_sample": watcher_result,
+            "ocr": ocr_result,
+            "feed_sponsored_card_detector": {
+                "captured": feed_card_captured,
+                "notes": topic_notes,
+                "ads": [
+                    _ad_summary(ad)
+                    for ad in watched_ads
+                    if ad.get("ad_type") == "feed_sponsored_card"
+                ],
+            },
+            "search_banner_detector": {
+                "captured": search_banner_captured,
+                "notes": topic_notes,
+                "ads": [
+                    _ad_summary(ad)
+                    for ad in watched_ads
+                    if ad.get("ad_type") == "search_banner"
+                ],
+            },
+        }
+
+        json_path = out_dir / f"{stem}.json"
+        result["snapshot"]["json"] = str(json_path)
+        json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+
+        return result
+
+    async def _main():
+        typer.echo(f"Starting AVD={resolved_avd} headless={headless}...")
+        device = None
+        session = None
+        host_proxy = None
+        bridge = None
+        device, session, navigator, host_proxy, proxy_notes, bridge = await _start()
+        typer.echo(
+            typer.style(
+                f"Ready. serial={device.adb_serial}  snapshots -> {out_dir}\n"
+                f"Proxy: {', '.join(proxy_notes) if proxy_notes else 'none'}\n"
+                "Commands: [c] capture+detect  [q] quit",
+                fg=typer.colors.GREEN,
+            )
+        )
+        idx = 0
+        try:
+            while True:
+                cmd = await anyio.to_thread.run_sync(lambda: input("ad_debug> ").strip().lower())
+                if cmd in ("q", "quit", "exit"):
+                    break
+                if cmd in ("c", "capture", ""):
+                    idx += 1
+                    typer.echo(f"Capturing snapshot #{idx}...")
+                    result = await _capture(device, session, navigator, idx, host_proxy)
+                    typer.echo(typer.style(json.dumps(result, ensure_ascii=False, indent=2), fg=typer.colors.CYAN))
+                else:
+                    typer.echo("Unknown command. Use 'c' to capture, 'q' to quit.")
+        finally:
+            if session is not None:
+                try:
+                    await runtime.appium_provider.close_session(session)
+                except Exception:
+                    pass
+            if stop_after and device is not None:
+                try:
+                    await runtime.avd_manager.stop_device(
+                        device.adb_serial,
+                        avd_name=device.avd_name,
+                    )
+                except Exception:
+                    try:
+                        await runtime.avd_manager.force_cleanup_device(
+                            adb_serial=device.adb_serial,
+                            avd_name=device.avd_name,
+                        )
+                    except Exception:
+                        pass
+            if bridge is not None:
+                try:
+                    await runner._proxy_bridge.stop(bridge)
+                except Exception:
+                    pass
+
+    anyio.run(_main)
+
+
 if __name__ == "__main__":
     app()

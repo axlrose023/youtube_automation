@@ -10,6 +10,112 @@ from app.services.mobile_app.android.runner import AndroidYouTubeProbeRunner
 from app.services.mobile_app.models import AndroidWatchSample
 
 
+def test_parse_feed_sponsored_card_text_extracts_structured_fields() -> None:
+    raw = (
+        "Sponsored - Day-1 + Daily Pro Payout Rules\n"
+        "Tired of payout delays? Some funded futures firms can take weeks. "
+        "We pay daily in Pro.\n"
+        "Take Profit Trader - Visit site"
+    )
+
+    parsed = AndroidYouTubeProbeRunner._parse_feed_sponsored_card_text(raw)
+
+    assert parsed is not None
+    assert parsed["sponsor_label"] == "Sponsored"
+    assert parsed["headline_text"] == "Day-1 + Daily Pro Payout Rules"
+    assert parsed["description_text"] == (
+        "Tired of payout delays? Some funded futures firms can take weeks. "
+        "We pay daily in Pro."
+    )
+    assert parsed["advertiser_name"] == "Take Profit Trader"
+    assert parsed["cta_text"] == "Visit site"
+
+
+def test_find_feed_sponsored_card_from_xml_supports_non_english_copy() -> None:
+    xml = """<?xml version='1.0' encoding='UTF-8'?>
+<hierarchy>
+  <android.view.ViewGroup
+      content-desc="Sponsored - єОселя — вигідні умови&#10;Квартири під Києвом від Інтергал-Буд. Дізнайтесь ціни та доступні планування вже зараз.&#10;Інтергал-Буд - Visit site"
+      clickable="true"
+      bounds="[0,462][1080,2014]" />
+</hierarchy>
+"""
+
+    candidate = AndroidYouTubeProbeRunner._find_feed_sponsored_card_from_xml(xml)
+
+    assert candidate is not None
+    assert candidate["headline_text"] == "єОселя — вигідні умови"
+    assert candidate["advertiser_name"] == "Інтергал-Буд"
+    assert candidate["cta_text"] == "Visit site"
+    assert candidate["bounds"] == (0, 462, 1080, 2014)
+
+
+def test_feed_sponsored_tracking_urls_are_not_landing_urls() -> None:
+    assert AndroidYouTubeProbeRunner._is_tracking_redirect_url(
+        "https://www.googleadservices.com/pagead/aclk?sa=L&adurl=https://example.com/"
+    )
+    assert not AndroidYouTubeProbeRunner._is_tracking_redirect_url(
+        "https://www.dataannotation.tech/coding?gad_source=2"
+    )
+    assert (
+        AndroidYouTubeProbeRunner._host_from_landing_url(
+            "https://www.dataannotation.tech/coding?gad_source=2"
+        )
+        == "dataannotation.tech"
+    )
+
+
+def test_choose_chrome_landing_page_prefers_final_url_over_tracking_url() -> None:
+    page = AndroidYouTubeProbeRunner._choose_chrome_landing_page(
+        [
+            {
+                "url": "https://www.googleadservices.com/pagead/aclk?"
+                + "x" * 400,
+                "title": "",
+            },
+            {
+                "url": "https://try.takeprofittrader.com/funded-trader",
+                "title": "Funded Futures Trader - TPT",
+            },
+        ]
+    )
+
+    assert page == {
+        "url": "https://try.takeprofittrader.com/funded-trader",
+        "title": "Funded Futures Trader - TPT",
+    }
+
+
+def test_choose_chrome_landing_page_ignores_baseline_urls() -> None:
+    page = AndroidYouTubeProbeRunner._choose_chrome_landing_page(
+        [
+            {
+                "url": "https://old-ad.example/landing",
+                "title": "Old landing",
+            },
+            {
+                "url": "https://new-ad.example/landing",
+                "title": "New landing",
+            },
+        ],
+        baseline_urls={"https://old-ad.example/landing"},
+    )
+
+    assert page == {
+        "url": "https://new-ad.example/landing",
+        "title": "New landing",
+    }
+
+
+def test_explicit_search_results_surface_is_not_feed_sponsored_surface() -> None:
+    assert AndroidYouTubeProbeRunner._is_explicit_search_results_surface(
+        '<node resource-id="com.google.android.youtube:id/search_results" />'
+    )
+    assert not AndroidYouTubeProbeRunner._is_explicit_search_results_surface(
+        '<node content-desc="Sponsored - Remote Work&#10;DataAnnotation - Apply now" />'
+    )
+
+
 def test_cleanup_irrelevant_ad_videos_keeps_debug_artifacts(tmp_path) -> None:
     video_path = tmp_path / "android_probe" / "video" / "watch_debug.mp4"
     video_path.parent.mkdir(parents=True)
@@ -98,6 +204,7 @@ async def test_finalize_recording_after_cta_uses_debug_xml_remaining_fallback(
         returned_to_youtube=True,
     )
 
-    assert slept == [19.0]
+    assert sum(slept) == 19.0
+    assert slept == [5.0, 5.0, 5.0, 4.0]
     assert path == "android_probe/video/ad.mp4"
     assert duration == 21.7

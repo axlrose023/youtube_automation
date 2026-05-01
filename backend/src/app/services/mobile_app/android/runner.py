@@ -1476,6 +1476,863 @@ class AndroidYouTubeProbeRunner:
                 return True
         return False
 
+    @staticmethod
+    def _parse_android_bounds(raw: object) -> tuple[int, int, int, int] | None:
+        if not isinstance(raw, str):
+            return None
+        match = re.fullmatch(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", raw.strip())
+        if not match:
+            return None
+        left, top, right, bottom = (int(part) for part in match.groups())
+        if right <= left or bottom <= top:
+            return None
+        return left, top, right, bottom
+
+    @staticmethod
+    def _feed_card_tap_point(bounds: tuple[int, int, int, int]) -> tuple[int, int]:
+        left, top, right, bottom = bounds
+        height = max(1, bottom - top)
+        x = min(right - 40, max(left + 40, right - 75))
+        y = min(bottom - 80, max(top + int(height * 0.55), bottom - 280))
+        return x, y
+
+    @staticmethod
+    def _split_accessibility_lines(raw: object) -> list[str]:
+        if not isinstance(raw, str):
+            return []
+        text = raw.replace("\r\n", "\n").replace("\r", "\n")
+        return [line.strip() for line in text.split("\n") if line.strip()]
+
+    @classmethod
+    def _parse_feed_sponsored_card_text(cls, raw: object) -> dict[str, object] | None:
+        lines = cls._split_accessibility_lines(raw)
+        if not lines:
+            return None
+        sponsor_idx = next(
+            (
+                idx
+                for idx, line in enumerate(lines)
+                if line.casefold().startswith("sponsored - ")
+            ),
+            None,
+        )
+        if sponsor_idx is None:
+            return None
+        lines = lines[sponsor_idx:]
+        first = lines[0]
+        headline = first.split(" - ", 1)[1].strip() if " - " in first else ""
+        if not headline:
+            return None
+        low_full_text = "\n".join(lines).casefold()
+        if " - play video" in low_full_text or "view channel" in low_full_text:
+            return None
+
+        advertiser: str | None = None
+        cta_text: str | None = None
+        advertiser_line_idx: int | None = None
+        for idx in range(len(lines) - 1, 0, -1):
+            line = lines[idx]
+            if " - " not in line:
+                continue
+            left, right = (part.strip() for part in line.rsplit(" - ", 1))
+            if not left or not right:
+                continue
+            if len(right) > 48 or right.casefold() in {"play video", "more options"}:
+                continue
+            advertiser = left
+            cta_text = right
+            advertiser_line_idx = idx
+            break
+
+        description_lines = (
+            lines[1:advertiser_line_idx]
+            if advertiser_line_idx is not None
+            else lines[1:]
+        )
+        return {
+            "sponsor_label": "Sponsored",
+            "headline_text": headline,
+            "description_lines": description_lines,
+            "description_text": "\n".join(description_lines) or None,
+            "advertiser_name": advertiser,
+            "cta_text": cta_text,
+            "visible_lines": lines,
+            "raw_text": "\n".join(lines),
+        }
+
+    @classmethod
+    def _find_feed_sponsored_card_from_xml(
+        cls,
+        page_source: str | None,
+    ) -> dict[str, object] | None:
+        if not page_source:
+            return None
+        try:
+            import xml.etree.ElementTree as ET
+
+            root = ET.fromstring(page_source)
+        except Exception:
+            return None
+
+        candidates: list[dict[str, object]] = []
+        seen_texts: set[str] = set()
+        for node in root.iter():
+            raw = (node.attrib.get("content-desc") or node.attrib.get("text") or "").strip()
+            if not raw or raw in seen_texts:
+                continue
+            seen_texts.add(raw)
+            parsed = cls._parse_feed_sponsored_card_text(raw)
+            if parsed is None:
+                continue
+            bounds_raw = node.attrib.get("bounds") or ""
+            bounds = cls._parse_android_bounds(bounds_raw)
+            width = (bounds[2] - bounds[0]) if bounds else 0
+            height = (bounds[3] - bounds[1]) if bounds else 0
+            # Feed sponsored cards are large clickable cards. This avoids
+            # treating tiny labels or toolbar nodes as an ad creative.
+            if bounds is not None and (width < 500 or height < 260):
+                continue
+            if bounds is None and len(parsed.get("visible_lines", [])) < 3:
+                continue
+            candidate = dict(parsed)
+            candidate.update(
+                {
+                    "bounds": bounds,
+                    "bounds_raw": bounds_raw or None,
+                    "node_class": node.attrib.get("class"),
+                    "resource_id": node.attrib.get("resource-id"),
+                    "clickable": node.attrib.get("clickable"),
+                    "displayed": node.attrib.get("displayed"),
+                }
+            )
+            score = (width * height) + (100_000 if node.attrib.get("clickable") == "true" else 0)
+            candidate["_score"] = score
+            candidates.append(candidate)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: int(item.get("_score") or 0))
+
+    @staticmethod
+    def _is_explicit_search_results_surface(page_source: str) -> bool:
+        lowered = page_source.casefold()
+        return (
+            "results_search_query" in lowered
+            or "search_results" in lowered
+            or "search_result" in lowered
+        )
+
+    @staticmethod
+    def _is_tracking_redirect_url(raw_url: object) -> bool:
+        if not isinstance(raw_url, str) or not raw_url.strip():
+            return False
+        try:
+            parts = urlsplit(raw_url.strip())
+        except Exception:
+            return False
+        host = parts.netloc.casefold()
+        if host.startswith("www."):
+            host = host[4:]
+        if not host:
+            return False
+        if host in {
+            "googleadservices.com",
+            "googleads.g.doubleclick.net",
+            "googlesyndication.com",
+            "google.com",
+        }:
+            return True
+        return (
+            host.endswith(".doubleclick.net")
+            or host.endswith(".googlesyndication.com")
+            or host.endswith(".googleadservices.com")
+        )
+
+    @staticmethod
+    def _host_from_landing_url(raw_url: object) -> str | None:
+        if not isinstance(raw_url, str) or not raw_url.strip():
+            return None
+        try:
+            parts = urlsplit(raw_url.strip())
+        except Exception:
+            return None
+        host = parts.netloc.casefold()
+        if host.startswith("www."):
+            host = host[4:]
+        return host or None
+
+    @staticmethod
+    def _write_adb_png_sync(
+        *,
+        adb_serial: str,
+        path: Path,
+        timeout_seconds: float = 12.0,
+    ) -> bool:
+        try:
+            adb_bin = require_tool_path("adb")
+            result = subprocess.run(
+                [adb_bin, "-s", adb_serial, "exec-out", "screencap", "-p"],
+                capture_output=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except Exception:
+            return False
+        if result.returncode != 0 or not result.stdout:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(result.stdout)
+        return True
+
+    @classmethod
+    def _write_stable_adb_png_sync(
+        cls,
+        *,
+        adb_serial: str,
+        path: Path,
+        attempts: int = 5,
+        interval_seconds: float = 1.2,
+    ) -> dict[str, object]:
+        import hashlib
+
+        last_hash: str | None = None
+        last_bytes: bytes | None = None
+        for attempt in range(max(1, attempts)):
+            try:
+                adb_bin = require_tool_path("adb")
+                result = subprocess.run(
+                    [adb_bin, "-s", adb_serial, "exec-out", "screencap", "-p"],
+                    capture_output=True,
+                    check=False,
+                    timeout=12,
+                )
+            except Exception:
+                result = None
+            if result is not None and result.returncode == 0 and result.stdout:
+                current_hash = hashlib.sha256(result.stdout).hexdigest()
+                if last_hash == current_hash:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(result.stdout)
+                    return {
+                        "path": str(path),
+                        "stable": True,
+                        "attempts": attempt + 1,
+                    }
+                last_hash = current_hash
+                last_bytes = result.stdout
+            if attempt < attempts - 1:
+                time.sleep(interval_seconds)
+        if last_bytes:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(last_bytes)
+            return {
+                "path": str(path),
+                "stable": False,
+                "attempts": attempts,
+            }
+        return {
+            "path": None,
+            "stable": False,
+            "attempts": attempts,
+        }
+
+    @staticmethod
+    def _extract_activity_url_sync(adb_serial: str | None) -> str | None:
+        if not adb_serial:
+            return None
+        try:
+            adb_bin = require_tool_path("adb")
+            result = subprocess.run(
+                [adb_bin, "-s", adb_serial, "shell", "dumpsys", "activity", "activities"],
+                capture_output=True,
+                check=False,
+                timeout=8,
+                text=True,
+            )
+        except Exception:
+            return None
+        text = result.stdout or ""
+        urls: list[str] = []
+        for match in re.finditer(r"\b(?:dat|data)=((?:https?://)[^\s}]+)", text):
+            url = match.group(1).strip().rstrip("}")
+            if url:
+                urls.append(url)
+        return urls[-1] if urls else None
+
+    @staticmethod
+    def _foreground_activity_sync(adb_serial: str | None) -> dict[str, str | None]:
+        if not adb_serial:
+            return {"package": None, "activity": None}
+        try:
+            adb_bin = require_tool_path("adb")
+            result = subprocess.run(
+                [adb_bin, "-s", adb_serial, "shell", "dumpsys", "window"],
+                capture_output=True,
+                check=False,
+                timeout=8,
+                text=True,
+            )
+        except Exception:
+            return {"package": None, "activity": None}
+        text = result.stdout or ""
+        match = re.search(r"mCurrentFocus=.*?\s([A-Za-z0-9_.$]+)/([A-Za-z0-9_.$]+)", text)
+        if not match:
+            match = re.search(r"mFocusedApp=.*?\s([A-Za-z0-9_.$]+)/([A-Za-z0-9_.$]+)", text)
+        if not match:
+            return {"package": None, "activity": None}
+        return {"package": match.group(1), "activity": match.group(2)}
+
+    @staticmethod
+    def _reserve_local_tcp_port() -> int:
+        import socket
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            return int(sock.getsockname()[1])
+
+    @classmethod
+    def _chrome_devtools_pages_sync(
+        cls,
+        *,
+        adb_serial: str,
+        local_port: int,
+    ) -> list[dict[str, object]]:
+        import urllib.request
+
+        adb_bin = require_tool_path("adb")
+        subprocess.run(
+            [
+                adb_bin,
+                "-s",
+                adb_serial,
+                "forward",
+                f"tcp:{local_port}",
+                "localabstract:chrome_devtools_remote",
+            ],
+            capture_output=True,
+            check=False,
+            timeout=6,
+        )
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{local_port}/json/list",
+            timeout=2.5,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="ignore"))
+        return payload if isinstance(payload, list) else []
+
+    @classmethod
+    def _choose_chrome_landing_page(
+        cls,
+        pages: list[dict[str, object]],
+        *,
+        baseline_urls: set[str] | None = None,
+    ) -> dict[str, str] | None:
+        baseline_urls = baseline_urls or set()
+        candidates: list[tuple[int, dict[str, str]]] = []
+        for page in pages:
+            raw_url = page.get("url")
+            if not isinstance(raw_url, str):
+                continue
+            url = raw_url.strip()
+            if url in baseline_urls:
+                continue
+            if not url.startswith(("http://", "https://")):
+                continue
+            title = page.get("title")
+            title_text = title.strip() if isinstance(title, str) else ""
+            host = cls._host_from_landing_url(url) or ""
+            score = 0
+            if cls._is_tracking_redirect_url(url):
+                score -= 1000
+            else:
+                score += 100
+            if "youtube.com" not in host and host not in {"youtu.be"}:
+                score += 25
+            if title_text:
+                score += 10
+            score += min(len(url), 200)
+            candidates.append((score, {"url": url, "title": title_text}))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    @classmethod
+    def _wait_for_chrome_landing_state_sync(
+        cls,
+        *,
+        adb_serial: str,
+        timeout_seconds: float = 45.0,
+        baseline_urls: set[str] | None = None,
+    ) -> dict[str, object]:
+        baseline_urls = baseline_urls or set()
+        local_port = cls._reserve_local_tcp_port()
+        adb_bin = require_tool_path("adb")
+        deadline = time.monotonic() + timeout_seconds
+        click_tracking_url: str | None = None
+        last_candidate: dict[str, str] | None = None
+        stable_key: tuple[str, str] | None = None
+        stable_count = 0
+        polls: list[dict[str, object]] = []
+        try:
+            while time.monotonic() < deadline:
+                activity_url = cls._extract_activity_url_sync(adb_serial)
+                if (
+                    activity_url
+                    and cls._is_tracking_redirect_url(activity_url)
+                    and click_tracking_url is None
+                ):
+                    click_tracking_url = activity_url
+                pages: list[dict[str, object]] = []
+                try:
+                    pages = cls._chrome_devtools_pages_sync(
+                        adb_serial=adb_serial,
+                        local_port=local_port,
+                    )
+                except Exception as exc:
+                    polls.append({"error": f"{type(exc).__name__}:{exc}"})
+                    time.sleep(1.0)
+                    continue
+                page = cls._choose_chrome_landing_page(
+                    pages,
+                    baseline_urls=baseline_urls,
+                )
+                if page is None:
+                    polls.append({"pages": len(pages), "selected_url": None})
+                    time.sleep(1.0)
+                    continue
+                url = page["url"]
+                title = page["title"]
+                if cls._is_tracking_redirect_url(url):
+                    if click_tracking_url is None:
+                        click_tracking_url = url
+                    polls.append(
+                        {
+                            "pages": len(pages),
+                            "selected_url": url,
+                            "tracking": True,
+                        }
+                    )
+                    time.sleep(1.0)
+                    continue
+                last_candidate = page
+                key = (url, title)
+                stable_count = stable_count + 1 if key == stable_key else 1
+                stable_key = key
+                polls.append(
+                    {
+                        "pages": len(pages),
+                        "selected_url": url,
+                        "title": title,
+                        "stable_count": stable_count,
+                    }
+                )
+                if stable_count >= 3 and (title or stable_count >= 4):
+                    break
+                time.sleep(1.0)
+        finally:
+            with contextlib.suppress(Exception):
+                subprocess.run(
+                    [
+                        adb_bin,
+                        "-s",
+                        adb_serial,
+                        "forward",
+                        "--remove",
+                        f"tcp:{local_port}",
+                    ],
+                    capture_output=True,
+                    check=False,
+                    timeout=4,
+                )
+
+        landing_url = last_candidate["url"] if last_candidate else None
+        landing_title = last_candidate["title"] if last_candidate else None
+        return {
+            "landing_url": landing_url,
+            "landing_title": landing_title,
+            "landing_url_source": (
+                "chrome_devtools_stable_non_tracking"
+                if landing_url
+                else "chrome_devtools_no_final_url"
+            ),
+            "click_tracking_url": click_tracking_url,
+            "devtools_poll": polls[-12:],
+            "devtools_stable_count": stable_count,
+        }
+
+    async def _click_feed_card_and_capture_landing(
+        self,
+        *,
+        adb_serial: str,
+        candidate: dict[str, object],
+        artifact_prefix: str,
+    ) -> dict[str, object]:
+        bounds = candidate.get("bounds")
+        if not isinstance(bounds, tuple):
+            return {"clicked": False, "error": "no_bounds"}
+        tap_x, tap_y = self._feed_card_tap_point(bounds)
+        baseline_urls: set[str] = set()
+        local_port: int | None = None
+        with contextlib.suppress(Exception):
+            local_port = self._reserve_local_tcp_port()
+            pages = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self._chrome_devtools_pages_sync(
+                    adb_serial=adb_serial,
+                    local_port=local_port,
+                ),
+            )
+            baseline_urls = {
+                str(page.get("url")).strip()
+                for page in pages
+                if isinstance(page, dict) and isinstance(page.get("url"), str)
+            }
+        if local_port is not None:
+            with contextlib.suppress(Exception):
+                adb_bin = require_tool_path("adb")
+                subprocess.run(
+                    [
+                        adb_bin,
+                        "-s",
+                        adb_serial,
+                        "forward",
+                        "--remove",
+                        f"tcp:{local_port}",
+                    ],
+                    capture_output=True,
+                    check=False,
+                    timeout=4,
+                )
+        try:
+            adb_bin = require_tool_path("adb")
+            subprocess.run(
+                [adb_bin, "-s", adb_serial, "shell", "input", "tap", str(tap_x), str(tap_y)],
+                capture_output=True,
+                check=False,
+                timeout=6,
+            )
+        except Exception as exc:
+            return {
+                "clicked": False,
+                "tap_point": [tap_x, tap_y],
+                "error": f"{type(exc).__name__}:{exc}",
+            }
+
+        await asyncio.sleep(1.5)
+        loop = asyncio.get_running_loop()
+        activity_after_click = await loop.run_in_executor(
+            None,
+            self._foreground_activity_sync,
+            adb_serial,
+        )
+        activity_url = await loop.run_in_executor(
+            None,
+            self._extract_activity_url_sync,
+            adb_serial,
+        )
+        landing_state = await loop.run_in_executor(
+            None,
+            lambda: self._wait_for_chrome_landing_state_sync(
+                adb_serial=adb_serial,
+                timeout_seconds=45.0,
+                baseline_urls=baseline_urls,
+            ),
+        )
+        click_tracking_url = (
+            landing_state.get("click_tracking_url")
+            if isinstance(landing_state.get("click_tracking_url"), str)
+            else None
+        )
+        if click_tracking_url is None and self._is_tracking_redirect_url(activity_url):
+            click_tracking_url = activity_url
+
+        storage = self._config.storage.base_path
+        landing_screen_path = (
+            Path(storage)
+            / "android_probe"
+            / f"{artifact_prefix}_feed_sponsored_card_landing.png"
+        )
+        landing_screenshot: dict[str, object] = {
+            "path": None,
+            "stable": False,
+            "attempts": 0,
+        }
+        if landing_state.get("landing_url"):
+            await asyncio.sleep(2.0)
+            landing_screenshot = await loop.run_in_executor(
+                None,
+                lambda: self._write_stable_adb_png_sync(
+                    adb_serial=adb_serial,
+                    path=landing_screen_path,
+                ),
+            )
+
+        activity_after_landing = await loop.run_in_executor(
+            None,
+            self._foreground_activity_sync,
+            adb_serial,
+        )
+        return {
+            "clicked": True,
+            "tap_point": [tap_x, tap_y],
+            "opened_package": activity_after_click.get("package"),
+            "opened_activity": activity_after_click.get("activity"),
+            "activity_url_after_click": activity_url,
+            "activity_after_landing": activity_after_landing,
+            "click_tracking_url": click_tracking_url,
+            "landing_url": landing_state.get("landing_url"),
+            "landing_title": landing_state.get("landing_title"),
+            "landing_url_source": landing_state.get("landing_url_source"),
+            "devtools_poll": landing_state.get("devtools_poll"),
+            "devtools_stable_count": landing_state.get("devtools_stable_count"),
+            "landing_screenshot_path": landing_screenshot.get("path"),
+            "landing_screenshot_stable": landing_screenshot.get("stable"),
+            "landing_screenshot_attempts": landing_screenshot.get("attempts"),
+        }
+
+    async def _return_to_youtube_after_external_click(
+        self,
+        *,
+        navigator: object,
+        adb_serial: str | None,
+        topic_notes: list[str],
+    ) -> None:
+        if not adb_serial:
+            return
+        loop = asyncio.get_running_loop()
+        try:
+            adb_bin = require_tool_path("adb")
+        except Exception:
+            return
+        for _ in range(3):
+            foreground = await loop.run_in_executor(
+                None,
+                self._foreground_activity_sync,
+                adb_serial,
+            )
+            package = (foreground.get("package") or "").casefold()
+            if "youtube" in package:
+                break
+            if package:
+                subprocess.run(
+                    [adb_bin, "-s", adb_serial, "shell", "input", "keyevent", "4"],
+                    capture_output=True,
+                    check=False,
+                    timeout=5,
+                )
+                await asyncio.sleep(1.0)
+            else:
+                break
+        with contextlib.suppress(Exception):
+            await navigator.ensure_app_ready()
+        topic_notes.append("feed_sponsored_card:return_to_youtube_attempted")
+
+    async def _capture_feed_sponsored_card_if_present(
+        self,
+        *,
+        navigator: object,
+        session: object,
+        adb_serial: str | None,
+        topic: str,
+        topic_notes: list[str],
+        watched_ads: list[dict[str, object]],
+        topic_watched_ads: list[dict[str, object]],
+        ad_analysis: object,
+        landing_scraper: object,
+        notify_ad_captured: object,
+    ) -> bool:
+        import uuid as _uuid
+
+        driver = getattr(session, "driver", None) if session is not None else None
+        if driver is None:
+            return False
+        try:
+            page_source = driver.page_source or ""
+        except Exception:
+            page_source = ""
+        if not page_source:
+            return False
+        if self._is_explicit_search_results_surface(page_source):
+            return False
+        if (
+            "watch_player" in page_source
+            or "Video player" in page_source
+            or "engagement_panel" in page_source
+        ):
+            return False
+        candidate = self._find_feed_sponsored_card_from_xml(page_source)
+        if candidate is None:
+            return False
+
+        duplicate_probe = {
+            "advertiser_domain": candidate.get("advertiser_name"),
+            "headline_text": candidate.get("headline_text"),
+            "capture": {},
+        }
+        duplicate_key = self._watched_ad_identity_key(duplicate_probe)
+        if duplicate_key and any(
+            self._watched_ad_identity_key(ad) == duplicate_key for ad in watched_ads
+        ):
+            topic_notes.append("feed_sponsored_card:skipped:duplicate")
+            return False
+
+        artifact_prefix = self._build_safe_artifact_prefix(topic)
+        storage = self._config.storage.base_path
+        base_dir = Path(storage) / "android_probe"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        screen_path = base_dir / f"{artifact_prefix}_feed_sponsored_card.png"
+        xml_path = base_dir / f"{artifact_prefix}_feed_sponsored_card.xml"
+        xml_path.write_text(page_source, encoding="utf-8")
+
+        written_screen: Path | None = None
+        if adb_serial and self._write_adb_png_sync(adb_serial=adb_serial, path=screen_path):
+            written_screen = screen_path
+        elif driver is not None:
+            try:
+                driver.save_screenshot(str(screen_path))  # type: ignore[attr-defined]
+                written_screen = screen_path
+            except Exception:
+                written_screen = None
+
+        click_result: dict[str, object] = {"clicked": False}
+        if adb_serial:
+            click_result = await self._click_feed_card_and_capture_landing(
+                adb_serial=adb_serial,
+                candidate=candidate,
+                artifact_prefix=artifact_prefix,
+            )
+            await self._return_to_youtube_after_external_click(
+                navigator=navigator,
+                adb_serial=adb_serial,
+                topic_notes=topic_notes,
+            )
+
+        from app.api.modules.emulation.models import AnalysisStatus, LandingStatus
+
+        landing_url = (
+            click_result.get("landing_url")
+            if isinstance(click_result.get("landing_url"), str)
+            and not self._is_tracking_redirect_url(click_result.get("landing_url"))
+            else None
+        )
+        landing_title = (
+            click_result.get("landing_title")
+            if isinstance(click_result.get("landing_title"), str)
+            else None
+        )
+        advertiser_domain = self._host_from_landing_url(landing_url) or (
+            candidate.get("advertiser_name")
+            if isinstance(candidate.get("advertiser_name"), str)
+            else None
+        )
+        screenshot_paths: list[tuple[int, str]] = []
+        if written_screen is not None:
+            screenshot_paths.append((0, str(written_screen)))
+
+        landing_status = LandingStatus.SKIPPED
+        if landing_url:
+            landing_status = LandingStatus.PENDING
+        elif click_result.get("clicked"):
+            landing_status = LandingStatus.FAILED
+
+        _now = time.time()
+        capture_payload: dict[str, object] = {
+            "video_src_url": None,
+            "video_status": VideoStatus.FALLBACK_SCREENSHOTS if screenshot_paths else VideoStatus.NO_SRC,
+            "video_file": None,
+            "landing_url": landing_url,
+            "landing_status": landing_status,
+            "landing_dir": None,
+            "screenshot_paths": screenshot_paths,
+            "cta_href": landing_url,
+            "recorded_video_duration_seconds": None,
+            "first_ad_offset_seconds": None,
+            "last_ad_offset_seconds": None,
+            "analysis_status": AnalysisStatus.PENDING,
+            "analysis_summary": None,
+            "capture_notes": [
+                "feed_sponsored_card",
+                "final_url_from_chrome_devtools",
+                "landing_screenshot_after_stable_url",
+            ],
+            "pre_click_page_source_path": str(xml_path),
+            "pre_click_display_url": landing_url,
+            "pre_click_headline_text": candidate.get("headline_text"),
+            "feed_card_bounds": candidate.get("bounds_raw"),
+            "feed_card_tap_point": click_result.get("tap_point"),
+            "click_tracking_url": click_result.get("click_tracking_url"),
+            "activity_url_after_click": click_result.get("activity_url_after_click"),
+            "opened_package": click_result.get("opened_package"),
+            "opened_activity": click_result.get("opened_activity"),
+            "landing_url_source": click_result.get("landing_url_source"),
+            "landing_title": landing_title,
+            "landing_screenshot_path": click_result.get("landing_screenshot_path"),
+            "landing_screenshot_stable": click_result.get("landing_screenshot_stable"),
+            "landing_screenshot_attempts": click_result.get("landing_screenshot_attempts"),
+            "devtools_stable_count": click_result.get("devtools_stable_count"),
+            "devtools_poll": click_result.get("devtools_poll"),
+        }
+        built_ad: dict[str, object] = {
+            "position": 0,
+            "started_at": _now,
+            "ended_at": _now,
+            "watched_seconds": 0.0,
+            "completed": True,
+            "skip_clicked": False,
+            "skip_visible": False,
+            "skip_text": None,
+            "cta_text": candidate.get("cta_text"),
+            "cta_candidates": [candidate.get("cta_text")] if candidate.get("cta_text") else [],
+            "cta_href": landing_url,
+            "sponsor_label": candidate.get("sponsor_label") or "Sponsored",
+            "advertiser_domain": advertiser_domain,
+            "advertiser_name": candidate.get("advertiser_name"),
+            "display_url": landing_url,
+            "display_url_decoded": landing_url,
+            "landing_url": landing_url,
+            "landing_urls": [landing_url] if landing_url else [],
+            "click_tracking_url": click_result.get("click_tracking_url"),
+            "headline_text": candidate.get("headline_text"),
+            "description_text": candidate.get("description_text"),
+            "description_lines": candidate.get("description_lines") or [],
+            "ad_pod_position": None,
+            "ad_pod_total": None,
+            "ad_duration_seconds": None,
+            "ad_first_progress_seconds": None,
+            "ad_last_progress_seconds": None,
+            "ad_completion_reason": "feed_sponsored_card",
+            "first_ad_offset_seconds": None,
+            "last_ad_offset_seconds": None,
+            "recorded_video_duration_seconds": None,
+            "my_ad_center_visible": False,
+            "full_text": candidate.get("raw_text") or "",
+            "full_text_source": "feed_sponsored_card_content_desc",
+            "full_visible_text": candidate.get("raw_text") or "",
+            "full_caption_text": "",
+            "visible_lines": candidate.get("visible_lines") or [],
+            "caption_lines": [],
+            "text_samples": [],
+            "end_reason": "feed_sponsored_card",
+            "capture_id": str(_uuid.uuid4()),
+            "capture": capture_payload,
+            "recorded_at": _now,
+            "ad_type": "feed_sponsored_card",
+        }
+        built_ad = self._with_watched_ad_position(built_ad, len(watched_ads) + 1)
+        ad_analysis.submit(built_ad)
+        landing_scraper.submit(built_ad)
+        watched_ads.append(built_ad)
+        topic_watched_ads.append(built_ad)
+        await notify_ad_captured()
+        topic_notes.append("feed_sponsored_card:captured")
+        print(
+            "[android-session] stage:feed_sponsored_card:captured "
+            f"headline={candidate.get('headline_text')!r} "
+            f"landing_url={landing_url!r}",
+            flush=True,
+        )
+        return True
+
     async def _capture_search_banner_ad_if_present(
         self,
         *,
@@ -3465,6 +4322,24 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                         topic_notes.append("network_check_failed:soft_proceed")
 
                     results_ready_confirmed = True
+                    with contextlib.suppress(Exception):
+                        feed_card_captured = await self._capture_feed_sponsored_card_if_present(
+                            navigator=navigator,
+                            session=session,
+                            adb_serial=device.adb_serial if device is not None else None,
+                            topic=topic,
+                            topic_notes=topic_notes,
+                            watched_ads=watched_ads,
+                            topic_watched_ads=topic_watched_ads,
+                            ad_analysis=ad_analysis,
+                            landing_scraper=landing_scraper,
+                            notify_ad_captured=_notify_ad_captured,
+                        )
+                        if feed_card_captured:
+                            print(
+                                f"[android-session] stage:pre_search_feed_sponsored_card_done total_ads={len(watched_ads)}",
+                                flush=True,
+                            )
                     print("[android-session] stage:submit_search", flush=True)
                     await self._submit_search_with_timeout(
                         navigator=navigator,
