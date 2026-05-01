@@ -4745,10 +4745,23 @@ class AndroidYouTubeNavigator:
             title = desc.split(" - ", 1)[0].strip()
             if not title or self._is_placeholder_result_title(title):
                 continue
-            is_short = "play short" in lowered
             left, top, right, bottom = bounds
             raw_width = max(0, right - left)
             raw_height = max(0, bottom - top)
+            # YouTube labels regular video tiles with "play Short" suffix in
+            # content-desc; treat label as Shorts only when the card is also
+            # geometrically narrow (Shorts shelf cards are vertical, ~half-width
+            # of the screen with very tall thumbnails). Regular video tiles in
+            # the 2-column results grid land at ≥ 460px wide.
+            label_says_short = "play short" in lowered
+            is_short = label_says_short and raw_width < 360
+            if label_says_short and not is_short:
+                logger.info(
+                    "result_candidate:short_label_overridden_by_geometry title=%r bounds=%s width=%s",
+                    title[:80],
+                    bounds,
+                    raw_width,
+                )
             if not is_short and raw_height < 48 and raw_width < 160:
                 # YouTube sometimes exposes a "play video" accessibility node with
                 # a 1-4px height above the real result card. Tapping its normalized
