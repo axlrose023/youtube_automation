@@ -270,7 +270,7 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
                   key={t}
                   type="button"
                   onClick={() => addSuggestion(t)}
-                  className="inline-flex items-center h-[20px] px-1.5 rounded-full text-[10.5px] font-medium transition-colors"
+                  className="inline-flex items-center h-[15px] px-1.5 rounded-full text-[8px] font-medium transition-colors"
                   style={{ background: "var(--panel-soft)", color: "var(--ink-secondary)" }}
                   onMouseEnter={(e) => { e.currentTarget.style.background = "var(--brand-soft)"; e.currentTarget.style.color = "var(--brand-strong)"; }}
                   onMouseLeave={(e) => { e.currentTarget.style.background = "var(--panel-soft)"; e.currentTarget.style.color = "var(--ink-secondary)"; }}
