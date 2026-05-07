@@ -27,6 +27,7 @@ function Label({ children }: { children: React.ReactNode }) {
 export function SessionLauncher({ popularTopics }: { popularTopics?: string[] }) {
   const topicPool = popularTopics && popularTopics.length > 0 ? popularTopics : FALLBACK_TOPICS;
   const [duration, setDuration] = useState(30);
+  const [durationDraft, setDurationDraft] = useState("30");
   const [topics, setTopics] = useState([""]);
   const [proxyId, setProxyId] = useState("");
   const [proxies, setProxies] = useState<Proxy[]>([]);
@@ -130,7 +131,7 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
                     <button
                       key={m}
                       type="button"
-                      onClick={() => setDuration(m)}
+                      onClick={() => { setDuration(m); setDurationDraft(String(m)); }}
                       className="flex-1 h-full rounded-md text-[12px] font-semibold tabular-nums transition-colors"
                       style={sel
                         ? { background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)", color: "var(--ink)" }
@@ -145,10 +146,22 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
                 type="number"
                 min={1}
                 max={480}
-                value={duration}
+                value={durationDraft}
                 onChange={(e) => {
-                  const v = Number(e.target.value);
-                  if (!Number.isNaN(v) && v > 0) setDuration(v);
+                  const raw = e.target.value;
+                  setDurationDraft(raw);
+                  const v = Number(raw);
+                  if (raw !== "" && !Number.isNaN(v) && v > 0) setDuration(Math.min(480, v));
+                }}
+                onBlur={(e) => {
+                  e.currentTarget.style.boxShadow = "inset 0 0 0 1px var(--line)";
+                  if (durationDraft === "" || Number(durationDraft) <= 0) {
+                    setDurationDraft(String(duration));
+                  } else {
+                    const clamped = Math.min(480, Math.max(1, Number(durationDraft)));
+                    setDuration(clamped);
+                    setDurationDraft(String(clamped));
+                  }
                 }}
                 className="w-14 h-9 px-2 rounded-lg text-[12px] font-semibold tabular-nums text-center outline-none transition-shadow"
                 style={{
@@ -157,7 +170,6 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
                   boxShadow: "inset 0 0 0 1px var(--line)",
                 }}
                 onFocus={(e) => { e.currentTarget.style.boxShadow = "inset 0 0 0 1.5px var(--brand)"; }}
-                onBlur={(e) => { e.currentTarget.style.boxShadow = "inset 0 0 0 1px var(--line)"; }}
                 aria-label="Своя длительность в минутах"
               />
             </div>
