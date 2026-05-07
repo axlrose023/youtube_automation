@@ -1087,6 +1087,9 @@ class AndroidYouTubeProbeRunner:
         if await watcher.restore_primary_watch_surface():
             notes.append("post_ad_surface:restored")
         # Check for a second ad in the pod — do NOT skip it, let midroll loop handle it.
+        # Tap play before sampling — ad or video may be paused after returning from CTA.
+        if await watcher.ensure_playing():
+            notes.append("post_ad_playback:resume_before_sample")
         pre_skip_result = await watcher.watch_current(watch_seconds=4)
         pre_skip_samples = list(getattr(pre_skip_result, "samples", []) or [])
         if any(getattr(s, "ad_detected", False) for s in pre_skip_samples):
@@ -1912,6 +1915,18 @@ class AndroidYouTubeProbeRunner:
             )
             actions.append(f"force_stop:{_force_stop_pkg}")
             time.sleep(sleep_seconds)
+            # Bring YouTube back to foreground explicitly — force-stop leaves launcher visible
+            subprocess.run(
+                [
+                    adb_bin, "-s", adb_serial, "shell", "am", "start",
+                    "-n", "com.google.android.youtube/com.google.android.apps.youtube.app.WatchWhileActivity",
+                ],
+                capture_output=True,
+                check=False,
+                timeout=5,
+            )
+            actions.append("am_start_youtube")
+            time.sleep(sleep_seconds)
             foreground = cls._foreground_activity_sync(adb_serial)
             foreground_checks.append(foreground)
             logger.info(
@@ -1921,7 +1936,7 @@ class AndroidYouTubeProbeRunner:
 
         return {
             "closed": _is_youtube_foreground(foreground),
-            "reason": "force_stop_chrome" if "force_stop_chrome" in actions else "tap_close_fallback",
+            "reason": "force_stop_chrome" if any("force_stop" in a for a in actions) else "tap_close_fallback",
             "actions": actions,
             "initial_foreground": foreground_checks[0],
             "foreground": foreground,
@@ -3634,6 +3649,18 @@ class AndroidYouTubeProbeRunner:
         samples: list[object],
     ) -> float:
         base_cap = 55.0 if not clicked else 45.0
+        explicit_durations = [
+            float(duration)
+            for sample in samples
+            for duration in (getattr(sample, "ad_duration_seconds", None),)
+            if isinstance(duration, (int, float))
+        ]
+        if clicked and explicit_durations:
+            max_duration = max(explicit_durations)
+            if max_duration > 120.0:
+                return min(base_cap, 20.0)
+            if max_duration > 60.0:
+                return min(base_cap, 25.0)
         if remaining_source != "debug_xml":
             return base_cap
         if any(self._sample_has_explicit_ad_timing(sample) for sample in samples):
@@ -3994,7 +4021,14 @@ class AndroidYouTubeProbeRunner:
         ):
             return False
 
-        if current_progress >= previous_progress + 8.0:
+        if (
+            previous_duration is not None
+            and current_duration is not None
+            and abs(current_duration - previous_duration) <= 2.0
+            and current_progress >= previous_progress - 1.0
+        ):
+            return True
+        if current_progress >= previous_progress + 2.0:
             return True
         return False
 
@@ -4945,6 +4979,29 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             adb_serial=device.adb_serial if device is not None else None,
                         )
                         print("[android-session] topic:no_result_opened attempt=1", flush=True)
+                        # Topic-relevance fallback: tap any random organic
+                        # (non-sponsored, non-Short) video from the results
+                        # feed before we run the full retry/last-resort dance.
+                        # Cheaper than another search round and works even
+                        # when the topic-budget gate skips the retry.
+                        try:
+                            random_title = await asyncio.wait_for(
+                                navigator.tap_random_organic_video(
+                                    topic,
+                                    deadline=time.monotonic() + 20.0,
+                                ),
+                                timeout=25.0,
+                            )
+                        except Exception:
+                            random_title = None
+                        if random_title:
+                            opened_title = random_title
+                            topic_notes.append("random_organic_opened:first_attempt")
+                            print(
+                                f"[android-session] topic:random_organic_opened title={random_title}",
+                                flush=True,
+                            )
+                    if not opened_title:
                         unaccepted_surface_ad_captured = (
                             await self._probe_unaccepted_watch_surface_for_ad(
                                 driver=session.driver if session is not None else None,
@@ -5782,6 +5839,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                         _midroll_continuation_duplicate_rounds = 0
                         _midroll_duplicate_rounds = 0
                         _midroll_residual_return_rounds = 0
+                        _midroll_skip_recorder_until_new_ad = False
                         for _midroll_round in range(_max_midroll_rounds):
                             watch_gate_reason = self._engagement_gate_reason(
                                 list(getattr(watch_result, "samples", []) or [])
@@ -5799,6 +5857,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                             if (
                                 self._config.android_app.probe_screenrecord_enabled
                                 and recording_handle is None
+                                and not _midroll_skip_recorder_until_new_ad
                             ):
                                 (
                                     recorder,
@@ -5912,6 +5971,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                         f"midroll_duplicate_recording_discarded:round{_midroll_round + 1}:continuation"
                                     )
                                 _midroll_continuation_duplicate_rounds += 1
+                                _midroll_skip_recorder_until_new_ad = True
                                 topic_notes.append(
                                     f"midroll_ad_skip_duplicate:round{_midroll_round + 1}:continuation"
                                 )
@@ -6029,6 +6089,11 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     topic_notes.append(
                                         f"midroll_duplicate_recording_discarded:round{_midroll_round + 1}"
                                     )
+                                # Skip starting a recorder on subsequent rounds while the
+                                # same ad keeps repeating; reset once a new (non-duplicate)
+                                # ad arrives. Avoids 8x recorder churn observed for
+                                # back-to-back identical mid-rolls.
+                                _midroll_skip_recorder_until_new_ad = True
                                 _midroll_duplicate_rounds += 1
                                 topic_notes.append(f"midroll_ad_skip_duplicate:round{_midroll_round + 1}")
                                 print(
@@ -6071,6 +6136,7 @@ class AndroidYouTubeSessionRunner(AndroidYouTubeProbeRunner):
                                     break
                                 continue  # same ad identity — keep watching without clicking Skip Ad
                             _midroll_duplicate_rounds = 0
+                            _midroll_skip_recorder_until_new_ad = False
 
                             topic_notes.append(f"midroll_ad_catch:round{_midroll_round + 1}")
                             print(

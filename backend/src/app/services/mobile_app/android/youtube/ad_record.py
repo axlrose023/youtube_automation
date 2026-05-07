@@ -58,6 +58,8 @@ _GENERIC_VISIBLE_LINES = {
     "unmute",
     "settings",
     "my ad center",
+    "customize more of your ads",
+    "customize more of your ads (opens in new tab)",
     "visit site",
     "visit advertiser",
     "skip ad",
@@ -113,6 +115,8 @@ _YOUTUBE_SEARCH_NOISE_SUBSTRINGS = (
     "search youtube",
     "watch later",
     "customize and control",
+    "customize more of your ads",
+    "opens in new tab",
     "google chrome",
     "tap for more",
     "description.",
@@ -405,6 +409,8 @@ def build_watched_ad_record(
     sponsor_label = debug_metadata.get("sponsor_label") or _pick_last_str(
         sample.ad_sponsor_label for sample in ad_samples
     )
+    if sponsor_label and "my ad center" in sponsor_label.strip().casefold():
+        sponsor_label = None
     _pre_click_headline_raw = (
         ad_cta_result.pre_click_headline_text if ad_cta_result else None
     )
@@ -456,6 +462,8 @@ def build_watched_ad_record(
             "tap to refresh",
             "my ad center",
             "sponsored my ad center",
+            "customize more of your ads",
+            "customize more of your ads (opens in new tab)",
             "skip ad",
             "skip ads",
             "drag handle",
@@ -1024,6 +1032,8 @@ def _pick_heuristic_headline(
             "expand mini player",
             "tap to refresh",
             "my ad center",
+            "customize more of your ads",
+            "customize more of your ads (opens in new tab)",
             "in this video",
         }:
             continue

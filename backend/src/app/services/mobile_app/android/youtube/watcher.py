@@ -1266,8 +1266,6 @@ class AndroidYouTubeWatcher:
         for _ in range(attempts):
             if self._dismiss_system_dialog_sync():
                 time.sleep(0.8)
-            if self._current_page_has_ad_signal_sync():
-                return True
             playback_state = self._playback_control_state_sync()
             if playback_state == "playing":
                 return True
@@ -1276,6 +1274,9 @@ class AndroidYouTubeWatcher:
                     time.sleep(0.8)
                     if self._playback_control_state_sync() != "paused":
                         return True
+            elif self._current_page_has_ad_signal_sync():
+                # Ad UI visible but no explicit pause button — assume playing.
+                return True
             if self._nudge_playback_sync():
                 time.sleep(0.8)
                 playback_state = self._playback_control_state_sync()

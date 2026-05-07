@@ -64,15 +64,11 @@ class EmulationSessionService:
     async def start_emulation(self, request: StartEmulationRequest) -> StartEmulationResponse:
         session_id = str(uuid.uuid4())
         profile_id = normalize_profile_id(request.profile_id)
-        runner_kind = (request.runner or "desktop").lower()
+        requested_runner_kind = (request.runner or "android").lower()
+        runner_kind = "android"
 
         proxy_url: str | None = None
-        if runner_kind == "android":
-            if request.proxy_id is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="proxy_id is required for android runner",
-                )
+        if runner_kind == "android" and request.proxy_id is not None:
             proxy_url = await self._resolve_proxy_url(request.proxy_id)
             if proxy_url is None:
                 raise HTTPException(status_code=404, detail="Proxy not found")
@@ -86,6 +82,7 @@ class EmulationSessionService:
         await self._session_store.update(
             session_id,
             runner_kind=runner_kind,
+            requested_runner_kind=requested_runner_kind,
             proxy_id=str(request.proxy_id) if request.proxy_id else None,
         )
         await self._history_service.register_queued_session(
@@ -95,31 +92,19 @@ class EmulationSessionService:
         )
 
         try:
-            from app.tiq import ANDROID_EMULATION_QUEUE_NAME, EMULATION_QUEUE_NAME, broker
+            from app.tiq import ANDROID_EMULATION_QUEUE_NAME, android_emulation_dispatch_broker
 
-            if runner_kind == "android":
-                await AsyncKicker(
-                    broker=broker,
-                    task_name="android_emulation_task",
-                    labels={"queue_name": ANDROID_EMULATION_QUEUE_NAME},
-                ).kiq(
-                    session_id,
-                    request.duration_minutes,
-                    request.topics,
-                    proxy_url=proxy_url,
-                    headless=request.headless,
-                )
-            else:
-                await AsyncKicker(
-                    broker=broker,
-                    task_name="emulation_task",
-                    labels={"queue_name": EMULATION_QUEUE_NAME},
-                ).kiq(
-                    session_id,
-                    request.duration_minutes,
-                    request.topics,
-                    profile_id=profile_id,
-                )
+            await AsyncKicker(
+                broker=android_emulation_dispatch_broker,
+                task_name="android_emulation_task",
+                labels={"queue_name": ANDROID_EMULATION_QUEUE_NAME},
+            ).kiq(
+                session_id,
+                request.duration_minutes,
+                request.topics,
+                proxy_url=proxy_url,
+                headless=request.headless,
+            )
         except Exception as exc:
             await self._session_store.update(
                 session_id,
@@ -179,14 +164,14 @@ class EmulationSessionService:
             topics = data.get("topics", [])
             duration_minutes = data.get("duration_minutes", 60)
             profile_id = normalize_profile_id(data.get("profile_id"))
-            runner_kind = data.get("runner_kind", "desktop")
+            runner_kind = data.get("runner_kind", "android")
             proxy_id_str = data.get("proxy_id")
         else:
             assert history is not None
             topics = history.requested_topics or []
             duration_minutes = history.requested_duration_minutes
             profile_id = None
-            runner_kind = "desktop"
+            runner_kind = "android"
             proxy_id_str = None
 
         return await self.start_emulation(
@@ -208,7 +193,7 @@ class EmulationSessionService:
             profile_id = normalize_profile_id(data.get("profile_id"))
             elapsed_minutes = elapsed_minutes_from_live_payload(data)
             resume_seed = build_resume_seed_from_live_payload(data)
-            runner_kind = data.get("runner_kind", "desktop")
+            runner_kind = data.get("runner_kind", "android")
             proxy_id_str = data.get("proxy_id")
         else:
             assert history is not None
@@ -217,7 +202,7 @@ class EmulationSessionService:
             profile_id = None
             elapsed_minutes = elapsed_minutes_from_history(history)
             resume_seed = build_resume_seed_from_history(history)
-            runner_kind = "desktop"
+            runner_kind = "android"
             proxy_id_str = None
 
         remaining_minutes = self._calculate_remaining_minutes(

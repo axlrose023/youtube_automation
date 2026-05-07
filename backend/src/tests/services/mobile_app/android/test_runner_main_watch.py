@@ -1052,6 +1052,26 @@ def test_samples_have_video_ad_signal_accepts_video_ad_timer() -> None:
     ) is True
 
 
+def test_midroll_continuation_accepts_same_timer_small_progress_advance() -> None:
+    runner = AndroidYouTubeProbeRunner.__new__(AndroidYouTubeProbeRunner)
+    previous_ad = {
+        "ad_last_progress_seconds": 14.0,
+        "ad_duration_seconds": 25.0,
+    }
+    samples = [
+        SimpleNamespace(
+            ad_detected=True,
+            ad_progress_seconds=20.0,
+            ad_duration_seconds=25.0,
+        )
+    ]
+
+    assert runner._midroll_continues_previous_ad(
+        previous_ad=previous_ad,
+        extension_samples=samples,
+    ) is True
+
+
 def test_close_external_browser_surface_uses_back_for_custom_tab(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

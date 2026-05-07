@@ -17,17 +17,17 @@ class StartEmulationRequest(BaseModel):
         description="AdsPower profile id (desktop runner only)",
     )
     runner: str = Field(
-        default="desktop",
+        default="android",
         pattern=r"^(desktop|android)$",
-        description="Runner backend: desktop (browser + AdsPower) or android (emulator)",
+        description="Runner backend. Desktop is deprecated and currently mapped to android.",
     )
     proxy_id: UUID | None = Field(
         default=None,
-        description="Proxy id from /proxies table; required for android runner",
+        description="Optional proxy id from /proxies table for android runner",
     )
-    headless: bool | None = Field(
-        default=None,
-        description="Optional headless override for android runner",
+    headless: bool = Field(
+        default=False,
+        description="Run android emulator without a visible window",
     )
 
 
@@ -48,6 +48,8 @@ class EmulationWatchedVideo(BaseModel):
     position: int = 0
     action: str = "watch"
     title: str = ""
+    video_title: str | None = None
+    channel_name: str | None = None
     url: str = ""
     watched_seconds: float = 0
     target_seconds: float = 0
@@ -56,6 +58,15 @@ class EmulationWatchedVideo(BaseModel):
     search_keyword: str | None = None
     matched_topics: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
+    like_planned: bool = False
+    liked: bool = False
+    liked_video_title: str | None = None
+    liked_at: str | None = None
+    subscribe_planned: bool = False
+    subscribed: bool = False
+    subscribed_channel_name: str | None = None
+    subscribed_at: str | None = None
+    social_actions: list[str] = Field(default_factory=list)
     recorded_at: float = 0
 
 

@@ -68,6 +68,100 @@ def test_extract_result_candidates_marks_cta_backed_ad_card_as_sponsored(monkeyp
     assert [candidate.is_sponsored for candidate in candidates] == [True, False]
 
 
+def test_extract_result_candidates_marks_two_column_short_grid_as_short(monkeypatch) -> None:
+    page_source = """
+    <hierarchy>
+      <android.view.ViewGroup resource-id="com.google.android.youtube:id/results" bounds="[0,262][1080,2148]" />
+      <android.view.ViewGroup
+        content-desc="Using ChatGPT to turn $100 into $10,000 Day Trading - play Short"
+        bounds="[32,262][529,798]"
+      />
+      <android.view.ViewGroup
+        content-desc="Best AI Trading Bot for 2026 - play Short"
+        bounds="[551,262][1048,798]"
+      />
+    </hierarchy>
+    """
+
+    navigator = AndroidYouTubeNavigator.__new__(AndroidYouTubeNavigator)
+    navigator._driver = SimpleNamespace(page_source=page_source)
+    navigator._adb_serial = None
+    navigator._results_source_cache_xml = None
+    navigator._results_source_cache_at = 0.0
+
+    monkeypatch.setattr(
+        navigator,
+        "_preferred_results_page_source_sync",
+        lambda: page_source,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_extract_results_bounds_sync",
+        lambda: (0, 262, 1080, 2148),
+        raising=False,
+    )
+
+    candidates = navigator._extract_result_candidates_from_page_source_sync()
+
+    assert [candidate.bounds for candidate in candidates] == [
+        (32, 262, 529, 798),
+        (551, 262, 1048, 798),
+    ]
+    assert [candidate.is_short for candidate in candidates] == [True, True]
+
+
+def test_unreliable_results_pane_candidate_detects_full_results_container(
+    monkeypatch,
+) -> None:
+    navigator = AndroidYouTubeNavigator.__new__(AndroidYouTubeNavigator)
+    monkeypatch.setattr(
+        navigator,
+        "_extract_results_bounds_sync",
+        lambda: (0, 262, 1080, 2148),
+        raising=False,
+    )
+
+    assert navigator._is_unreliable_results_pane_candidate_sync((0, 262, 1080, 2148)) is True
+    assert navigator._is_unreliable_results_pane_candidate_sync((32, 262, 529, 798)) is False
+
+
+def test_extract_result_candidates_keeps_hashtag_shorts_marked_short(monkeypatch) -> None:
+    page_source = """
+    <hierarchy>
+      <android.view.ViewGroup resource-id="com.google.android.youtube:id/results" bounds="[0,262][1080,2148]" />
+      <android.view.ViewGroup
+        content-desc="Quantum AI Scam Exposed! #shorts, 3.1 thousand views, ISEA - play Short"
+        bounds="[551,419][1048,1304]"
+      />
+    </hierarchy>
+    """
+
+    navigator = AndroidYouTubeNavigator.__new__(AndroidYouTubeNavigator)
+    navigator._driver = SimpleNamespace(page_source=page_source)
+    navigator._adb_serial = None
+    navigator._results_source_cache_xml = None
+    navigator._results_source_cache_at = 0.0
+
+    monkeypatch.setattr(
+        navigator,
+        "_preferred_results_page_source_sync",
+        lambda: page_source,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        navigator,
+        "_extract_results_bounds_sync",
+        lambda: (0, 262, 1080, 2148),
+        raising=False,
+    )
+
+    candidates = navigator._extract_result_candidates_from_page_source_sync()
+
+    assert len(candidates) == 1
+    assert candidates[0].is_short is True
+
+
 def test_tap_first_playable_candidate_below_sponsor_uses_desc_hotspot(monkeypatch) -> None:
     page_source = """
     <hierarchy>

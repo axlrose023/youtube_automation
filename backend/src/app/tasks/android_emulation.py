@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import time
 import traceback
 import uuid
+from pathlib import Path
 
 from dishka import FromDishka
 from dishka.integrations.taskiq import inject
@@ -14,6 +16,7 @@ from app.services.emulation.core.ad_analytics import build_ads_analytics
 from app.services.emulation.config import ORCHESTRATION_RUN_LOCK_TTL_SECONDS
 from app.services.emulation.persistence import EmulationPersistenceService
 from app.services.emulation.session.store import EmulationSessionStore, merge_live_watched_ads
+from app.services.emulation.standalone_mapper import build_standalone_live_payload
 from app.settings import Config
 from app.tiq import broker
 
@@ -26,6 +29,30 @@ _ANDROID_HEARTBEAT_SECONDS = 5
 def _android_device_lock_id(config: Config) -> str:
     avd_name = (config.android_app.default_avd_name or "").strip() or "default"
     return f"android-device:{avd_name}"
+
+
+def _project_root() -> Path:
+    current = Path(__file__).resolve()
+    for candidate in (*current.parents, Path.cwd()):
+        if (candidate / "standalone_topic_runner").is_dir():
+            return candidate
+    return current.parents[3]
+
+
+def _ensure_project_root_on_path() -> None:
+    project_root = str(_project_root())
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+
+
+def _standalone_run_dir(config: Config, session_id: str) -> Path:
+    run_ts = time.strftime("%Y%m%d_%H%M%S")
+    return (
+        config.storage.base_path
+        / config.android_app.session_artifacts_subdir
+        / session_id
+        / f"run_{run_ts}"
+    )
 
 
 async def _android_stop_watcher(
@@ -87,9 +114,11 @@ async def android_emulation_task(
     proxy_url: str | None = None,
     headless: bool | None = None,
 ) -> dict:
-    from app.services.mobile_app.android.runner import AndroidYouTubeSessionRunner
-    from app.services.mobile_app.android.result_payloads import (
-        build_topic_watched_video_payload,
+    _ensure_project_root_on_path()
+    from standalone_topic_runner.runner import (
+        StandaloneProgressEvent,
+        StandaloneRunOptions,
+        run_standalone_session,
     )
 
     run_holder = f"{session_id}:{uuid.uuid4().hex}"
@@ -189,41 +218,73 @@ async def android_emulation_task(
             )
         )
 
-        async def on_progress(**kwargs: object) -> None:
+        async def on_progress(event: StandaloneProgressEvent) -> None:
             nonlocal _last_persisted_ads_count
-            event = kwargs.pop("event", None)
+            mapped = build_standalone_live_payload(
+                topic_records=event.topics,
+                run_dir=event.run_dir,
+                storage_base=config.storage.base_path,
+                recorded_at=time.time(),
+            )
+            watched_ads = mapped.watched_ads
+            current_payload = await session_store.get(session_id) or {}
+            merged_ads = merge_live_watched_ads(
+                current_ads=current_payload.get("watched_ads") or [],
+                next_ads=watched_ads,
+            )
 
-            ads = kwargs.get("watched_ads")
-            if isinstance(ads, list):
-                current_payload = await session_store.get(session_id) or {}
-                merged_ads = merge_live_watched_ads(
-                    current_ads=current_payload.get("watched_ads") or [],
-                    next_ads=ads,
-                )
-                kwargs["watched_ads"] = merged_ads
-                kwargs["watched_ads_count"] = len(merged_ads)
-                kwargs["watched_ads_analytics"] = build_ads_analytics(merged_ads)
+            current_watch = current_payload.get("current_watch")
+            if event.event == "video_opened" and event.topic_record is not None:
+                opened_videos = getattr(event.topic_record, "opened_videos", []) or []
+                latest_video = opened_videos[-1] if opened_videos else None
+                if isinstance(latest_video, dict):
+                    current_watch = {
+                        "action": "watch",
+                        "title": latest_video.get("title") or event.topic or "",
+                        "url": "",
+                        "started_at": time.time(),
+                        "watched_seconds": 0.0,
+                        "target_seconds": None,
+                        "search_keyword": event.topic,
+                        "matched_topics": [event.topic] if event.topic else [],
+                        "keywords": [],
+                    }
+            elif event.event == "topic_finished":
+                current_watch = None
 
             # Always sync to Redis for SSE
-            await session_store.update(session_id, **kwargs)
+            await session_store.update(
+                session_id,
+                current_topic=event.topic,
+                current_watch=current_watch,
+                topics_searched=mapped.topics_searched,
+                watched_ads=merged_ads,
+                watched_ads_count=len(merged_ads),
+                watched_ads_analytics=build_ads_analytics(merged_ads),
+                watched_videos=mapped.watched_videos,
+                watched_videos_count=len(mapped.watched_videos),
+                videos_watched=sum(
+                    1 for video in mapped.watched_videos if video.get("completed")
+                ),
+                total_duration_seconds=int(round(mapped.total_watch_seconds)),
+                mode="android",
+            )
 
-            # On ad_captured — persist new captures and queue analysis immediately.
-            # On ad_updated — persist refreshed capture media (for example landing_dir)
-            # without waiting for the session to finish.
-            if event in {"ad_captured", "ad_updated"}:
-                ads = kwargs.get("watched_ads") or []
-                if len(ads) > _last_persisted_ads_count:
-                    new_ads_count = len(ads) - _last_persisted_ads_count
+            # Persist newly surfaced standalone captures during the run so SSE
+            # and history/captures stay useful even before final completion.
+            if event.event in {"ad_captured", "banner_captured"}:
+                if len(merged_ads) > _last_persisted_ads_count:
+                    new_ads_count = len(merged_ads) - _last_persisted_ads_count
                     try:
                         await persistence.persist_ad_captures(
                             session_id=session_id,
-                            watched_ads=ads,
+                            watched_ads=merged_ads,
                             from_index=_last_persisted_ads_count,
                         )
-                        _last_persisted_ads_count = len(ads)
+                        _last_persisted_ads_count = len(merged_ads)
                     except Exception:
                         pass
-                    if event == "ad_captured":
+                    if event.event == "ad_captured":
                         try:
                             from app.services.emulation.workflow.progress import queue_ad_analysis
 
@@ -235,75 +296,87 @@ async def android_emulation_task(
                             )
                         except Exception:
                             pass
-                elif event == "ad_updated" and ads:
-                    try:
-                        await persistence.persist_ad_captures(
-                            session_id=session_id,
-                            watched_ads=ads,
-                            from_index=0,
-                        )
-                    except Exception:
-                        pass
 
         try:
-            runner = AndroidYouTubeSessionRunner(config)
-            result = await runner.run(
-                topics=topics,
-                duration_minutes=duration_minutes,
-                proxy_url=proxy_url,
-                headless=headless,
-                on_progress=on_progress,
-                stop_event=runner_stop_event,
+            run_dir = _standalone_run_dir(config, session_id)
+            result = await run_standalone_session(
+                StandaloneRunOptions(
+                    topics=topics,
+                    max_watch_seconds=float(duration_minutes * 60),
+                    scroll_rounds=20,
+                    ad_record_seconds=30.0,
+                    avd_name=config.android_app.default_avd_name,
+                    manage_appium=config.android_app.manage_appium_server,
+                    headless=headless,
+                    proxy_url=proxy_url,
+                    run_dir=run_dir,
+                    android_config=config.android_app,
+                    stop_event=runner_stop_event,
+                    on_progress=on_progress,
+                )
             )
+
+            mapped = build_standalone_live_payload(
+                topic_records=result.topics,
+                run_dir=result.run_dir,
+                storage_base=config.storage.base_path,
+                recorded_at=time.time(),
+            )
+            watched_ads = mapped.watched_ads
+            watched_videos = mapped.watched_videos
+            topics_searched = mapped.topics_searched
+            completed_videos = sum(
+                1 for video in watched_videos if video.get("completed")
+            )
+            total_watch_seconds = int(round(mapped.total_watch_seconds))
 
             if runner_stop_event.is_set():
                 await session_store.update(
                     session_id,
                     status=SessionStatus.STOPPED,
                     finished_at=time.time(),
+                    current_watch=None,
+                    watched_ads=watched_ads,
+                    watched_ads_count=len(watched_ads),
+                    watched_ads_analytics=build_ads_analytics(watched_ads),
+                    topics_searched=topics_searched,
+                    total_duration_seconds=total_watch_seconds,
+                    videos_watched=completed_videos,
+                    watched_videos_count=len(watched_videos),
+                    watched_videos=watched_videos,
+                    bytes_downloaded=0,
+                    mode="android",
                     error="Stopped by user",
                     queue_reason=None,
                 )
                 live_payload = await session_store.get(session_id) or {}
                 try:
-                    await persistence.persist_history_failed(
+                    await persistence.persist_ad_captures(
                         session_id=session_id,
+                        watched_ads=watched_ads,
+                        from_index=0,
+                        prune_missing=True,
+                    )
+                except Exception:
+                    pass
+                try:
+                    await persistence.persist_history(
+                        session_id=session_id,
+                        status=SessionStatus.STOPPED,
                         duration_minutes=duration_minutes,
                         topics=topics,
-                        error="Stopped by user",
+                        bytes_downloaded=0,
+                        topics_searched=topics_searched,
+                        videos_watched=completed_videos,
+                        watched_videos=watched_videos,
+                        watched_ads=watched_ads,
+                        total_duration_seconds=total_watch_seconds,
                         live_payload=live_payload,
+                        error="Stopped by user",
                     )
                 except Exception:
                     pass
                 return {"status": SessionStatus.STOPPED, "session_id": session_id}
-
-            raw_ads = result.watched_ads or []
-            watched_ads = [
-                {**ad, "position": idx + 1}
-                for idx, ad in enumerate(raw_ads)
-            ]
-            # Dedupe topics_searched while preserving search order — over a
-            # multi-hour run the same topic gets searched many times as the
-            # rotation cycles, and a 65-entry list bloats the UI/history.
-            _seen_topics: set[str] = set()
-            topics_searched: list[str] = []
-            for _tr in result.topic_results:
-                if _tr.topic and _tr.topic not in _seen_topics:
-                    _seen_topics.add(_tr.topic)
-                    topics_searched.append(_tr.topic)
-            verified_count = sum(1 for tr in result.topic_results if tr.watch_verified)
-            _meaningful_results = [
-                tr for tr in result.topic_results
-                if (tr.watch_seconds or 0) > 0 or tr.watch_verified
-            ]
-            watched_videos = [
-                build_topic_watched_video_payload(
-                    tr,
-                    position=idx + 1,
-                    recorded_at=time.time(),
-                )
-                for idx, tr in enumerate(_meaningful_results)
-            ]
 
             await session_store.update(
                 session_id,
@@ -312,18 +385,17 @@ async def android_emulation_task(
                 current_watch=None,
                 watched_ads=watched_ads,
                 watched_ads_count=len(watched_ads),
+                watched_ads_analytics=build_ads_analytics(watched_ads),
                 topics_searched=topics_searched,
-                total_duration_seconds=result.elapsed_seconds,
-                videos_watched=len(watched_videos),
+                total_duration_seconds=total_watch_seconds,
+                videos_watched=completed_videos,
                 watched_videos_count=len(watched_videos),
                 watched_videos=watched_videos,
-                bytes_downloaded=result.bytes_downloaded,
+                bytes_downloaded=0,
                 mode="android",
             )
 
             live_payload = await session_store.get(session_id) or {}
-            # Re-sync captures from the final Android result after background
-            # landing scraping / analysis / dedup so DB rows reflect the final state.
             try:
                 await persistence.persist_ad_captures(
                     session_id=session_id,
@@ -338,18 +410,17 @@ async def android_emulation_task(
                     session_id=session_id,
                     duration_minutes=duration_minutes,
                     topics=topics,
-                    bytes_downloaded=result.bytes_downloaded,
+                    bytes_downloaded=0,
                     topics_searched=topics_searched,
-                    videos_watched=verified_count,
-                    watched_videos=watched_videos,
-                    watched_ads=watched_ads,
-                    total_duration_seconds=result.elapsed_seconds,
-                    live_payload=live_payload,
-                )
+                    videos_watched=completed_videos,
+                watched_videos=watched_videos,
+                watched_ads=watched_ads,
+                total_duration_seconds=total_watch_seconds,
+                live_payload=live_payload,
+            )
             except Exception:
                 pass
 
-            # Final analysis pass for any remaining ads
             if watched_ads:
                 try:
                     from app.services.emulation.workflow.progress import queue_ad_analysis

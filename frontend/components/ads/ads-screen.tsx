@@ -142,11 +142,11 @@ function AdThumbnail({ ad }: { ad: AdEntry }) {
 
   if (shotUrl && !failed) {
     return (
-      <div className="relative w-full overflow-hidden rounded-xl bg-[var(--panel-soft)]" style={{ aspectRatio: "16/9" }}>
+      <div className="relative w-full overflow-hidden rounded-xl bg-[var(--panel-soft)]">
         <img
           src={shotUrl}
           alt=""
-          className="h-full w-full object-cover"
+          className="w-full object-contain"
           loading="lazy"
           onError={() => setFailed(true)}
         />
@@ -294,7 +294,7 @@ function VideoPlayerModal({ videoFile }: { videoFile: string | null | undefined 
   const blobUrl = useProtectedBlobUrl(videoFile);
   if (!videoFile) return null;
   return blobUrl
-    ? <video src={blobUrl} controls className="w-full rounded-xl" style={{ maxHeight: 360 }} />
+    ? <video src={blobUrl} controls className="max-h-[70vh] w-full rounded-xl bg-black object-contain" />
     : <div className="flex h-40 items-center justify-center rounded-xl bg-[var(--panel-soft)] text-sm text-[var(--muted)]"><Film size={20} className="mr-2" /> Загрузка…</div>;
 }
 
@@ -356,7 +356,7 @@ function AdModal({ ad, onClose }: { ad: AdEntry; onClose: () => void }) {
                     const url = buildMediaPath(p.file_path);
                     return url ? (
                       <a key={p.offset_ms} href={url} target="_blank" rel="noreferrer" className="shrink-0">
-                        <img src={url} alt="" className="h-24 w-40 rounded-lg object-cover border border-[var(--line)] hover:opacity-80 transition" />
+                        <img src={url} alt="" className="h-32 w-56 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] object-contain transition hover:opacity-80" />
                       </a>
                     ) : null;
                   })}

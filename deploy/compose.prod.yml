@@ -77,14 +77,14 @@ services:
 
   worker_browser:
     build:
-      context: ../backend
-      dockerfile: Dockerfile.emulation
+      context: ..
+      dockerfile: deploy/Dockerfile.emulation.standalone
     restart: unless-stopped
     env_file:
       - ./backend.env
     environment:
       UV_CACHE_DIR: /tmp/uv-cache
-      TASKIQ_QUEUE_NAME: ${TASKIQ_EMULATION_QUEUE_NAME:-taskiq_emulation}
+      TASKIQ_QUEUE_NAME: ${TASKIQ_EMULATION_ANDROID_QUEUE_NAME:-taskiq_emulation_android}
     command: ["uv", "run", "taskiq", "worker", "app.tiq:broker", "-w", "1", "app.tasks"]
     volumes:
       - ../artifacts:/app/artifacts

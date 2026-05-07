@@ -41,6 +41,15 @@ analysis_dispatch_broker = ListQueueBroker(
 )
 analysis_dispatch_broker.with_result_backend(redis_async_result)
 
+# Dedicated broker for dispatching Android emulation tasks. The API process
+# does not listen on this queue itself, but it must enqueue directly to the
+# Android worker queue instead of relying on task labels for routing.
+android_emulation_dispatch_broker = ListQueueBroker(
+    url=config.redis_url,
+    queue_name=ANDROID_EMULATION_QUEUE_NAME,
+)
+android_emulation_dispatch_broker.with_result_backend(redis_async_result)
+
 dynamic_schedule_source = ListRedisScheduleSource(
     url=config.redis_url,
     prefix=DYNAMIC_SCHEDULE_PREFIX,

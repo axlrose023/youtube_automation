@@ -334,6 +334,29 @@ class AndroidYouTubeNavigator:
         await anyio.to_thread.run_sync(_run, abandon_on_cancel=True)
         return result[0]
 
+    async def tap_random_organic_video(
+        self,
+        query: str | None = None,
+        *,
+        deadline: float | None = None,
+    ) -> str | None:
+        """Pick any organic (non-sponsored, non-Short) video from the results
+        feed and tap it. Title relevance to the query is ignored — purpose is
+        to ensure SOME watch surface opens for the topic.
+        """
+        hard_deadline = deadline if deadline is not None else float("inf")
+        result: list[str | None] = [None]
+
+        def _run() -> None:
+            generation = self._begin_sync_operation(hard_deadline)
+            try:
+                result[0] = self._tap_random_organic_video_sync(query)
+            finally:
+                self._finish_sync_operation(generation)
+
+        await anyio.to_thread.run_sync(_run, abandon_on_cancel=True)
+        return result[0]
+
     async def has_query_ready_surface(self, query: str) -> bool:
         return await anyio.to_thread.run_sync(
             self._has_query_ready_surface_sync,
@@ -770,6 +793,15 @@ class AndroidYouTubeNavigator:
         if not self._is_browsing_surface_sync():
             return
         self._restore_results_surface_sync(query)
+
+    def _recover_after_rejected_watch_result_sync(self, query: str | None) -> None:
+        if query:
+            self._recover_results_surface_sync(query)
+            return
+        self._press_back_sync()
+        time.sleep(1.0)
+        self._dismiss_possible_dialogs_sync()
+        self._dismiss_miniplayer_on_results_sync()
 
     def _restore_results_surface_sync(
         self,
@@ -1805,6 +1837,93 @@ class AndroidYouTubeNavigator:
                 return candidate.title
         return None
 
+    def _tap_random_organic_video_sync(self, query: str | None) -> str | None:
+        """Pick a random organic (non-sponsored, non-Short) candidate from the
+        results feed and tap on its raw bounds (geometry as reported by
+        UiAutomator, not normalized to the whole results pane).
+
+        Logic intentionally simple: do not check title/topic relevance, do not
+        navigate sponsor cards, do not retry per-candidate hotspots. The point
+        is to guarantee SOME watch surface opens for the topic when relevance
+        scoring or sponsor avoidance keeps rejecting valid videos.
+        """
+        import random  # noqa: PLC0415
+
+        for scroll_attempt in range(3):
+            self._check_sync_deadline()
+            raw_candidates = self._extract_result_candidates_from_page_source_sync()
+            organic = [
+                c for c in raw_candidates
+                if not c.is_sponsored and not c.is_short
+                and not self._is_unreliable_results_pane_candidate_sync(c.bounds)
+                and not self._is_partial_grid_card_candidate_sync(c.bounds)
+            ]
+            logger.info(
+                "tap_random_organic: query=%s scroll=%s total=%s organic=%s",
+                query,
+                scroll_attempt,
+                len(raw_candidates),
+                len(organic),
+            )
+            if not organic:
+                self._scroll_results_feed_once_sync()
+                time.sleep(0.8)
+                continue
+
+            random.shuffle(organic)
+            for candidate in organic:
+                self._check_sync_deadline()
+                # Tap raw bounds of the card itself (not the normalized
+                # results-pane area). Center horizontally, slightly above
+                # the vertical midpoint so we hit the thumbnail rather than
+                # the title text below.
+                left, top, right, bottom = candidate.bounds
+                width = max(1, right - left)
+                height = max(1, bottom - top)
+                tap_x = left + width // 2
+                tap_y = top + int(height * 0.40)
+                # Skip cards that are off-screen or absurdly small.
+                if height < 120 or width < 200:
+                    continue
+                logger.info(
+                    "tap_random_organic_attempt: title=%r bounds=%s point=(%s,%s)",
+                    candidate.title[:80],
+                    candidate.bounds,
+                    tap_x,
+                    tap_y,
+                )
+                self._last_tapped_result_title = candidate.title
+                self._last_tapped_result_is_short = False
+                if not self._tap_via_adb_sync(tap_x, tap_y):
+                    continue
+                opened = self._await_watch_open_after_tap_sync(
+                    query=query,
+                    timeout_seconds=6.5,
+                )
+                logger.info(
+                    "tap_random_organic_result: title=%r opened=%s",
+                    candidate.title[:80],
+                    opened,
+                )
+                if opened:
+                    self._dismiss_possible_dialogs_sync(allow_heavy_adb=True)
+                    self._dismiss_watch_engagement_panel_sync()
+                    if self._reject_reel_watch_surface_sync():
+                        self._reject_result_title_sync(candidate.title)
+                        self._recover_after_rejected_watch_result_sync(query)
+                        time.sleep(0.8)
+                        continue
+                    return candidate.title
+                if self._reject_reel_watch_surface_sync():
+                    self._reject_result_title_sync(candidate.title)
+                    self._recover_after_rejected_watch_result_sync(query)
+                    time.sleep(0.8)
+                    continue
+            self._scroll_results_feed_once_sync()
+            time.sleep(0.8)
+
+        return None
+
     def _tap_first_playable_candidate_below_sponsor_sync(self, query: str) -> str | None:
         logger.info("sponsor_fallback_enter: query=%s", query)
         cta_started_at = time.monotonic()
@@ -1884,6 +2003,10 @@ class AndroidYouTubeNavigator:
             seen.add(key)
             if candidate.is_short or candidate.is_sponsored:
                 continue
+            if self._is_unreliable_results_pane_candidate_sync(candidate.bounds):
+                continue
+            if self._is_partial_grid_card_candidate_sync(candidate.bounds):
+                continue
             if self._should_skip_result_title_for_query_sync(candidate.title, query):
                 continue
             title_overlap = self._titles_overlap_sync(candidate.title, query)
@@ -1906,6 +2029,10 @@ class AndroidYouTubeNavigator:
                     continue
                 seen_relaxed.add(key)
                 if candidate.is_short or candidate.is_sponsored:
+                    continue
+                if self._is_unreliable_results_pane_candidate_sync(candidate.bounds):
+                    continue
+                if self._is_partial_grid_card_candidate_sync(candidate.bounds):
                     continue
                 if self._should_skip_result_title_for_query_sync(candidate.title, query):
                     continue
@@ -1940,11 +2067,22 @@ class AndroidYouTubeNavigator:
                 seen_surface.add(key)
                 if candidate.is_sponsored:
                     continue
+                if self._is_unreliable_results_pane_candidate_sync(candidate.bounds):
+                    continue
+                if self._is_partial_grid_card_candidate_sync(candidate.bounds):
+                    continue
                 if self._should_skip_result_title_for_query_sync(candidate.title, query):
                     continue
                 surface_candidates.append(candidate)
             if surface_candidates:
-                surface_candidates.sort(key=lambda item: (item.is_short, item.bounds[1], item.bounds[0]))
+                surface_candidates.sort(
+                    key=lambda item: (
+                        item.is_short,
+                        item.bounds[1],
+                        self._candidate_bounds_area_sync(item.bounds),
+                        item.bounds[0],
+                    )
+                )
                 logger.info(
                     "sponsor_fallback_surface_order: query=%s candidates=%s",
                     query,
@@ -1981,6 +2119,10 @@ class AndroidYouTubeNavigator:
                 seen_scroll.add(key)
                 if candidate.is_short or candidate.is_sponsored:
                     continue
+                if self._is_unreliable_results_pane_candidate_sync(candidate.bounds):
+                    continue
+                if self._is_partial_grid_card_candidate_sync(candidate.bounds):
+                    continue
                 if self._should_skip_result_title_for_query_sync(candidate.title, query):
                     continue
                 title_overlap = self._titles_overlap_sync(candidate.title, query)
@@ -2016,6 +2158,10 @@ class AndroidYouTubeNavigator:
                     continue
                 if candidate.is_sponsored:
                     continue
+                if self._is_unreliable_results_pane_candidate_sync(candidate.bounds):
+                    continue
+                if self._is_partial_grid_card_candidate_sync(candidate.bounds):
+                    continue
                 any_search_candidates.append(candidate)
             if any_search_candidates:
                 any_search_candidates.sort(
@@ -2023,6 +2169,7 @@ class AndroidYouTubeNavigator:
                         item.is_short,
                         item.is_sponsored,
                         item.bounds[1],
+                        self._candidate_bounds_area_sync(item.bounds),
                         item.bounds[0],
                     )
                 )
@@ -2060,6 +2207,7 @@ class AndroidYouTubeNavigator:
             key=lambda item: (
                 -self._score_result_title_for_query_sync(item.title, query),
                 item.bounds[1],
+                self._candidate_bounds_area_sync(item.bounds),
                 item.bounds[0],
             )
         )
@@ -2080,7 +2228,7 @@ class AndroidYouTubeNavigator:
                 query,
                 prefer_center_first=relaxed_cutoff_used and not candidate.is_sponsored,
                 allow_offtopic_result=True,
-                allow_reel_result=relaxed_cutoff_used and candidate.is_short,
+                allow_reel_result=False,
             )
             if opened_title is not None:
                 return opened_title
@@ -2176,9 +2324,21 @@ class AndroidYouTubeNavigator:
                     )
                     return candidate.title
                 if self._reject_reel_watch_surface_sync():
-                    self._recover_results_surface_sync(query)
+                    self._reject_result_title_sync(candidate.title)
+                    self._update_last_open_result_diagnostics_sync(
+                        reason="watch_opened_reel_rejected",
+                        watch_opened=True,
+                        watch_surface=True,
+                        candidate_title=candidate.title,
+                        resolved_title=candidate.title,
+                    )
+                    logger.info(
+                        "sponsor_fallback_reject_reel_candidate: title=%s",
+                        candidate.title,
+                    )
+                    self._recover_after_rejected_watch_result_sync(query)
                     time.sleep(0.8)
-                    continue
+                    return None
                 resolved_title = (
                     self._extract_current_watch_title_for_query_sync(query)
                     or self._extract_current_watch_title_sync()
@@ -4186,6 +4346,8 @@ class AndroidYouTubeNavigator:
             element.click()
             if self._await_watch_open_after_tap_sync(query=query, timeout_seconds=4.0):
                 if self._reject_reel_watch_surface_sync():
+                    self._reject_result_title_sync(title)
+                    self._recover_after_rejected_watch_result_sync(query)
                     return False
                 self._update_last_open_result_diagnostics_sync(
                     reason="watch_opened",
@@ -4212,6 +4374,8 @@ class AndroidYouTubeNavigator:
             )
             return False
         if self._reject_reel_watch_surface_sync():
+            self._reject_result_title_sync(title)
+            self._recover_after_rejected_watch_result_sync(query)
             return False
         self._update_last_open_result_diagnostics_sync(
             reason="watch_opened",
@@ -4358,6 +4522,20 @@ class AndroidYouTubeNavigator:
 
     def _tap_result_candidate_sync(self, candidate: NativeResultCandidate, query: str | None = None) -> bool:
         self._check_sync_deadline()
+        if self._is_unreliable_results_pane_candidate_sync(candidate.bounds):
+            self._update_last_open_result_diagnostics_sync(
+                reason="tap_skipped_unreliable_container_bounds",
+                candidate_title=candidate.title,
+                candidate_bounds=candidate.bounds,
+            )
+            return False
+        if self._is_partial_grid_card_candidate_sync(candidate.bounds):
+            self._update_last_open_result_diagnostics_sync(
+                reason="tap_skipped_partial_grid_card",
+                candidate_title=candidate.title,
+                candidate_bounds=candidate.bounds,
+            )
+            return False
         self._last_tapped_result_title = candidate.title
         self._last_tapped_result_is_short = candidate.is_short
         left, top, right, bottom = candidate.bounds
@@ -4685,7 +4863,11 @@ class AndroidYouTubeNavigator:
         width = max(1, right - left)
         height = max(1, bottom - top)
         min_useful_height = 96
-        min_useful_width = int((results_right - results_left) * 0.55)
+        results_width = max(1, results_right - results_left)
+        # YouTube often renders search results as a two-column grid on tablets.
+        # Those real video cards are ~45-50% of the results width; expanding
+        # them to the whole results pane makes taps land between cards.
+        min_useful_width = max(320, int(results_width * 0.34))
         if height >= min_useful_height and width >= min_useful_width:
             return bounds
         return (
@@ -4694,6 +4876,29 @@ class AndroidYouTubeNavigator:
             results_right,
             min(results_bottom, bottom + max(220, height * 18)),
         )
+
+    @staticmethod
+    def _candidate_bounds_area_sync(bounds: tuple[int, int, int, int]) -> int:
+        return max(0, bounds[2] - bounds[0]) * max(0, bounds[3] - bounds[1])
+
+    def _is_unreliable_results_pane_candidate_sync(
+        self,
+        bounds: tuple[int, int, int, int],
+    ) -> bool:
+        results_bounds = self._extract_results_bounds_sync()
+        if results_bounds is None:
+            return False
+        width = max(1, bounds[2] - bounds[0])
+        height = max(1, bounds[3] - bounds[1])
+        results_width = max(1, results_bounds[2] - results_bounds[0])
+        results_height = max(1, results_bounds[3] - results_bounds[1])
+        return width >= int(results_width * 0.88) and height >= int(results_height * 0.72)
+
+    @staticmethod
+    def _is_partial_grid_card_candidate_sync(bounds: tuple[int, int, int, int]) -> bool:
+        width = max(1, bounds[2] - bounds[0])
+        height = max(1, bounds[3] - bounds[1])
+        return width < 600 and height < 420
 
     def _extract_short_result_bounds_sync(self) -> list[tuple[int, int, int, int]]:
         return [
@@ -4748,16 +4953,15 @@ class AndroidYouTubeNavigator:
             left, top, right, bottom = bounds
             raw_width = max(0, right - left)
             raw_height = max(0, bottom - top)
-            # YouTube labels regular video tiles with "play Short" suffix in
-            # content-desc; treat label as Shorts only when the card is also
-            # geometrically narrow (Shorts shelf cards are vertical, ~half-width
-            # of the screen with very tall thumbnails). Regular video tiles in
-            # the 2-column results grid land at ≥ 460px wide.
+            # If YouTube exposes the accessibility action as "play Short", treat
+            # it as Shorts regardless of tablet grid geometry. The Shorts grid can
+            # also be half-width on API 35 emulator, and tapping those cards
+            # repeatedly traps navigation in Shorts.
             label_says_short = "play short" in lowered
-            is_short = label_says_short and raw_width < 360
-            if label_says_short and not is_short:
+            is_short = label_says_short
+            if is_short:
                 logger.info(
-                    "result_candidate:short_label_overridden_by_geometry title=%r bounds=%s width=%s",
+                    "result_candidate:short_label_detected title=%r bounds=%s width=%s",
                     title[:80],
                     bounds,
                     raw_width,
@@ -4933,6 +5137,13 @@ class AndroidYouTubeNavigator:
 
         if reel_surface:
             return None
+        if player_bottom is None and metadata_top is None:
+            # No watch player or metadata layout in the source — surface hasn't
+            # transitioned yet. Walking the whole tree here picks up titles from
+            # the underlying results feed and returns the wrong video as
+            # "current watch". Bail and let the caller retry once the surface
+            # settles.
+            return None
 
         candidates: list[tuple[int, str]] = []
         for node in root.iter():
@@ -4957,6 +5168,11 @@ class AndroidYouTubeNavigator:
                 values.append(text)
             for value in values:
                 if not value or self._is_placeholder_result_title(value):
+                    continue
+                if value.strip().casefold() == query.strip().casefold():
+                    # A node containing the literal query text is a search-bar/
+                    # header echo on the watch surface, not a real video title.
+                    # Real titles overlap with the query but include extra words.
                     continue
                 if not self._titles_overlap_sync(value, query):
                     continue
@@ -5397,6 +5613,7 @@ class AndroidYouTubeNavigator:
             if (
                 candidate.is_short
                 or candidate.is_sponsored
+                or self._is_unreliable_results_pane_candidate_sync(candidate.bounds)
                 or self._should_skip_result_title_for_query_sync(candidate.title, query)
             ):
                 continue
@@ -5410,6 +5627,7 @@ class AndroidYouTubeNavigator:
             key=lambda item: (
                 -self._score_result_title_for_query_sync(item.title, query),
                 item.bounds[1],
+                self._candidate_bounds_area_sync(item.bounds),
                 item.bounds[0],
             )
         )

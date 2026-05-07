@@ -445,8 +445,9 @@ function CaptureMediaPreview({
   totalSegments: number;
 }) {
   const videoUrl = useProtectedMediaBlobUrl(capture.video_file);
-  const firstScreenshot = capture.screenshot_paths[0]?.file_path;
-  const screenshotUrl = useProtectedMediaBlobUrl(firstScreenshot);
+  const [shotIndex, setShotIndex] = useState(0);
+  const activeScreenshot = capture.screenshot_paths[shotIndex]?.file_path;
+  const screenshotUrl = useProtectedMediaBlobUrl(activeScreenshot);
   const landingFileName = `${getBaseName(capture.landing_dir) || "landing"}.html`;
   const canDownloadLanding = Boolean(capture.landing_dir && capture.landing_status === "completed");
 
@@ -472,7 +473,7 @@ function CaptureMediaPreview({
               <div className="py-3">
                 <video
                   key={videoUrl}
-                  className="h-32 w-full rounded-lg bg-slate-900 object-cover"
+                  className="max-h-80 w-full rounded-lg bg-slate-900 object-contain"
                   controls
                   preload="metadata"
                   src={videoUrl}
@@ -516,7 +517,24 @@ function CaptureMediaPreview({
             <Badge tone={capture.screenshot_paths.length > 0 ? "info" : "neutral"}>
               {capture.screenshot_paths.length} скриншотов
             </Badge>
-            <FileImage size={15} className="text-[var(--muted)]" />
+            <div className="flex items-center gap-2">
+              {capture.screenshot_paths.length > 1 && (
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setShotIndex(i => Math.max(0, i - 1))}
+                    disabled={shotIndex === 0}
+                    className="rounded p-0.5 text-[var(--muted)] hover:text-[var(--ink)] disabled:opacity-30"
+                  ><ChevronUp size={14} /></button>
+                  <span className="text-xs text-[var(--muted)]">{shotIndex + 1}/{capture.screenshot_paths.length}</span>
+                  <button
+                    onClick={() => setShotIndex(i => Math.min(capture.screenshot_paths.length - 1, i + 1))}
+                    disabled={shotIndex === capture.screenshot_paths.length - 1}
+                    className="rounded p-0.5 text-[var(--muted)] hover:text-[var(--ink)] disabled:opacity-30"
+                  ><ChevronDown size={14} /></button>
+                </div>
+              )}
+              <FileImage size={15} className="text-[var(--muted)]" />
+            </div>
           </div>
           <div className="mt-3">
             {screenshotUrl ? (
@@ -524,7 +542,7 @@ function CaptureMediaPreview({
                 <img
                   src={screenshotUrl}
                   alt="Превью скриншота рекламы"
-                  className="h-24 w-full rounded-lg border border-[var(--line)] object-cover"
+                  className="w-full rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] object-contain"
                 />
               </a>
             ) : (

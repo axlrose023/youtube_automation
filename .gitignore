@@ -179,7 +179,11 @@ cython_debug/
 .pypirc
 
 # Local project artifacts
+artifacts/
 backend/artifacts/
+backend/src/artifacts/
+standalone_topic_runner/results/
+standalone_topic_runner/debug_dump/
 backend/test_gemini.py
 backend/Fraud Checker API Response (1).json
 .DS_Store

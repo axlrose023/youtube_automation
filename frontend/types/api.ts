@@ -90,6 +90,8 @@ export interface EmulationWatchedVideo {
   position: number;
   action: string;
   title: string;
+  video_title?: string | null;
+  channel_name?: string | null;
   url: string;
   watched_seconds: number;
   target_seconds: number;
@@ -98,6 +100,15 @@ export interface EmulationWatchedVideo {
   search_keyword?: string | null;
   matched_topics: string[];
   keywords: string[];
+  like_planned?: boolean;
+  liked?: boolean;
+  liked_video_title?: string | null;
+  liked_at?: string | null;
+  subscribe_planned?: boolean;
+  subscribed?: boolean;
+  subscribed_channel_name?: string | null;
+  subscribed_at?: string | null;
+  social_actions?: string[];
   recorded_at: number;
 }
 
