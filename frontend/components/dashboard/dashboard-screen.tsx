@@ -368,60 +368,7 @@ function RecentSessionsTable({ items }: { items: EmulationHistoryItem[] }) {
   );
 }
 
-// ─── 4. Geo breakdown ─────────────────────────────────────────────────────────
-
-function GeoBreakdown({ items }: { items: EmulationHistoryItem[] }) {
-  const rows = useMemo(() => {
-    const counts: Record<string, number> = {};
-    for (const item of items) {
-      const code = item.proxy_country_code ?? null;
-      if (code) counts[code] = (counts[code] || 0) + 1;
-    }
-    return Object.entries(counts)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 6)
-      .map(([code, n]) => ({ code, n }));
-  }, [items]);
-
-  const total = rows.reduce((a, b) => a + b.n, 0);
-  const max = Math.max(...rows.map((r) => r.n), 1);
-
-  if (rows.length === 0) {
-    return (
-      <div className="rounded-2xl p-5 flex flex-col" style={{ background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)" }}>
-        <h3 className="text-[15px] font-semibold leading-none mb-4" style={{ color: "var(--ink)" }}>География</h3>
-        <div className="flex-1 flex items-center justify-center text-[13px]" style={{ color: "var(--muted)" }}>Нет данных о гео</div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-2xl p-5 flex flex-col" style={{ background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)" }}>
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-[15px] font-semibold leading-none" style={{ color: "var(--ink)" }}>География</h3>
-        <span className="text-[11.5px] tabular-nums" style={{ color: "var(--muted)" }}>{total} сессий</span>
-      </div>
-      <ul className="flex flex-col gap-2.5">
-        {rows.map(({ code, n }) => {
-          const c = countryOf(code);
-          const pct = (n / max) * 100;
-          return (
-            <li key={code} className="flex items-center gap-3">
-              <span className="text-[16px] leading-none w-5 text-center">{c.flag}</span>
-              <span className="flex-1 min-w-0 text-[13px] truncate" style={{ color: "var(--ink-secondary)" }}>{c.name}</span>
-              <span className="w-[45%] h-1.5 rounded-full overflow-hidden" style={{ background: "var(--bg-soft)" }}>
-                <span className="block h-full rounded-full" style={{ width: `${pct}%`, background: "var(--brand)" }} />
-              </span>
-              <span className="w-7 text-right text-[12.5px] tabular-nums font-semibold" style={{ color: "var(--ink)" }}>{n}</span>
-            </li>
-          );
-        })}
-      </ul>
-    </div>
-  );
-}
-
-// ─── 5. Recent ads strip ──────────────────────────────────────────────────────
+// ─── 4. Recent ads strip ──────────────────────────────────────────────────────
 
 function AdResultPill({ capture }: { capture: EmulationAdCapture }) {
   const result = getAdResult(capture);
@@ -607,13 +554,8 @@ export function DashboardScreen() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-5" style={{ gap: 20 }}>
-          <div className="lg:col-span-3" style={{ minWidth: 0 }}>
-            <RecentAdsStrip items={items} />
-          </div>
-          <div className="lg:col-span-2" style={{ minWidth: 0 }}>
-            <GeoBreakdown items={items} />
-          </div>
+        <div style={{ minWidth: 0 }}>
+          <RecentAdsStrip items={items} />
         </div>
       </div>
     </>
