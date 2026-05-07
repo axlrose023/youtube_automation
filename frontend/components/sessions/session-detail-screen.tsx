@@ -4,15 +4,19 @@ import {
   ArrowLeft,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   Clock,
-  FileImage,
-  Film,
-  FolderOpen,
+  Download,
+  ExternalLink,
   Globe,
+  Image as ImageIcon,
   LayoutPanelTop,
   Megaphone,
-  PlayCircle,
+  MousePointerClick,
+  Play,
+  Sparkles,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -446,178 +450,212 @@ function CaptureMediaPreview({
 }) {
   const videoUrl = useProtectedMediaBlobUrl(capture.video_file);
   const [shotIndex, setShotIndex] = useState(0);
+  const [activeTab, setActiveTab] = useState<"screens" | "video" | "landing" | null>(null);
+  const total = capture.screenshot_paths.length;
   const activeScreenshot = capture.screenshot_paths[shotIndex]?.file_path;
   const screenshotUrl = useProtectedMediaBlobUrl(activeScreenshot);
   const landingFileName = `${getBaseName(capture.landing_dir) || "landing"}.html`;
   const canDownloadLanding = Boolean(capture.landing_dir && capture.landing_status === "completed");
+  const hasScreenshots = total > 0;
+  const hasVideo = Boolean(videoUrl);
+  const landingHost = getLandingHost(capture.landing_url) || getLandingHost(capture.landing_dir) || "—";
+
+  const toggleTab = (t: "screens" | "video" | "landing") =>
+    setActiveTab((cur) => (cur === t ? null : t));
+
+  const goPrev = () => setShotIndex((i) => Math.max(0, i - 1));
+  const goNext = () => setShotIndex((i) => Math.min(total - 1, i + 1));
+
+  type TabId = "screens" | "video" | "landing";
+  function TabPill({
+    id,
+    icon,
+    label,
+    sub,
+    disabled = false,
+  }: {
+    id: TabId;
+    icon: React.ReactNode;
+    label: string;
+    sub: string;
+    disabled?: boolean;
+  }) {
+    const active = activeTab === id;
+    return (
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => !disabled && toggleTab(id)}
+        aria-expanded={active}
+        className={`flex items-center gap-2.5 rounded-xl border px-2.5 py-2 text-left transition ${
+          active
+            ? "border-[var(--ink)] bg-[var(--panel)] shadow-sm"
+            : disabled
+              ? "border-dashed border-[var(--line)] bg-transparent opacity-50 cursor-not-allowed"
+              : "border-[var(--line)] bg-[var(--panel)] hover:border-[var(--line-strong)] hover:shadow-sm"
+        }`}
+      >
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-[var(--bg-soft)] text-[var(--ink-secondary)]">
+          {icon}
+        </span>
+        <span className="flex min-w-0 flex-col">
+          <span className="text-[12px] font-semibold leading-tight text-[var(--ink)]">{label}</span>
+          <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">{sub}</span>
+        </span>
+        <ChevronDown
+          size={13}
+          className="ml-1 shrink-0 text-[var(--muted)] transition-transform"
+          style={{ transform: active ? "rotate(180deg)" : "rotate(0deg)" }}
+        />
+      </button>
+    );
+  }
 
   return (
-    <div className="space-y-3 rounded-lg bg-[var(--bg-soft)] p-4">
+    <div className="space-y-3">
       {totalSegments > 1 ? (
-        <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted)]">
-          Сегмент {index + 1}
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--muted)]">
+            сегмент {String(index + 1).padStart(2, "0")} / {String(totalSegments).padStart(2, "0")}
+          </span>
+          <span className="h-px flex-1 bg-[var(--line)]" />
         </div>
       ) : null}
 
-      <div className="grid gap-3 lg:grid-cols-3">
-        <div className="relative min-h-36 overflow-hidden rounded-lg bg-[var(--panel-soft)] p-4">
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_rgba(108,92,231,0.06),_transparent_55%)]" />
-          <div className="relative flex h-full flex-col justify-between">
-            <div className="flex items-center justify-between">
-              <Badge tone={capture.video_status === "completed" ? "success" : "warning"}>
-                {capture.video_status === "completed" ? "видео сохранено" : "видео ожидается"}
-              </Badge>
-              <Film size={15} className="text-[var(--muted)]" />
-            </div>
-            {videoUrl ? (
-              <div className="py-3">
-                <video
-                  key={videoUrl}
-                  className="max-h-80 w-full rounded-lg bg-slate-900 object-contain"
-                  controls
-                  preload="metadata"
-                  src={videoUrl}
-                  onLoadedMetadata={(event) => {
-                    try {
-                      event.currentTarget.currentTime = 0;
-                    } catch {
-                      // Ignore browser seek restrictions
-                    }
-                  }}
-                />
-              </div>
-            ) : (
-              <div className="flex items-center justify-center py-4">
-                <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[var(--brand-soft)]">
-                  <PlayCircle size={28} className="text-[var(--brand)]" />
-                </div>
-              </div>
-            )}
-            <div>
-              <div className="text-xs font-semibold text-[var(--ink)]">Видео рекламы</div>
-              <div className="mt-0.5 truncate text-xs text-[var(--muted)]">
-                {getBaseName(capture.video_file) || "video.webm"}
-              </div>
-              {videoUrl ? (
-                <a
-                  href={videoUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="mt-1.5 inline-flex text-xs font-medium text-[var(--brand)] hover:underline"
-                >
-                  Открыть видео
-                </a>
-              ) : null}
-            </div>
-          </div>
-        </div>
+      {/* Three tab pills */}
+      <div className="flex flex-wrap gap-2">
+        <TabPill
+          id="screens"
+          icon={<ImageIcon size={15} />}
+          label="Скриншоты"
+          sub={hasScreenshots ? `${total} кадра` : "нет кадров"}
+          disabled={!hasScreenshots}
+        />
+        <TabPill
+          id="video"
+          icon={<Play size={15} />}
+          label="Видео"
+          sub={hasVideo ? "готово" : "нет видео"}
+          disabled={!hasVideo}
+        />
+        <TabPill
+          id="landing"
+          icon={<Globe size={15} />}
+          label="Лендинг"
+          sub={canDownloadLanding ? (landingHost !== "—" ? landingHost : "готово") : "ожидается"}
+        />
+      </div>
 
-        <div className="min-h-36 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4">
-          <div className="flex items-center justify-between">
-            <Badge tone={capture.screenshot_paths.length > 0 ? "info" : "neutral"}>
-              {capture.screenshot_paths.length} скриншотов
-            </Badge>
-            <div className="flex items-center gap-2">
-              {capture.screenshot_paths.length > 1 && (
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setShotIndex(i => Math.max(0, i - 1))}
-                    disabled={shotIndex === 0}
-                    className="rounded p-0.5 text-[var(--muted)] hover:text-[var(--ink)] disabled:opacity-30"
-                  ><ChevronUp size={14} /></button>
-                  <span className="text-xs text-[var(--muted)]">{shotIndex + 1}/{capture.screenshot_paths.length}</span>
-                  <button
-                    onClick={() => setShotIndex(i => Math.min(capture.screenshot_paths.length - 1, i + 1))}
-                    disabled={shotIndex === capture.screenshot_paths.length - 1}
-                    className="rounded p-0.5 text-[var(--muted)] hover:text-[var(--ink)] disabled:opacity-30"
-                  ><ChevronDown size={14} /></button>
-                </div>
-              )}
-              <FileImage size={15} className="text-[var(--muted)]" />
-            </div>
+      {/* Screenshot panel */}
+      {activeTab === "screens" && hasScreenshots ? (
+        <div className="group relative">
+          <a href={screenshotUrl ?? "#"} target="_blank" rel="noreferrer" className="block">
+            <img
+              src={screenshotUrl ?? ""}
+              alt={`Скриншот ${shotIndex + 1} из ${total}`}
+              className="aspect-[16/10] w-full rounded-xl border border-[var(--line)] object-contain"
+            />
+          </a>
+          <div className="pointer-events-none absolute left-3 top-3 rounded-full bg-black/55 px-2.5 py-1 font-mono text-[11px] font-medium text-white backdrop-blur-sm">
+            {shotIndex + 1} / {total}
           </div>
-          <div className="mt-3">
-            {screenshotUrl ? (
-              <a href={screenshotUrl} target="_blank" rel="noreferrer">
-                <img
-                  src={screenshotUrl}
-                  alt="Превью скриншота рекламы"
-                  className="w-full rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] object-contain"
-                />
-              </a>
-            ) : (
-              <div className="flex items-end gap-2">
-                {[0, 1, 2].map((layer) => (
-                  <div
-                    key={layer}
-                    className={`rounded-lg border border-[var(--line)] bg-[var(--bg-soft)] ${
-                      layer === 0 ? "h-20 w-16" : layer === 1 ? "h-16 w-12" : "h-12 w-10"
-                    }`}
+          <a
+            href={screenshotUrl ?? "#"}
+            target="_blank"
+            rel="noreferrer"
+            className="absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-[11px] font-medium text-white opacity-0 backdrop-blur-sm transition group-hover:opacity-100 hover:bg-black/70"
+          >
+            <ExternalLink size={12} /> открыть
+          </a>
+          {total > 1 ? (
+            <>
+              <button
+                type="button"
+                onClick={goPrev}
+                disabled={shotIndex === 0}
+                aria-label="Предыдущий скриншот"
+                className="absolute left-3 top-1/2 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-full bg-white/90 text-[var(--ink)] shadow-md transition hover:bg-white disabled:opacity-40"
+              >
+                <ChevronLeft size={18} />
+              </button>
+              <button
+                type="button"
+                onClick={goNext}
+                disabled={shotIndex === total - 1}
+                aria-label="Следующий скриншот"
+                className="absolute right-3 top-1/2 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-full bg-white/90 text-[var(--ink)] shadow-md transition hover:bg-white disabled:opacity-40"
+              >
+                <ChevronRight size={18} />
+              </button>
+              <div className="absolute inset-x-0 bottom-3 flex justify-center gap-1.5">
+                {Array.from({ length: total }).map((_, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    onClick={() => setShotIndex(i)}
+                    aria-label={`Скриншот ${i + 1}`}
+                    className="h-1.5 rounded-full transition-all"
+                    style={{
+                      width: i === shotIndex ? 18 : 6,
+                      background: i === shotIndex ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.45)",
+                    }}
                   />
                 ))}
               </div>
-            )}
-          </div>
-          <div className="mt-3 text-xs font-semibold text-[var(--ink)]">Лента скриншотов</div>
-          <div className="mt-0.5 flex items-center justify-between gap-2">
-            <div className="text-xs text-[var(--muted)]">Резервные кадры из рекламы.</div>
-            {screenshotUrl ? (
-              <a
-                href={screenshotUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="shrink-0 text-xs font-medium text-[var(--brand)] hover:underline"
-              >
-                Открыть
-              </a>
-            ) : null}
-          </div>
+            </>
+          ) : null}
         </div>
+      ) : null}
 
-        <div className="min-h-36 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4">
-          <div className="flex items-center justify-between">
-            <Badge tone={capture.landing_status === "completed" ? "info" : "warning"}>
-              {capture.landing_status === "completed" ? "лендинг сохранен" : "лендинг ожидается"}
-            </Badge>
-            <Globe size={15} className="text-[var(--muted)]" />
+      {/* Video panel */}
+      {activeTab === "video" && hasVideo ? (
+        <video
+          key={videoUrl ?? ""}
+          src={videoUrl ?? ""}
+          controls
+          className="aspect-video w-full rounded-xl bg-slate-900 object-contain"
+          onLoadedMetadata={(e) => { try { e.currentTarget.currentTime = 0; } catch { /* ignore */ } }}
+        />
+      ) : null}
+
+      {/* Landing panel */}
+      {activeTab === "landing" ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] px-4 py-3">
+          <div className="grid h-8 w-8 place-items-center rounded-lg bg-[var(--panel)] text-[var(--ink-secondary)] ring-1 ring-[var(--line)]">
+            <Globe size={15} />
           </div>
-          <div className="mt-4 overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--bg-soft)]">
-            <div className="flex items-center gap-1.5 border-b border-[var(--line)] px-3 py-1.5">
-              <span className="h-2 w-2 rounded-full bg-[var(--danger)]" />
-              <span className="h-2 w-2 rounded-full bg-[var(--warning)]" />
-              <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
-            </div>
-            <div className="px-3 py-3">
-              <div className="flex items-center gap-2 text-xs font-semibold text-[var(--ink)]">
-                <FolderOpen size={13} />
-                {getLandingHost(capture.landing_url) || "лендинг"}
-              </div>
-              <div className="mt-1 truncate text-xs text-[var(--muted)]">
-                {getBaseName(capture.landing_dir) || "landing/"}
-              </div>
-            </div>
-          </div>
-          <div className="mt-3 text-xs text-[var(--muted)]">
-            Сохраненный HTML-снимок.
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] font-medium uppercase tracking-wider text-[var(--muted)]">лендинг</div>
+            <div className="truncate font-mono text-sm text-[var(--ink)]">{landingHost}</div>
           </div>
           {canDownloadLanding ? (
-            <button
-              type="button"
-              onClick={() => void downloadProtectedMedia(
-                capture.landing_dir ? `${capture.landing_dir}/index.html` : null,
-                landingFileName,
-              )}
-              className="mt-2 inline-flex text-xs font-medium text-[var(--brand)] hover:underline"
-            >
-              Скачать HTML лендинга
-            </button>
-          ) : (
-            <div className="mt-2 text-xs text-[var(--muted)]">
-              HTML лендинга недоступен для этой записи.
+            <div className="flex items-center gap-2">
+              {capture.landing_url ? (
+                <a
+                  href={capture.landing_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--brand)] transition hover:bg-[var(--brand-soft)]"
+                >
+                  <ExternalLink size={13} /> Открыть лендинг
+                </a>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => void downloadProtectedMedia(
+                  capture.landing_dir ? `${capture.landing_dir}/index.html` : null,
+                  landingFileName,
+                )}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--brand)] px-3 py-1.5 text-xs font-medium text-white transition hover:bg-[var(--brand-strong)]"
+              >
+                <Download size={13} /> Скачать HTML
+              </button>
             </div>
+          ) : (
+            <Badge tone="warning">лендинг ожидается</Badge>
           )}
         </div>
-      </div>
+      ) : null}
     </div>
   );
 }
@@ -1311,7 +1349,7 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
             const analysisResult = resolveAnalysisResult(item.primaryCapture);
             const analysisReason = readAnalysisField(item.primaryCapture, "reason");
             const analysisCategory = readAnalysisField(item.primaryCapture, "category");
-            const analysisLabel = getAnalysisLabel(
+            const adAnalysisLabel = getAnalysisLabel(
               analysisResult,
               item.primaryCapture?.analysis_status,
             );
@@ -1320,162 +1358,161 @@ export function SessionDetailScreen({ sessionId }: { sessionId: string }) {
               item.primaryCapture?.analysis_status === "not_relevant";
             const isExpanded = expandedAd === item.position;
 
+            const accentColor = analysisResult === "relevant"
+              ? "var(--accent)"
+              : analysisResult === "not_relevant"
+                ? "var(--warning)"
+                : "transparent";
+
+            const duration = item.ad?.ad_duration_seconds ?? item.primaryCapture?.ad_duration_seconds;
+            const showDuration = typeof duration === "number" && duration > 0;
+            const ctaText = item.ad?.cta_text;
+            const showCta = ctaText &&
+              ctaText.toLowerCase() !== "visit site" &&
+              ctaText.toLowerCase() !== "перейти на сайт";
+
+            const title = getAdCardTitle(item.ad, item.primaryCapture);
+            const domain = getAdLandingHost(item.ad, item.primaryCapture) || "неизвестный домен";
+
             return (
               <Card key={`ad-card-${item.position}`} className="overflow-hidden p-0">
-                <div className="border-b border-[var(--line)] px-5 py-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-base font-semibold text-[var(--ink)]">
-                      {getAdCardTitle(item.ad, item.primaryCapture)}
-                    </div>
-                    <div className="mt-1 text-sm text-[var(--muted)]">
-                      {getAdLandingHost(item.ad, item.primaryCapture) || "неизвестный домен"}
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap justify-end gap-1.5">
-                    {item.ad ? (
-                      <Badge tone={item.ad.completed ? "success" : "warning"}>
-                        {item.ad.completed ? "завершено" : "частично"}
-                      </Badge>
-                    ) : null}
-                    {item.primaryCapture && !mediaHiddenByAnalysis ? (
-                      <Badge
-                        tone={
-                          item.primaryCapture.video_status === "completed"
-                            ? "success"
-                            : "warning"
-                        }
-                      >
-                        видео: {formatCaptureStatus(item.primaryCapture.video_status)}
-                      </Badge>
-                    ) : null}
-                    {item.primaryCapture && !mediaHiddenByAnalysis ? (
-                      <Badge
-                        tone={
-                          item.primaryCapture.landing_status === "completed"
-                            ? "info"
-                            : "warning"
-                        }
-                      >
-                        лендинг: {formatCaptureStatus(item.primaryCapture.landing_status)}
-                      </Badge>
-                    ) : null}
-                    {analysisResult ? (
-                      <Badge tone={getAnalysisTone(analysisResult) as never}>
-                        {analysisLabel}
-                      </Badge>
-                    ) : item.primaryCapture?.analysis_status ? (
-                      <Badge tone={getAnalysisTone(null) as never}>{analysisLabel}</Badge>
-                    ) : null}
-                  </div>
-                </div>
-                </div>
-
-                <div className="grid gap-2 px-5 py-4 text-xs text-[var(--muted)] sm:grid-cols-3">
-                  <div className="rounded-lg bg-[var(--panel-soft)] px-3 py-2.5">
-                    <div className="font-medium text-[var(--ink-secondary)]">Просмотрено</div>
-                    <div className="mt-1 text-sm text-[var(--ink)]">
-                      {item.ad?.watched_seconds.toFixed(1) || "—"}с
-                    </div>
-                  </div>
-                  <div className="rounded-lg bg-[var(--panel-soft)] px-3 py-2.5">
-                    <div className="font-medium text-[var(--ink-secondary)]">Кнопка</div>
-                    <div className="mt-1 text-sm text-[var(--ink)]">{item.ad?.cta_text || "—"}</div>
-                  </div>
-                  <div className="rounded-lg bg-[var(--panel-soft)] px-3 py-2.5">
-                    <div className="font-medium text-[var(--ink-secondary)]">Длительность</div>
-                    <div className="mt-1 text-sm text-[var(--ink)]">
-                      {(
-                        item.ad?.ad_duration_seconds ??
-                        item.primaryCapture?.ad_duration_seconds
-                      )?.toFixed(1) || "—"}с
-                    </div>
-                  </div>
-                </div>
-
-                <div className="px-5 pb-4">
-                  <div className="flex items-center justify-end">
-                  <Button
+                <div style={{ borderLeft: `4px solid ${accentColor}` }}>
+                  {/* Header — entire row clickable */}
+                  <button
                     type="button"
-                    variant={isExpanded ? "secondary" : "ghost"}
                     onClick={() => setExpandedAd((prev) => (prev === item.position ? null : item.position))}
-                    className="gap-1.5 px-3 py-2 text-xs"
+                    aria-expanded={isExpanded}
+                    className="group flex w-full items-start gap-4 px-5 py-4 text-left transition hover:bg-[var(--panel-soft)]"
                   >
-                    {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                    {isExpanded ? "Скрыть детали" : "Показать детали"}
-                  </Button>
-                </div>
-                </div>
-
-                {isExpanded ? (
-                  <div className="border-t border-[var(--line)] bg-[var(--bg-soft)]/55 px-5 py-4">
-                    <div className="space-y-3">
-                    {item.ad?.full_text ? (
-                      <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-semibold text-[var(--ink)]">Текст рекламы</span>
-                          <Badge tone="info">видимый текст</Badge>
-                        </div>
-                        <div className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-[var(--ink-secondary)]">
-                          {item.ad.full_text}
-                        </div>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="line-clamp-2 text-[15px] font-semibold leading-snug text-[var(--ink)]" title={title}>
+                        {title}
+                      </h3>
+                      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                        <span className="inline-flex items-center gap-1.5 rounded-md bg-[var(--bg-soft)] px-2 py-0.5 text-[11px] text-[var(--ink-secondary)]">
+                          <Globe size={11} className="text-[var(--muted)]" />
+                          <span className="font-mono">{domain}</span>
+                        </span>
+                        {showDuration ? (
+                          <span className="inline-flex items-center gap-1 rounded-md bg-[var(--bg-soft)] px-2 py-0.5 text-[11px] text-[var(--ink-secondary)]">
+                            <Clock size={11} className="text-[var(--muted)]" />
+                            <span className="font-mono tabular-nums">{Number(duration).toFixed(1)}с</span>
+                          </span>
+                        ) : null}
+                        {showCta ? (
+                          <span className="inline-flex items-center gap-1 rounded-md bg-[var(--bg-soft)] px-2 py-0.5 text-[11px] text-[var(--ink-secondary)]">
+                            <MousePointerClick size={11} className="text-[var(--muted)]" />
+                            {ctaText}
+                          </span>
+                        ) : null}
+                        {item.captures.length > 1 ? (
+                          <span className="inline-flex items-center gap-1 rounded-md bg-[var(--bg-soft)] px-2 py-0.5 text-[11px] text-[var(--ink-secondary)]">
+                            <span className="font-mono tabular-nums">{item.captures.length}</span> сегментов
+                          </span>
+                        ) : null}
                       </div>
-                    ) : null}
-
-                    {item.primaryCapture?.analysis_status ? (
-                      <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-xs font-semibold text-[var(--ink)]">Анализ рекламы</span>
-                          <Badge
-                            tone={
-                              getAnalysisTone(
-                                analysisResult ??
-                                  (item.primaryCapture?.analysis_status === "completed"
-                                    ? "relevant"
-                                    : item.primaryCapture?.analysis_status === "not_relevant"
-                                      ? "not_relevant"
-                                      : null),
-                              ) as never
-                            }
-                          >
-                            {analysisLabel}
-                          </Badge>
-                          {analysisCategory ? <Badge tone="info">{analysisCategory}</Badge> : null}
-                        </div>
-                        {analysisReason ? (
-                          <div className="mt-2 text-sm leading-relaxed text-[var(--ink-secondary)]">{analysisReason}</div>
-                        ) : (
-                          <div className="mt-2 text-[var(--muted)]">
-                            {item.primaryCapture.analysis_status === "pending"
-                              ? "Реклама ожидает анализа."
-                              : item.primaryCapture.analysis_status === "failed"
-                                ? "Рекламу не удалось проанализировать."
-                                : "Анализ доступен без блока с объяснением."}
-                          </div>
-                        )}
-                      </div>
-                    ) : null}
-
-                    {item.captures.length > 0 && !mediaHiddenByAnalysis ? (
-                      <div className="space-y-3 rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 text-sm">
-                        <div className="text-xs font-semibold text-[var(--ink)]">
-                          Медиа-превью
-                          {item.captures.length > 1 ? ` (${item.captures.length} сегментов)` : ""}
-                        </div>
-                        {item.captures.map((capture, index) => (
-                          <CaptureMediaPreview
-                            key={`${capture.ad_position}-${index}`}
-                            capture={capture}
-                            index={index}
-                            totalSegments={item.captures.length}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-
                     </div>
-                  </div>
-                ) : null}
+
+                    <div className="flex shrink-0 items-center gap-2 pt-0.5">
+                      {item.ad ? (
+                        <Badge tone={item.ad.completed ? "success" : "warning"}>
+                          {item.ad.completed ? "завершено" : "частично"}
+                        </Badge>
+                      ) : null}
+                      {analysisResult ? (
+                        <Badge tone={getAnalysisTone(analysisResult) as never}>
+                          {adAnalysisLabel}
+                        </Badge>
+                      ) : item.primaryCapture?.analysis_status ? (
+                        <Badge tone={getAnalysisTone(null) as never}>{adAnalysisLabel}</Badge>
+                      ) : null}
+                      <span className="ml-1 grid h-7 w-7 place-items-center rounded-full text-[var(--muted)] transition group-hover:bg-[var(--bg-soft)] group-hover:text-[var(--ink-secondary)]">
+                        <ChevronDown
+                          size={16}
+                          className="transition-transform"
+                          style={{ transform: isExpanded ? "rotate(180deg)" : "rotate(0deg)" }}
+                        />
+                      </span>
+                    </div>
+                  </button>
+
+                  {/* Expanded body */}
+                  {isExpanded ? (
+                    <div className="space-y-5 border-t border-[var(--line)] bg-[var(--bg-soft)]/55 px-5 py-5">
+                      {/* Capture status chips */}
+                      {item.primaryCapture ? (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <Badge tone={item.primaryCapture.video_status === "completed" ? "success" : "neutral"}>
+                            видео: {formatCaptureStatus(item.primaryCapture.video_status)}
+                          </Badge>
+                          <span className="text-[11px] text-[var(--muted)]">·</span>
+                          <Badge tone={item.primaryCapture.landing_status === "completed" ? "info" : "neutral"}>
+                            лендинг: {formatCaptureStatus(item.primaryCapture.landing_status)}
+                          </Badge>
+                        </div>
+                      ) : null}
+
+                      {/* Ad full text */}
+                      {item.ad?.full_text ? (
+                        <div>
+                          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+                            текст рекламы
+                          </div>
+                          <blockquote className="border-l-2 border-[var(--line-strong)] pl-4 text-[14px] leading-relaxed text-[var(--ink-secondary)]">
+                            <span className="whitespace-pre-wrap">{item.ad.full_text}</span>
+                          </blockquote>
+                        </div>
+                      ) : null}
+
+                      {/* Analysis */}
+                      {item.primaryCapture?.analysis_status === "completed" || item.primaryCapture?.analysis_status === "not_relevant" ? (
+                        <div>
+                          <div className="mb-2 flex flex-wrap items-center gap-2">
+                            <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)]">анализ</span>
+                            <Badge tone={getAnalysisTone(analysisResult) as never}>
+                              <span className="inline-flex items-center gap-1">
+                                <Sparkles size={10} /> {adAnalysisLabel}
+                              </span>
+                            </Badge>
+                            {analysisCategory ? <Badge tone="info">{analysisCategory}</Badge> : null}
+                          </div>
+                          {analysisReason ? (
+                            <p className="text-[14px] leading-relaxed text-[var(--ink-secondary)]">{analysisReason}</p>
+                          ) : null}
+                        </div>
+                      ) : item.primaryCapture?.analysis_status === "pending" ? (
+                        <div className="flex items-center gap-2 rounded-xl border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] px-4 py-3 text-[13px] text-[var(--muted)]">
+                          <span className="relative flex h-2 w-2">
+                            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--brand)] opacity-50" />
+                            <span className="relative inline-flex h-2 w-2 rounded-full bg-[var(--brand)]" />
+                          </span>
+                          анализ в процессе…
+                        </div>
+                      ) : item.primaryCapture?.analysis_status === "failed" ? (
+                        <div className="text-[13px] text-[var(--muted)]">Рекламу не удалось проанализировать.</div>
+                      ) : null}
+
+                      {/* Media */}
+                      {item.captures.length > 0 && !mediaHiddenByAnalysis ? (
+                        <div>
+                          <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-[var(--muted)]">
+                            медиа{item.captures.length > 1 ? ` · ${item.captures.length} сегментов` : ""}
+                          </div>
+                          <div className="space-y-6">
+                            {item.captures.map((capture, captureIndex) => (
+                              <CaptureMediaPreview
+                                key={`${capture.ad_position}-${captureIndex}`}
+                                capture={capture}
+                                index={captureIndex}
+                                totalSegments={item.captures.length}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               </Card>
             );
           })}
