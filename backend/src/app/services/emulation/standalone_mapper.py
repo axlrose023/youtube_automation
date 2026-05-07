@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 import time
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 from app.api.modules.emulation.models import LandingStatus, VideoStatus
+
+_BANNER_SPONSORED_PREFIX_RE = re.compile(r"^\s*sponsored\s*-\s*", re.IGNORECASE)
+_BANNER_DOMAIN_RE = re.compile(
+    r"(?i)\b(?:https?://)?(?:www\.)?"
+    r"([a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.[a-z]{2,})"
+    r"(?:/[^\s]*)?"
+)
+_BANNER_CTA_RE = re.compile(
+    r"\s+(?:-|\|)\s+("
+    r"visit site|learn more|book now|sign up|shop now|install|open|download|"
+    r"apply now|get quote|contact us|visit store|visit today|докладніше|докладнее|"
+    r"подайте заявку|почати"
+    r")\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -206,7 +222,11 @@ def _map_banner(
         screenshot_paths.append({"offset_ms": 1000, "file_path": landing_screenshot})
 
     title = _as_str(_get(banner, "title"))
-    advertiser_domain = _domain_from_url(landing_url)
+    parsed_text = _parse_banner_text(title)
+    advertiser_domain = _domain_from_url(landing_url) or parsed_text["display_domain"]
+    headline_text = parsed_text["headline"] or advertiser_domain or title
+    description_lines = parsed_text["description_lines"]
+    description_text = "\n".join(description_lines)
     return {
         "started_at": recorded_at,
         "ended_at": recorded_at,
@@ -214,21 +234,21 @@ def _map_banner(
         "completed": bool(landing_url or screenshot_paths),
         "skip_clicked": False,
         "skip_visible": False,
-        "cta_text": _infer_banner_cta(title),
+        "cta_text": parsed_text["cta_text"] or _infer_banner_cta(title),
         "cta_href": landing_url,
         "sponsor_label": "Sponsored",
         "advertiser_domain": advertiser_domain,
         "display_url": advertiser_domain,
         "landing_urls": [landing_url] if landing_url else [],
-        "headline_text": title,
-        "description_text": "",
-        "description_lines": [],
+        "headline_text": headline_text,
+        "description_text": description_text,
+        "description_lines": description_lines,
         "my_ad_center_visible": False,
         "full_text": title,
         "full_text_source": "standalone_banner",
         "full_visible_text": title,
         "full_caption_text": "",
-        "visible_lines": [line for line in title.splitlines() if line.strip()],
+        "visible_lines": parsed_text["visible_lines"],
         "caption_lines": [],
         "end_reason": "banner",
         "search_keyword": topic,
@@ -341,6 +361,76 @@ def _capture_time(item: object, fallback_order: int) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     return float(fallback_order)
+
+
+def _parse_banner_text(title: str) -> dict[str, Any]:
+    visible_lines = [_clean_banner_line(line) for line in title.splitlines()]
+    visible_lines = [line for line in visible_lines if line]
+    if not visible_lines:
+        return {
+            "headline": "",
+            "description_lines": [],
+            "display_domain": None,
+            "cta_text": None,
+            "visible_lines": [],
+        }
+
+    content_lines = list(visible_lines)
+    content_lines[0] = _BANNER_SPONSORED_PREFIX_RE.sub("", content_lines[0]).strip()
+    content_lines = [line for line in content_lines if line]
+
+    first_line = content_lines[0] if content_lines else visible_lines[0]
+    headline = _compact_banner_headline(first_line)
+    if headline.casefold() in {"visit site banner", "visual sponsored card"}:
+        headline = ""
+
+    description_lines: list[str] = []
+    for index, line in enumerate(content_lines[1:], start=1):
+        is_last = index == len(content_lines) - 1
+        if is_last and _BANNER_CTA_RE.search(line):
+            continue
+        cleaned = _strip_banner_urls(_BANNER_CTA_RE.sub("", line)).strip(" -")
+        if cleaned:
+            description_lines.append(cleaned)
+
+    return {
+        "headline": headline,
+        "description_lines": description_lines,
+        "display_domain": _domain_from_text(title),
+        "cta_text": _extract_banner_cta(title),
+        "visible_lines": visible_lines,
+    }
+
+
+def _compact_banner_headline(value: str) -> str:
+    text = _strip_banner_urls(_BANNER_CTA_RE.sub("", value)).strip(" -")
+    parts = [part.strip() for part in re.split(r"\s+-\s+", text) if part.strip()]
+    return parts[0] if parts else text
+
+
+def _extract_banner_cta(value: str) -> str | None:
+    for line in reversed(value.splitlines() or [value]):
+        match = _BANNER_CTA_RE.search(_clean_banner_line(line))
+        if match:
+            return match.group(1)
+    match = _BANNER_CTA_RE.search(_clean_banner_line(value))
+    return match.group(1) if match else None
+
+
+def _domain_from_text(value: str) -> str | None:
+    for match in _BANNER_DOMAIN_RE.finditer(value):
+        domain = match.group(1).removeprefix("www.").lower()
+        if domain not in {"google.com", "youtube.com"}:
+            return domain
+    return None
+
+
+def _strip_banner_urls(value: str) -> str:
+    return _BANNER_DOMAIN_RE.sub("", value)
+
+
+def _clean_banner_line(value: str) -> str:
+    return " ".join(value.replace("\xa0", " ").split())
 
 
 def _infer_banner_cta(title: str) -> str | None:
