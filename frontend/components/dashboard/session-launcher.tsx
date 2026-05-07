@@ -145,20 +145,20 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
               <input
                 type="number"
                 min={1}
-                max={480}
+                max={1440}
                 value={durationDraft}
                 onChange={(e) => {
                   const raw = e.target.value;
                   setDurationDraft(raw);
                   const v = Number(raw);
-                  if (raw !== "" && !Number.isNaN(v) && v > 0) setDuration(Math.min(480, v));
+                  if (raw !== "" && !Number.isNaN(v) && v > 0) setDuration(Math.min(1440, v));
                 }}
                 onBlur={(e) => {
                   e.currentTarget.style.boxShadow = "inset 0 0 0 1px var(--line)";
                   if (durationDraft === "" || Number(durationDraft) <= 0) {
                     setDurationDraft(String(duration));
                   } else {
-                    const clamped = Math.min(480, Math.max(1, Number(durationDraft)));
+                    const clamped = Math.min(1440, Math.max(1, Number(durationDraft)));
                     setDuration(clamped);
                     setDurationDraft(String(clamped));
                   }
@@ -173,7 +173,7 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
                 aria-label="Своя длительность в минутах"
               />
             </div>
-            <div className="mt-1 text-[11px]" style={{ color: "var(--muted)" }}>минуты · до 480</div>
+            <div className="mt-1 text-[11px]" style={{ color: "var(--muted)" }}>минуты · до 24ч</div>
           </div>
 
           {/* Proxy dropdown */}

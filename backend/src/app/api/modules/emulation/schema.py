@@ -8,7 +8,7 @@ from .models import PostProcessingStatus, SessionStatus
 
 
 class StartEmulationRequest(BaseModel):
-    duration_minutes: int = Field(ge=1, le=480, description="Session duration in minutes")
+    duration_minutes: int = Field(ge=1, le=1440, description="Session duration in minutes")
     topics: list[str] = Field(min_length=1, max_length=20, description="Search topics")
     profile_id: str | None = Field(
         default=None,
