@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Check,
-  ChevronLeft,
   ChevronRight,
   Clock,
-  ExternalLink,
   Film,
   Image,
   Loader2,
@@ -291,11 +289,10 @@ function RecentSessionsTable({ items }: { items: EmulationHistoryItem[] }) {
       {/* Column headers */}
       <div
         className="grid items-center px-5 py-2.5 text-[11px] uppercase tracking-wider font-semibold"
-        style={{ gridTemplateColumns: "1.4fr 1.5fr 1fr 0.8fr 0.5fr", borderBottom: "1px solid var(--line)", color: "var(--muted)" }}
+        style={{ gridTemplateColumns: "1.6fr 1fr 0.9fr 0.6fr", borderBottom: "1px solid var(--line)", color: "var(--muted)" }}
       >
         <div>Статус</div>
-        <div>Гео · ID</div>
-        <div>Темы</div>
+        <div>Гео</div>
         <div className="text-right">Длительность</div>
         <div className="text-right">Реклама</div>
       </div>
@@ -305,14 +302,15 @@ function RecentSessionsTable({ items }: { items: EmulationHistoryItem[] }) {
           const st = STATUS_CONFIG[item.status] ?? STATUS_CONFIG["stopped"];
           const country = item.proxy_country_code ?? null;
           const c = countryOf(country);
-          const topics = item.requested_topics ?? [];
           const adsTotal = item.captures?.ads_total ?? 0;
+          const relevantAds = (item.watched_ads_analytics ?? []).filter((a) => !a.skip_clicked).length;
 
           return (
-            <li
+            <Link
               key={item.session_id}
-              className="relative grid items-center px-5 py-3.5 transition-colors cursor-pointer"
-              style={{ gridTemplateColumns: "1.4fr 1.5fr 1fr 0.8fr 0.5fr" }}
+              to={`/sessions/${item.session_id}`}
+              className="relative grid items-center px-5 py-3.5 transition-colors"
+              style={{ gridTemplateColumns: "1.6fr 1fr 0.9fr 0.6fr", display: "grid", height: 56 }}
               onMouseEnter={(e) => (e.currentTarget.style.background = "var(--panel-soft)")}
               onMouseLeave={(e) => (e.currentTarget.style.background = "")}
             >
@@ -321,21 +319,19 @@ function RecentSessionsTable({ items }: { items: EmulationHistoryItem[] }) {
 
               {/* Status pill */}
               <div className="min-w-0">
-                <Link to={`/sessions/${item.session_id}`}>
-                  <span
-                    className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[12px] font-medium"
-                    style={{ background: st.bg, color: st.color }}
-                  >
-                    {item.status === "running" && <Loader2 size={12} strokeWidth={2.4} className="animate-spin" />}
-                    {item.status === "completed" && <Check size={12} strokeWidth={2.4} />}
-                    {item.status === "failed" && <X size={12} strokeWidth={2.4} />}
-                    {(item.status === "queued" || item.status === "stopping") && <Clock size={12} strokeWidth={2.4} />}
-                    {st.label}
-                  </span>
-                </Link>
+                <span
+                  className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-full text-[12px] font-medium"
+                  style={{ background: st.bg, color: st.color }}
+                >
+                  {item.status === "running" && <Loader2 size={12} strokeWidth={2.4} className="animate-spin" />}
+                  {item.status === "completed" && <Check size={12} strokeWidth={2.4} />}
+                  {item.status === "failed" && <X size={12} strokeWidth={2.4} />}
+                  {(item.status === "queued" || item.status === "stopping") && <Clock size={12} strokeWidth={2.4} />}
+                  {st.label}
+                </span>
               </div>
 
-              {/* Geo + ID */}
+              {/* Geo only */}
               <div className="min-w-0 flex items-center gap-2">
                 {country ? (
                   <>
@@ -345,27 +341,6 @@ function RecentSessionsTable({ items }: { items: EmulationHistoryItem[] }) {
                 ) : (
                   <span className="text-[13px]" style={{ color: "var(--muted)" }}>—</span>
                 )}
-                <code className="text-[11px] font-mono" style={{ color: "var(--muted)" }}>{item.session_id.slice(0, 8)}</code>
-              </div>
-
-              {/* Topics — up to 2 chips */}
-              <div className="min-w-0 flex items-center gap-1 flex-wrap">
-                {topics.length === 0 ? (
-                  <span className="text-[12px]" style={{ color: "var(--muted)" }}>—</span>
-                ) : (
-                  <>
-                    {topics.slice(0, 2).map((t) => (
-                      <span key={t} className="inline-flex items-center h-6 px-2 rounded-md text-[11.5px] font-medium truncate max-w-[90px]" style={{ background: "var(--brand-soft)", color: "var(--brand-strong)" }}>
-                        {t}
-                      </span>
-                    ))}
-                    {topics.length > 2 && (
-                      <span className="inline-flex items-center h-6 px-1.5 rounded-md text-[11.5px] font-medium" style={{ background: "var(--panel-soft)", boxShadow: "inset 0 0 0 1px var(--line)", color: "var(--ink-secondary)" }}>
-                        +{topics.length - 2}
-                      </span>
-                    )}
-                  </>
-                )}
               </div>
 
               {/* Duration */}
@@ -373,13 +348,18 @@ function RecentSessionsTable({ items }: { items: EmulationHistoryItem[] }) {
                 {item.elapsed_minutes != null ? `${Math.round(item.elapsed_minutes)} мин` : "—"}
               </div>
 
-              {/* Ads count */}
-              <div className="flex justify-end">
+              {/* Ads count + relevant chip */}
+              <div className="flex items-center justify-end gap-1.5">
                 <span className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12px] font-semibold tabular-nums" style={{ background: "var(--panel-soft)", boxShadow: "inset 0 0 0 1px var(--line)", color: "var(--ink)" }}>
                   <Image size={12} style={{ color: "var(--muted)" }} /> {adsTotal}
                 </span>
+                {relevantAds > 0 && (
+                  <span className="inline-flex items-center gap-0.5 h-6 px-1.5 rounded-full text-[11px] font-semibold tabular-nums" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
+                    <Check size={10} strokeWidth={2.5} />{relevantAds}
+                  </span>
+                )}
               </div>
-            </li>
+            </Link>
           );
         })}
       </ul>
@@ -495,8 +475,6 @@ function AdThumbnailSmall({ capture, sessionId }: { capture: EmulationAdCapture;
 }
 
 function RecentAdsStrip({ items }: { items: EmulationHistoryItem[] }) {
-  const ref = useRef<HTMLDivElement>(null);
-
   // Flatten last 8 ads across recent sessions
   const recentAds = useMemo(() => {
     const pairs: Array<{ capture: EmulationAdCapture; sessionId: string }> = [];
@@ -510,12 +488,6 @@ function RecentAdsStrip({ items }: { items: EmulationHistoryItem[] }) {
     return pairs.reverse();
   }, [items]);
 
-  const scrollBy = (dir: number) => {
-    const el = ref.current;
-    if (!el) return;
-    el.scrollBy({ left: dir * (el.clientWidth - 64), behavior: "smooth" });
-  };
-
   return (
     <div className="rounded-2xl flex flex-col" style={{ background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)" }}>
       <div className="px-5 pt-4 pb-3 flex items-center justify-between border-b" style={{ borderColor: "var(--line)" }}>
@@ -525,17 +497,9 @@ function RecentAdsStrip({ items }: { items: EmulationHistoryItem[] }) {
             {recentAds.length}
           </span>
         </div>
-        <div className="flex items-center gap-1">
-          <button onClick={() => scrollBy(-1)} className="h-7 w-7 grid place-items-center rounded-lg hover:opacity-80" style={{ boxShadow: "inset 0 0 0 1px var(--line)", background: "var(--panel-soft)", color: "var(--ink-secondary)" }}>
-            <ChevronLeft size={14} />
-          </button>
-          <button onClick={() => scrollBy(1)} className="h-7 w-7 grid place-items-center rounded-lg hover:opacity-80" style={{ boxShadow: "inset 0 0 0 1px var(--line)", background: "var(--panel-soft)", color: "var(--ink-secondary)" }}>
-            <ChevronRight size={14} />
-          </button>
-          <Link to="/ads" className="ml-1 inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12px] font-medium hover:opacity-80" style={{ color: "var(--ink-secondary)" }}>
-            /ads <ChevronRight size={12} />
-          </Link>
-        </div>
+        <Link to="/ads" className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12px] font-medium hover:opacity-80" style={{ color: "var(--ink-secondary)" }}>
+          Вся реклама <ChevronRight size={12} />
+        </Link>
       </div>
 
       {recentAds.length === 0 ? (
@@ -543,17 +507,13 @@ function RecentAdsStrip({ items }: { items: EmulationHistoryItem[] }) {
           Нет захваченной рекламы
         </div>
       ) : (
-        <div
-          ref={ref}
-          className="flex gap-3 overflow-x-auto px-4 py-4"
-          style={{ scrollbarWidth: "thin" }}
-        >
+        <div className="grid px-4 py-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
           {recentAds.map(({ capture, sessionId }) => (
             <Link
               key={`${sessionId}-${capture.ad_position}`}
               to={`/sessions/${sessionId}`}
-              className="w-[220px] shrink-0 flex flex-col gap-2 p-2 rounded-2xl transition-shadow hover:shadow-md"
-              style={{ width: 220, minWidth: 220, background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)" }}
+              className="flex flex-col gap-2 p-2 rounded-2xl transition-shadow hover:shadow-md"
+              style={{ background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)" }}
             >
               <AdThumbnailSmall capture={capture} sessionId={sessionId} />
               <div className="px-1 flex flex-col gap-0.5">
