@@ -455,7 +455,10 @@ function CaptureMediaPreview({
   const activeScreenshot = capture.screenshot_paths[shotIndex]?.file_path;
   const screenshotUrl = useProtectedMediaBlobUrl(activeScreenshot);
   const landingFileName = `${getBaseName(capture.landing_dir) || "landing"}.html`;
+  const landingCompleted = capture.landing_status === "completed";
+  const canOpenLanding = Boolean(capture.landing_url && landingCompleted);
   const canDownloadLanding = Boolean(capture.landing_dir && capture.landing_status === "completed");
+  const hasLandingArtifact = Boolean(canOpenLanding || canDownloadLanding);
   const hasScreenshots = total > 0;
   const hasVideo = Boolean(videoUrl);
   const landingHost = getLandingHost(capture.landing_url) || getLandingHost(capture.landing_dir) || "—";
@@ -542,7 +545,7 @@ function CaptureMediaPreview({
           id="landing"
           icon={<Globe size={15} />}
           label="Лендинг"
-          sub={canDownloadLanding ? (landingHost !== "—" ? landingHost : "готово") : "ожидается"}
+          sub={hasLandingArtifact ? (landingHost !== "—" ? landingHost : "готово") : "ожидается"}
         />
       </div>
 
@@ -628,11 +631,11 @@ function CaptureMediaPreview({
             <div className="text-[11px] font-medium uppercase tracking-wider text-[var(--muted)]">лендинг</div>
             <div className="truncate font-mono text-sm text-[var(--ink)]">{landingHost}</div>
           </div>
-          {canDownloadLanding ? (
+          {hasLandingArtifact ? (
             <div className="flex items-center gap-2">
-              {capture.landing_url ? (
+              {canOpenLanding ? (
                 <a
-                  href={capture.landing_url}
+                  href={capture.landing_url ?? undefined}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-[var(--brand)] transition hover:bg-[var(--brand-soft)]"
@@ -640,16 +643,18 @@ function CaptureMediaPreview({
                   <ExternalLink size={13} /> Открыть лендинг
                 </a>
               ) : null}
-              <button
-                type="button"
-                onClick={() => void downloadProtectedMedia(
-                  capture.landing_dir ? `${capture.landing_dir}/index.html` : null,
-                  landingFileName,
-                )}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--brand)] px-3 py-1.5 text-xs font-medium text-white transition hover:bg-[var(--brand-strong)]"
-              >
-                <Download size={13} /> Скачать HTML
-              </button>
+              {canDownloadLanding ? (
+                <button
+                  type="button"
+                  onClick={() => void downloadProtectedMedia(
+                    capture.landing_dir ? `${capture.landing_dir}/index.html` : null,
+                    landingFileName,
+                  )}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--brand)] px-3 py-1.5 text-xs font-medium text-white transition hover:bg-[var(--brand-strong)]"
+                >
+                  <Download size={13} /> Скачать HTML
+                </button>
+              ) : null}
             </div>
           ) : (
             <Badge tone="warning">лендинг ожидается</Badge>
