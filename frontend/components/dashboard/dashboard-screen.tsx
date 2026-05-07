@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Check,
+  ChevronLeft,
   ChevronRight,
   Clock,
   Film,
@@ -475,7 +476,8 @@ function AdThumbnailSmall({ capture, sessionId }: { capture: EmulationAdCapture;
 }
 
 function RecentAdsStrip({ items }: { items: EmulationHistoryItem[] }) {
-  // Flatten last 8 ads across recent sessions
+  const scrollRef = useRef<HTMLDivElement>(null);
+
   const recentAds = useMemo(() => {
     const pairs: Array<{ capture: EmulationAdCapture; sessionId: string }> = [];
     for (const item of [...items].reverse()) {
@@ -488,6 +490,12 @@ function RecentAdsStrip({ items }: { items: EmulationHistoryItem[] }) {
     return pairs.reverse();
   }, [items]);
 
+  const scrollBy = (dir: number) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollBy({ left: dir * (el.clientWidth - 64), behavior: "smooth" });
+  };
+
   return (
     <div className="rounded-2xl flex flex-col" style={{ background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)" }}>
       <div className="px-5 pt-4 pb-3 flex items-center justify-between border-b" style={{ borderColor: "var(--line)" }}>
@@ -497,9 +505,17 @@ function RecentAdsStrip({ items }: { items: EmulationHistoryItem[] }) {
             {recentAds.length}
           </span>
         </div>
-        <Link to="/ads" className="inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12px] font-medium hover:opacity-80" style={{ color: "var(--ink-secondary)" }}>
-          Вся реклама <ChevronRight size={12} />
-        </Link>
+        <div className="flex items-center gap-1">
+          <button onClick={() => scrollBy(-1)} className="h-7 w-7 grid place-items-center rounded-lg hover:opacity-80" style={{ boxShadow: "inset 0 0 0 1px var(--line)", background: "var(--panel-soft)", color: "var(--ink-secondary)" }}>
+            <ChevronLeft size={14} />
+          </button>
+          <button onClick={() => scrollBy(1)} className="h-7 w-7 grid place-items-center rounded-lg hover:opacity-80" style={{ boxShadow: "inset 0 0 0 1px var(--line)", background: "var(--panel-soft)", color: "var(--ink-secondary)" }}>
+            <ChevronRight size={14} />
+          </button>
+          <Link to="/ads" className="ml-1 inline-flex items-center gap-1 h-7 px-2.5 rounded-full text-[12px] font-medium hover:opacity-80" style={{ color: "var(--ink-secondary)" }}>
+            Вся реклама <ChevronRight size={12} />
+          </Link>
+        </div>
       </div>
 
       {recentAds.length === 0 ? (
@@ -507,13 +523,17 @@ function RecentAdsStrip({ items }: { items: EmulationHistoryItem[] }) {
           Нет захваченной рекламы
         </div>
       ) : (
-        <div className="grid px-4 py-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
+        <div
+          ref={scrollRef}
+          className="flex gap-3 overflow-x-auto px-4 py-4"
+          style={{ scrollbarWidth: "thin" }}
+        >
           {recentAds.map(({ capture, sessionId }) => (
             <Link
               key={`${sessionId}-${capture.ad_position}`}
               to={`/sessions/${sessionId}`}
-              className="flex flex-col gap-2 p-2 rounded-2xl transition-shadow hover:shadow-md"
-              style={{ background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)" }}
+              className="shrink-0 flex flex-col gap-2 p-2 rounded-2xl transition-shadow hover:shadow-md"
+              style={{ width: 220, minWidth: 220, background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)" }}
             >
               <AdThumbnailSmall capture={capture} sessionId={sessionId} />
               <div className="px-1 flex flex-col gap-0.5">
@@ -583,7 +603,7 @@ export function DashboardScreen() {
             <RecentSessionsTable items={recentItems} />
           </div>
           <div className="lg:col-span-2">
-            <SessionLauncher />
+            <SessionLauncher popularTopics={summary.top_topics.map((t) => t.label)} />
           </div>
         </div>
 
