@@ -37,6 +37,9 @@ load_env_file "$BACKEND_ENV_FILE"
 echo "==> docker compose rebuild + restart"
 compose up -d --build
 
+echo "==> restart analysis worker"
+compose up -d --no-deps --force-recreate worker_analysis
+
 # ── 4. Android worker ─────────────────────────────────────────────────────────
 if android_enabled && systemctl list-units --type=service | grep -q yta-android-worker; then
   echo "==> restart yta-android-worker"

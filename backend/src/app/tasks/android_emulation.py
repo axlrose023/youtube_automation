@@ -522,18 +522,17 @@ async def android_emulation_task(
                         _last_persisted_ads_count = len(merged_ads)
                     except Exception:
                         pass
-                    if event.event == "ad_captured":
-                        try:
-                            from app.services.emulation.workflow.progress import queue_ad_analysis
+                    try:
+                        from app.services.emulation.workflow.progress import queue_ad_analysis
 
-                            await queue_ad_analysis(
-                                session_id=session_id,
-                                session_store=session_store,
-                                ad_analysis_service_available=True,
-                                total_hint=max(new_ads_count, 1),
-                            )
-                        except Exception:
-                            pass
+                        await queue_ad_analysis(
+                            session_id=session_id,
+                            session_store=session_store,
+                            ad_analysis_service_available=True,
+                            total_hint=max(new_ads_count, 1),
+                        )
+                    except Exception:
+                        pass
 
         try:
             run_dir = _standalone_run_dir(config, session_id)
