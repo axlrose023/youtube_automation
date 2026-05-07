@@ -16,19 +16,6 @@ const FALLBACK_TOPICS = [
 
 const DURATION_OPTIONS = [15, 30, 45, 60];
 
-const COUNTRIES: Record<string, { flag: string; name: string }> = {
-  FR: { flag: "🇫🇷", name: "Франция" },
-  DE: { flag: "🇩🇪", name: "Германия" },
-  US: { flag: "🇺🇸", name: "США" },
-  GB: { flag: "🇬🇧", name: "Великобритания" },
-  IT: { flag: "🇮🇹", name: "Италия" },
-  ES: { flag: "🇪🇸", name: "Испания" },
-  NL: { flag: "🇳🇱", name: "Нидерланды" },
-  PL: { flag: "🇵🇱", name: "Польша" },
-  UA: { flag: "🇺🇦", name: "Украина" },
-  TR: { flag: "🇹🇷", name: "Турция" },
-};
-
 function Label({ children }: { children: React.ReactNode }) {
   return (
     <div className="text-[11px] uppercase tracking-wider font-semibold mb-1.5" style={{ color: "var(--muted)" }}>
@@ -115,10 +102,6 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
     }
   }
 
-  const proxyCountry = selectedProxy?.country_code
-    ? (COUNTRIES[selectedProxy.country_code.toUpperCase()] ?? null)
-    : null;
-
   return (
     <div className="rounded-2xl p-5 flex flex-col gap-5" style={{ background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)" }}>
       {/* Header */}
@@ -136,28 +119,49 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
         {/* Duration + Proxy */}
         <div className="grid grid-cols-2 gap-3">
-          {/* Duration segment */}
+          {/* Duration segment + custom input */}
           <div>
             <Label>Длительность</Label>
-            <div className="flex items-center gap-0.5 h-9 p-0.5 rounded-lg" style={{ background: "var(--panel-soft)", boxShadow: "inset 0 0 0 1px var(--line)" }}>
-              {DURATION_OPTIONS.map((m) => {
-                const sel = duration === m;
-                return (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => setDuration(m)}
-                    className="flex-1 h-full rounded-md text-[12px] font-semibold tabular-nums transition-colors"
-                    style={sel
-                      ? { background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)", color: "var(--ink)" }
-                      : { color: "var(--ink-secondary)" }}
-                  >
-                    {m}
-                  </button>
-                );
-              })}
+            <div className="flex items-center gap-1.5">
+              <div className="flex-1 flex items-center gap-0.5 h-9 p-0.5 rounded-lg" style={{ background: "var(--panel-soft)", boxShadow: "inset 0 0 0 1px var(--line)" }}>
+                {DURATION_OPTIONS.map((m) => {
+                  const sel = duration === m;
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setDuration(m)}
+                      className="flex-1 h-full rounded-md text-[12px] font-semibold tabular-nums transition-colors"
+                      style={sel
+                        ? { background: "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)", color: "var(--ink)" }
+                        : { color: "var(--ink-secondary)" }}
+                    >
+                      {m}
+                    </button>
+                  );
+                })}
+              </div>
+              <input
+                type="number"
+                min={1}
+                max={480}
+                value={duration}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (!Number.isNaN(v) && v > 0) setDuration(v);
+                }}
+                className="w-14 h-9 px-2 rounded-lg text-[12px] font-semibold tabular-nums text-center outline-none transition-shadow"
+                style={{
+                  background: DURATION_OPTIONS.includes(duration) ? "var(--panel)" : "var(--brand-soft)",
+                  color: DURATION_OPTIONS.includes(duration) ? "var(--ink)" : "var(--brand-strong)",
+                  boxShadow: "inset 0 0 0 1px var(--line)",
+                }}
+                onFocus={(e) => { e.currentTarget.style.boxShadow = "inset 0 0 0 1.5px var(--brand)"; }}
+                onBlur={(e) => { e.currentTarget.style.boxShadow = "inset 0 0 0 1px var(--line)"; }}
+                aria-label="Своя длительность в минутах"
+              />
             </div>
-            <div className="mt-1 text-[11px]" style={{ color: "var(--muted)" }}>минуты</div>
+            <div className="mt-1 text-[11px]" style={{ color: "var(--muted)" }}>минуты · до 480</div>
           </div>
 
           {/* Proxy dropdown */}
@@ -169,9 +173,6 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
               className="w-full h-9 px-2.5 rounded-lg flex items-center gap-1.5 text-[13px] transition-colors"
               style={{ background: proxyOpen ? "var(--panel-soft)" : "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)", color: "var(--ink)" }}
             >
-              {proxyCountry ? (
-                <span className="text-[15px] leading-none">{proxyCountry.flag}</span>
-              ) : null}
               <span className="flex-1 text-left truncate font-medium" style={{ color: selectedProxy ? "var(--ink)" : "var(--muted)" }}>
                 {selectedProxy ? selectedProxy.label : "Нет прокси"}
               </span>
@@ -184,7 +185,6 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
             {proxyOpen && proxies.length > 0 && (
               <div className="absolute left-0 right-0 z-30 rounded-xl overflow-hidden" style={{ top: "calc(100% + 6px)", background: "var(--panel)", boxShadow: "0 8px 24px rgba(0,0,0,0.10), inset 0 0 0 1px var(--line)", maxHeight: 240, overflowY: "auto" }}>
                 {proxies.map((p) => {
-                  const c = p.country_code ? (COUNTRIES[p.country_code.toUpperCase()] ?? null) : null;
                   const sel = p.id === proxyId;
                   return (
                     <button
@@ -196,7 +196,6 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
                       onMouseEnter={(e) => { if (!sel) e.currentTarget.style.background = "var(--panel-soft)"; }}
                       onMouseLeave={(e) => { if (!sel) e.currentTarget.style.background = ""; }}
                     >
-                      {c ? <span className="w-5 text-[16px] leading-none text-center">{c.flag}</span> : <span className="w-5" />}
                       <span className="flex-1 truncate" style={{ color: "var(--ink)" }}>{p.label}</span>
                       <span className="font-mono text-[11px]" style={{ color: "var(--muted)" }}>{p.country_code ?? ""}</span>
                       {sel && <Check size={14} strokeWidth={2.2} style={{ color: "var(--ink-secondary)", marginLeft: 4 }} />}
