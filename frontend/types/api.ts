@@ -233,6 +233,7 @@ export interface Proxy {
   username?: string | null;
   password?: string | null;
   country_code?: string | null;
+  city?: string | null;
   notes?: string | null;
   is_active: boolean;
   url: string;
@@ -253,6 +254,7 @@ export interface ProxyCreate {
   username?: string | null;
   password?: string | null;
   country_code?: string | null;
+  city?: string | null;
   notes?: string | null;
   is_active?: boolean;
 }

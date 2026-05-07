@@ -16,6 +16,7 @@ class Proxy(Base, UUID7IDMixin, DateTimeMixin):
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     country_code: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(128), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 

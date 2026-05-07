@@ -29,6 +29,7 @@ class ProxyService:
             username=proxy.username,
             password=proxy.password,
             country_code=proxy.country_code,
+            city=proxy.city,
             notes=proxy.notes,
             is_active=proxy.is_active,
             url=proxy.to_url(),

@@ -19,6 +19,7 @@ const emptyForm: ProxyCreate = {
   username: "",
   password: "",
   country_code: "",
+  city: "",
   notes: "",
 };
 
@@ -63,6 +64,7 @@ export function ProxiesScreen() {
         username: form.username || null,
         password: form.password || null,
         country_code: form.country_code || null,
+        city: form.city || null,
         notes: form.notes || null,
       });
       setForm({ ...emptyForm });
@@ -141,10 +143,24 @@ export function ProxiesScreen() {
                 required
               />
               <Input
-                label="Страна"
-                placeholder="HR"
+                label="Страна (код)"
+                placeholder="FR"
                 value={form.country_code ?? ""}
-                onChange={(e) => setForm((f) => ({ ...f, country_code: e.target.value }))}
+                onChange={(e) => setForm((f) => ({ ...f, country_code: e.target.value.toUpperCase() }))}
+              />
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Input
+                label="Город"
+                placeholder="Paris"
+                value={form.city ?? ""}
+                onChange={(e) => setForm((f) => ({ ...f, city: e.target.value }))}
+              />
+              <Input
+                label="Заметки"
+                placeholder="Дополнительная информация"
+                value={form.notes ?? ""}
+                onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
               />
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
@@ -162,12 +178,6 @@ export function ProxiesScreen() {
                 onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
               />
             </div>
-            <Input
-              label="Заметки"
-              placeholder="Дополнительная информация"
-              value={form.notes ?? ""}
-              onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
-            />
 
             {formError && (
               <div className="rounded-lg border border-[var(--danger)]/20 bg-[var(--danger-soft)] px-3 py-2 text-sm text-[var(--danger)]">
@@ -194,7 +204,7 @@ export function ProxiesScreen() {
               <tr className="border-b border-[var(--line)] bg-[var(--panel-soft)]">
                 <th className="px-4 py-2.5 text-left font-medium text-[var(--ink-secondary)]">Название</th>
                 <th className="px-4 py-2.5 text-left font-medium text-[var(--ink-secondary)]">URL</th>
-                <th className="px-4 py-2.5 text-left font-medium text-[var(--ink-secondary)]">Страна</th>
+                <th className="px-4 py-2.5 text-left font-medium text-[var(--ink-secondary)]">Гео</th>
                 <th className="px-4 py-2.5 text-left font-medium text-[var(--ink-secondary)]">Статус</th>
                 <th className="px-4 py-2.5 text-right font-medium text-[var(--ink-secondary)]" />
               </tr>
@@ -212,7 +222,10 @@ export function ProxiesScreen() {
                     {proxy.scheme}://{proxy.host}:{proxy.port}
                   </td>
                   <td className="px-4 py-3 text-[var(--ink-secondary)]">
-                    {proxy.country_code || "—"}
+                    <div className="flex items-center gap-1">
+                      {proxy.country_code || "—"}
+                      {proxy.city && <span className="text-[var(--muted)]">· {proxy.city}</span>}
+                    </div>
                   </td>
                   <td className="px-4 py-3">
                     <span

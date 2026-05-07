@@ -14,6 +14,7 @@ class ProxyBase(BaseModel):
     username: str | None = Field(default=None, max_length=255)
     password: str | None = Field(default=None, max_length=255)
     country_code: str | None = Field(default=None, max_length=8)
+    city: str | None = Field(default=None, max_length=128)
     notes: str | None = None
     is_active: bool = True
 
@@ -30,6 +31,7 @@ class ProxyUpdate(BaseModel):
     username: str | None = None
     password: str | None = None
     country_code: str | None = Field(default=None, max_length=8)
+    city: str | None = Field(default=None, max_length=128)
     notes: str | None = None
     is_active: bool | None = None
 
