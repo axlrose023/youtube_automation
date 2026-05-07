@@ -1649,31 +1649,6 @@ def dump_results_not_loaded_debug(driver, serial: str, nav_dir: Path) -> None:
     )
 
 
-# ---------- banner screenshot crop ----------
-
-
-def crop_banner(full_screenshot: Path, bounds: tuple[int, int, int, int], out_path: Path) -> bool:
-    try:
-        from PIL import Image
-    except ImportError:
-        return False
-    try:
-        img = Image.open(str(full_screenshot))
-    except Exception:
-        return False
-    left, top, right, bottom = bounds
-    width, height = img.size
-    left = max(0, min(left, width))
-    right = max(0, min(right, width))
-    top = max(0, min(top, height))
-    bottom = max(0, min(bottom, height))
-    if right - left < 10 or bottom - top < 10:
-        return False
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    img.crop((left, top, right, bottom)).save(str(out_path), "PNG")
-    return out_path.stat().st_size > 0
-
-
 # ---------- main flow ----------
 
 
@@ -2668,13 +2643,10 @@ async def harvest_banners(
             if dedup_key not in seen_banner_keys:
                 seen_banner_keys.add(dedup_key)
 
-                full_path = banners_dir / f"_full_round_{round_idx}.png"
                 screenshot_rel = ""
-                if adb_screencap(serial, full_path):
-                    crop_path = banners_dir / f"banner_{round_idx}.png"
-                    if crop_banner(full_path, banner.bounds, crop_path):
-                        screenshot_rel = str(crop_path.relative_to(run_dir))
-                    full_path.unlink(missing_ok=True)
+                screenshot_path = banners_dir / f"banner_{round_idx}.png"
+                if adb_screencap(serial, screenshot_path):
+                    screenshot_rel = str(screenshot_path.relative_to(run_dir))
 
                 landing_url: str | None = None
                 landing_screenshot_rel: str | None = None
@@ -2823,13 +2795,10 @@ async def harvest_watch_recommendation_banner_step(
         dump_xml_snapshot(driver, debug_dir, f"round_{round_idx:02d}_panel_detected")
         dump_debug_screenshot(serial, debug_dir, f"round_{round_idx:02d}_panel_detected")
 
-        full_path = banners_dir / f"_full_watch_panel_round_{round_idx}.png"
         screenshot_rel = ""
-        if adb_screencap(serial, full_path):
-            crop_path = banners_dir / f"watch_panel_banner_{round_idx}.png"
-            if crop_banner(full_path, panel_ad.bounds, crop_path):
-                screenshot_rel = str(crop_path.relative_to(run_dir))
-            full_path.unlink(missing_ok=True)
+        screenshot_path = banners_dir / f"watch_panel_banner_{round_idx}.png"
+        if adb_screencap(serial, screenshot_path):
+            screenshot_rel = str(screenshot_path.relative_to(run_dir))
 
         landing_path = banners_dir / f"watch_panel_banner_{round_idx}_landing.png"
         landing_url, landing_screenshot_taken = await click_banner_and_capture_landing(
@@ -2968,13 +2937,10 @@ async def harvest_watch_recommendation_banner_step(
         dump_debug_screenshot(serial, debug_dir, f"round_{round_idx:02d}_before_click_ad_active")
         return
 
-    full_path = banners_dir / f"_full_watch_round_{round_idx}.png"
     screenshot_rel = ""
-    if adb_screencap(serial, full_path):
-        crop_path = banners_dir / f"watch_banner_{round_idx}.png"
-        if crop_banner(full_path, banner.bounds, crop_path):
-            screenshot_rel = str(crop_path.relative_to(run_dir))
-        full_path.unlink(missing_ok=True)
+    screenshot_path = banners_dir / f"watch_banner_{round_idx}.png"
+    if adb_screencap(serial, screenshot_path):
+        screenshot_rel = str(screenshot_path.relative_to(run_dir))
 
     landing_path = banners_dir / f"watch_banner_{round_idx}_landing.png"
     landing_url, landing_screenshot_taken = await click_banner_and_capture_landing(
