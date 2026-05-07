@@ -10,6 +10,7 @@ type AndroidUiStatus = {
   status: string;
   message?: string | null;
   snapshot_name?: string | null;
+  snapshot_saved?: boolean | null;
   error?: string | null;
 };
 
@@ -19,6 +20,34 @@ export function SetupScreen() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [novncUrl, setNovncUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [doneMessage, setDoneMessage] = useState<string>(
+    "Эмулятор остановлен. Автоматические сессии возобновлены.",
+  );
+
+  function complete(status: AndroidUiStatus) {
+    setDoneMessage(
+      status.snapshot_saved
+        ? "Снэпшот сохранён, эмулятор остановлен. Автоматические сессии возобновлены."
+        : "Эмулятор остановлен без сохранения. Автоматические сессии возобновлены.",
+    );
+    setPhase("done");
+  }
+
+  function openEmulatorWindow(url: string) {
+    window.open(
+      url,
+      "android-account-setup",
+      [
+        "popup=yes",
+        "width=460",
+        "height=920",
+        "left=80",
+        "top=40",
+        "noopener",
+        "noreferrer",
+      ].join(","),
+    );
+  }
 
   function applyStatus(status: AndroidUiStatus) {
     if (status.novnc_url) {
@@ -42,7 +71,7 @@ export function SetupScreen() {
       return;
     }
     if (status.status === "stopped" && phase !== "idle") {
-      setPhase("done");
+      complete(status);
     }
   }
 
@@ -92,7 +121,7 @@ export function SetupScreen() {
       const url = data.novnc_url;
       setNovncUrl(url);
       setPhase(data.status === "queued" || data.status === "starting" ? "starting" : "active");
-      window.open(url, "_blank", "noopener,noreferrer");
+      openEmulatorWindow(url);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Ошибка запуска";
       setError(msg);
@@ -104,8 +133,8 @@ export function SetupScreen() {
     setPhase("saving");
     setError(null);
     try {
-      await apiClient.post("/setup/android-ui/save-and-stop");
-      setPhase("done");
+      const { data } = await apiClient.post<AndroidUiStatus>("/setup/android-ui/save-and-stop");
+      complete(data);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Ошибка сохранения";
       setError(msg);
@@ -117,8 +146,8 @@ export function SetupScreen() {
     setPhase("stopping");
     setError(null);
     try {
-      await apiClient.post("/setup/android-ui/stop");
-      setPhase("done");
+      const { data } = await apiClient.post<AndroidUiStatus>("/setup/android-ui/stop");
+      complete(data);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Ошибка остановки";
       setError(msg);
@@ -162,8 +191,12 @@ export function SetupScreen() {
             </p>
             <a
               href={novncUrl}
-              target="_blank"
+              target="android-account-setup"
               rel="noopener noreferrer"
+              onClick={(event) => {
+                event.preventDefault();
+                openEmulatorWindow(novncUrl);
+              }}
               className="inline-flex items-center gap-2 rounded-lg border border-[var(--brand)] px-4 py-2 text-sm font-medium text-[var(--brand)] transition hover:bg-[var(--brand-soft)]"
             >
               <ExternalLink size={14} />
@@ -215,7 +248,7 @@ export function SetupScreen() {
 
       {phase === "done" && (
         <div className="rounded-xl border border-green-200 bg-green-50 px-5 py-4 text-sm text-green-800">
-          Снэпшот сохранён, эмулятор остановлен. Автоматические сессии возобновлены.
+          {doneMessage}
         </div>
       )}
 

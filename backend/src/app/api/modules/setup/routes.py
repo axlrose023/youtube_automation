@@ -38,6 +38,7 @@ class AndroidUiStatusResponse(BaseModel):
     novnc_url: str | None = None
     message: str | None = None
     snapshot_name: str | None = None
+    snapshot_saved: bool | None = None
     error: str | None = None
 
 
@@ -140,6 +141,7 @@ async def status_android_ui(
         status=status,
         novnc_url=state.get("novnc_url") or _config_novnc_url(request),
         snapshot_name=state.get("snapshot_name"),
+        snapshot_saved=state.get("snapshot_saved"),
         error=state.get("error"),
     )
 
@@ -156,6 +158,7 @@ async def save_and_stop_android_ui(
             status=status,
             novnc_url=(state or {}).get("novnc_url") or _config_novnc_url(request),
             snapshot_name=(state or {}).get("snapshot_name"),
+            snapshot_saved=(state or {}).get("snapshot_saved"),
             error=(state or {}).get("error"),
             message="Android UI is not active",
         )
@@ -169,6 +172,7 @@ async def save_and_stop_android_ui(
         status=status,
         novnc_url=state.get("novnc_url"),
         snapshot_name=state.get("snapshot_name"),
+        snapshot_saved=state.get("snapshot_saved"),
     )
 
 
@@ -183,6 +187,7 @@ async def stop_android_ui(
             status=str((state or {}).get("status") or "idle"),
             novnc_url=(state or {}).get("novnc_url") or _config_novnc_url(request),
             snapshot_name=(state or {}).get("snapshot_name"),
+            snapshot_saved=(state or {}).get("snapshot_saved"),
             error=(state or {}).get("error"),
             message="Android UI is not active",
         )
@@ -196,4 +201,5 @@ async def stop_android_ui(
         status=status,
         novnc_url=state.get("novnc_url"),
         snapshot_name=state.get("snapshot_name"),
+        snapshot_saved=state.get("snapshot_saved"),
     )

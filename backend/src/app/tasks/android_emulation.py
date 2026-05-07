@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 import sys
 import time
 import traceback
@@ -26,6 +27,7 @@ from app.services.mobile_app.android.config_ui import (
     patch_android_config_state,
 )
 from app.services.mobile_app.android.runtime import build_android_probe_runtime
+from app.services.mobile_app.android.tooling import build_android_runtime_env, require_tool_path
 from app.settings import Config
 from app.tiq import broker
 
@@ -63,6 +65,29 @@ def _standalone_run_dir(config: Config, session_id: str) -> Path:
         / session_id
         / f"run_{run_ts}"
     )
+
+
+def _clear_android_global_http_proxy_sync(serial: str) -> None:
+    adb_bin = require_tool_path("adb")
+    commands = (
+        ("settings", "put", "global", "http_proxy", ":0"),
+        ("settings", "delete", "global", "http_proxy"),
+        ("settings", "delete", "global", "global_http_proxy_host"),
+        ("settings", "delete", "global", "global_http_proxy_port"),
+        ("settings", "delete", "global", "global_http_proxy_exclusion_list"),
+    )
+    for args in commands:
+        try:
+            subprocess.run(
+                [adb_bin, "-s", serial, "shell", *args],
+                capture_output=True,
+                text=True,
+                env=build_android_runtime_env(),
+                check=False,
+                timeout=8,
+            )
+        except Exception:
+            continue
 
 
 async def _android_stop_watcher(
@@ -221,6 +246,9 @@ async def android_config_ui_task(
             ),
         )
         serial = device.adb_serial
+        # Config mode must never inherit a proxy from a previous run or a
+        # saved snapshot. Normal emulation can opt into a proxy explicitly.
+        await asyncio.to_thread(_clear_android_global_http_proxy_sync, serial)
         await patch_android_config_state(redis, status="running", serial=serial)
 
         while True:
