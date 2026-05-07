@@ -212,7 +212,7 @@ async def android_config_ui_task(
                 headless=False,
                 gpu_mode=config.android_app.bootstrap_emulator_gpu_mode,
                 accel_mode=config.android_app.bootstrap_emulator_accel_mode,
-                load_snapshot=not snapshot_exists,
+                load_snapshot=snapshot_exists,
                 save_snapshot=False,
                 snapshot_name=snapshot_name if snapshot_exists else None,
                 force_snapshot_load=snapshot_exists,
