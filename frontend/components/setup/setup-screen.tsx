@@ -1,14 +1,86 @@
-import { useState } from "react";
-import { ExternalLink, Monitor, Save } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ExternalLink, Monitor, Power, Save } from "lucide-react";
 
 import { apiClient } from "@/lib/api-client";
 
-type Phase = "idle" | "starting" | "active" | "saving" | "done" | "error";
+type Phase = "idle" | "starting" | "active" | "saving" | "stopping" | "done" | "error";
+
+type AndroidUiStatus = {
+  novnc_url?: string | null;
+  status: string;
+  message?: string | null;
+  snapshot_name?: string | null;
+  error?: string | null;
+};
+
+const ACTIVE_STATUSES = new Set(["queued", "starting", "running", "saving", "stopping"]);
 
 export function SetupScreen() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [novncUrl, setNovncUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  function applyStatus(status: AndroidUiStatus) {
+    if (status.novnc_url) {
+      setNovncUrl(status.novnc_url);
+    }
+    if (status.status === "failed") {
+      setError(status.error || "Ошибка настройки Android UI");
+      setPhase("error");
+      return;
+    }
+    if (status.status === "saving") {
+      setPhase("saving");
+      return;
+    }
+    if (status.status === "stopping") {
+      setPhase("stopping");
+      return;
+    }
+    if (ACTIVE_STATUSES.has(status.status)) {
+      setPhase(status.status === "queued" || status.status === "starting" ? "starting" : "active");
+      return;
+    }
+    if (status.status === "stopped" && phase !== "idle") {
+      setPhase("done");
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .get<AndroidUiStatus>("/setup/android-ui/status")
+      .then(({ data }) => {
+        if (!cancelled && ACTIVE_STATUSES.has(data.status)) {
+          applyStatus(data);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!["starting", "active", "saving", "stopping"].includes(phase)) {
+      return;
+    }
+    let cancelled = false;
+    const interval = window.setInterval(async () => {
+      try {
+        const { data } = await apiClient.get<AndroidUiStatus>("/setup/android-ui/status");
+        if (!cancelled) {
+          applyStatus(data);
+        }
+      } catch {
+        // The explicit action buttons surface request errors; polling stays quiet.
+      }
+    }, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [phase]);
 
   async function handleStart() {
     setPhase("starting");
@@ -19,7 +91,7 @@ export function SetupScreen() {
       );
       const url = data.novnc_url;
       setNovncUrl(url);
-      setPhase("active");
+      setPhase(data.status === "queued" || data.status === "starting" ? "starting" : "active");
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Ошибка запуска";
@@ -36,6 +108,19 @@ export function SetupScreen() {
       setPhase("done");
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Ошибка сохранения";
+      setError(msg);
+      setPhase("active");
+    }
+  }
+
+  async function handleStop() {
+    setPhase("stopping");
+    setError(null);
+    try {
+      await apiClient.post("/setup/android-ui/stop");
+      setPhase("done");
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Ошибка остановки";
       setError(msg);
       setPhase("active");
     }
@@ -63,11 +148,13 @@ export function SetupScreen() {
       {phase === "starting" && (
         <div className="flex items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] px-5 py-4">
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-[var(--brand)] border-t-transparent" />
-          <span className="text-sm text-[var(--ink-secondary)]">Запускаем эмулятор…</span>
+          <span className="text-sm text-[var(--ink-secondary)]">
+            Ждём Android worker и запускаем эмулятор…
+          </span>
         </div>
       )}
 
-      {(phase === "active" || phase === "saving") && novncUrl && (
+      {(["starting", "active", "saving", "stopping"].includes(phase)) && novncUrl && (
         <div className="space-y-4">
           <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] px-5 py-4">
             <p className="mb-3 text-sm text-[var(--ink-secondary)]">
@@ -90,7 +177,7 @@ export function SetupScreen() {
 
           <button
             onClick={handleSaveAndStop}
-            disabled={phase === "saving"}
+            disabled={phase === "saving" || phase === "stopping"}
             className="inline-flex items-center gap-2 rounded-lg bg-[#16a34a] px-5 py-2.5 text-sm font-medium text-white transition hover:opacity-90 disabled:opacity-60"
           >
             {phase === "saving" ? (
@@ -102,6 +189,24 @@ export function SetupScreen() {
               <>
                 <Save size={15} />
                 Сохранить и завершить
+              </>
+            )}
+          </button>
+
+          <button
+            onClick={handleStop}
+            disabled={phase === "saving" || phase === "stopping"}
+            className="ml-3 inline-flex items-center gap-2 rounded-lg border border-[var(--line)] px-5 py-2.5 text-sm font-medium text-[var(--ink-secondary)] transition hover:bg-[var(--panel-soft)] disabled:opacity-60"
+          >
+            {phase === "stopping" ? (
+              <>
+                <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-[var(--muted)] border-t-transparent" />
+                Останавливаем…
+              </>
+            ) : (
+              <>
+                <Power size={15} />
+                Остановить без сохранения
               </>
             )}
           </button>

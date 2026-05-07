@@ -24,8 +24,8 @@ except ModuleNotFoundError:
     pass
 
 try:
-    from .android_emulation import android_emulation_task
+    from .android_emulation import android_config_ui_task, android_emulation_task
 
-    __all__ += ["android_emulation_task"]
+    __all__ += ["android_emulation_task", "android_config_ui_task"]
 except ModuleNotFoundError:
     pass

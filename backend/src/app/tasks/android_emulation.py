@@ -10,6 +10,7 @@ from pathlib import Path
 
 from dishka import FromDishka
 from dishka.integrations.taskiq import inject
+from redis.asyncio import Redis
 
 from app.api.modules.emulation.models import SessionStatus
 from app.services.emulation.core.ad_analytics import build_ads_analytics
@@ -17,6 +18,14 @@ from app.services.emulation.config import ORCHESTRATION_RUN_LOCK_TTL_SECONDS
 from app.services.emulation.persistence import EmulationPersistenceService
 from app.services.emulation.session.store import EmulationSessionStore, merge_live_watched_ads
 from app.services.emulation.standalone_mapper import build_standalone_live_payload
+from app.services.mobile_app.android.avd_manager import AndroidEmulatorLaunchOptions
+from app.services.mobile_app.android.config_ui import (
+    ANDROID_CONFIG_SESSION_ID,
+    android_config_snapshot_name,
+    load_android_config_state,
+    patch_android_config_state,
+)
+from app.services.mobile_app.android.runtime import build_android_probe_runtime
 from app.settings import Config
 from app.tiq import broker
 
@@ -24,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 _ANDROID_QUEUE_POLL_SECONDS = 5
 _ANDROID_HEARTBEAT_SECONDS = 5
+_ANDROID_CONFIG_TIMEOUT_SECONDS = 8 * 60 * 60
 
 
 def _android_device_lock_id(config: Config) -> str:
@@ -100,6 +110,206 @@ async def _android_session_heartbeat(
             await asyncio.wait_for(stop_event.wait(), timeout=_ANDROID_HEARTBEAT_SECONDS)
         except TimeoutError:
             continue
+
+
+@broker.task(task_name="android_config_ui_task", timeout=28800)
+@inject
+async def android_config_ui_task(
+    holder: str,
+    session_store: FromDishka[EmulationSessionStore],
+    redis: FromDishka[Redis],
+    config: FromDishka[Config],
+) -> dict:
+    device_lock_id = _android_device_lock_id(config)
+    lock_holder = f"{ANDROID_CONFIG_SESSION_ID}:{holder}"
+    avd_name = (
+        config.android_app.bootstrap_avd_name
+        or config.android_app.default_avd_name
+    )
+    snapshot_name = android_config_snapshot_name(
+        config.android_app.runtime_snapshot_name,
+        config.android_app.warm_snapshot_name,
+    )
+    runtime = build_android_probe_runtime(config.android_app)
+    run_lock_acquired = False
+    device_lock_acquired = False
+    serial: str | None = None
+    saved_snapshot = False
+    started_at = time.monotonic()
+
+    async def _state_matches() -> bool:
+        state = await load_android_config_state(redis)
+        return bool(state and state.get("holder") == holder)
+
+    try:
+        await session_store.create(
+            ANDROID_CONFIG_SESSION_ID,
+            ["android_ui_config"],
+            duration_minutes=max(1, _ANDROID_CONFIG_TIMEOUT_SECONDS // 60),
+            profile_id=None,
+        )
+        run_lock_acquired = await session_store.try_acquire_run_lock(
+            session_id=ANDROID_CONFIG_SESSION_ID,
+            holder=lock_holder,
+            ttl_seconds=ORCHESTRATION_RUN_LOCK_TTL_SECONDS,
+        )
+        if not run_lock_acquired:
+            await patch_android_config_state(
+                redis,
+                status="failed",
+                error="Android config UI task is already running",
+                finished_at=time.time(),
+            )
+            return {"status": "already_running"}
+
+        while True:
+            if not await _state_matches():
+                return {"status": "superseded"}
+            state = await load_android_config_state(redis) or {}
+            if state.get("stop_requested"):
+                await patch_android_config_state(
+                    redis,
+                    status="stopped",
+                    finished_at=time.time(),
+                    message="Stopped before Android device became available",
+                )
+                return {"status": "stopped"}
+
+            device_lock_acquired = await session_store.try_acquire_profile_lock(
+                profile_id=device_lock_id,
+                holder=lock_holder,
+                ttl_seconds=ORCHESTRATION_RUN_LOCK_TTL_SECONDS,
+            )
+            if device_lock_acquired:
+                break
+            await patch_android_config_state(
+                redis,
+                status="queued",
+                queue_reason=f"Waiting for Android device slot {device_lock_id}",
+            )
+            await asyncio.sleep(_ANDROID_QUEUE_POLL_SECONDS)
+
+        await session_store.update(
+            ANDROID_CONFIG_SESSION_ID,
+            status=SessionStatus.RUNNING,
+            mode="android_config",
+            started_at=time.time(),
+            finished_at=None,
+            error=None,
+        )
+        await patch_android_config_state(
+            redis,
+            status="starting",
+            started_at=time.time(),
+            snapshot_name=snapshot_name,
+            error=None,
+        )
+
+        snapshot_exists = await runtime.avd_manager.snapshot_exists(avd_name, snapshot_name)
+        device = await runtime.avd_manager.ensure_device(
+            avd_name=avd_name,
+            launch=AndroidEmulatorLaunchOptions(
+                headless=False,
+                gpu_mode=config.android_app.bootstrap_emulator_gpu_mode,
+                accel_mode=config.android_app.bootstrap_emulator_accel_mode,
+                load_snapshot=not snapshot_exists,
+                save_snapshot=False,
+                snapshot_name=snapshot_name if snapshot_exists else None,
+                force_snapshot_load=snapshot_exists,
+                skip_adb_auth=config.android_app.emulator_skip_adb_auth,
+                force_stop_running=True,
+            ),
+        )
+        serial = device.adb_serial
+        await patch_android_config_state(redis, status="running", serial=serial)
+
+        while True:
+            if not await _state_matches():
+                break
+            elapsed = time.monotonic() - started_at
+            state = await load_android_config_state(redis) or {}
+            await session_store.update(
+                ANDROID_CONFIG_SESSION_ID,
+                status=SessionStatus.RUNNING,
+                mode="android_config",
+            )
+            if state.get("finish_requested"):
+                await patch_android_config_state(redis, status="saving")
+                await runtime.avd_manager.save_snapshot(serial, snapshot_name)
+                saved_snapshot = True
+                break
+            if state.get("stop_requested"):
+                await patch_android_config_state(redis, status="stopping")
+                break
+            if elapsed >= _ANDROID_CONFIG_TIMEOUT_SECONDS:
+                await patch_android_config_state(
+                    redis,
+                    status="stopping",
+                    message="Android config UI timed out",
+                )
+                break
+            await asyncio.sleep(2.0)
+
+        if serial is not None:
+            await patch_android_config_state(redis, status="stopping")
+            try:
+                await runtime.avd_manager.stop_device(serial, avd_name=avd_name)
+            except Exception:
+                await runtime.avd_manager.force_cleanup_device(
+                    adb_serial=serial,
+                    avd_name=avd_name,
+                )
+
+        await patch_android_config_state(
+            redis,
+            status="stopped",
+            serial=None,
+            snapshot_name=snapshot_name if saved_snapshot else None,
+            snapshot_saved=saved_snapshot,
+            finished_at=time.time(),
+            error=None,
+        )
+        await session_store.update(
+            ANDROID_CONFIG_SESSION_ID,
+            status=SessionStatus.STOPPED,
+            finished_at=time.time(),
+            error=None,
+        )
+        return {
+            "status": "stopped",
+            "snapshot_saved": saved_snapshot,
+            "snapshot_name": snapshot_name if saved_snapshot else None,
+        }
+    except Exception as exc:
+        error_msg = f"{type(exc).__name__}: {exc}"
+        logger.exception("Android config UI task failed")
+        await patch_android_config_state(
+            redis,
+            status="failed",
+            serial=None,
+            error=error_msg,
+            finished_at=time.time(),
+        )
+        await session_store.update(
+            ANDROID_CONFIG_SESSION_ID,
+            status=SessionStatus.FAILED,
+            finished_at=time.time(),
+            error=error_msg,
+        )
+        if serial is not None:
+            try:
+                await runtime.avd_manager.force_cleanup_device(
+                    adb_serial=serial,
+                    avd_name=avd_name,
+                )
+            except Exception:
+                logger.exception("Android config UI cleanup failed")
+        raise
+    finally:
+        if device_lock_acquired:
+            await session_store.release_profile_lock(device_lock_id, lock_holder)
+        if run_lock_acquired:
+            await session_store.release_run_lock(ANDROID_CONFIG_SESSION_ID, lock_holder)
 
 
 @broker.task(task_name="android_emulation_task", timeout=28800)
