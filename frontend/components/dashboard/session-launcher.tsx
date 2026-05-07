@@ -252,19 +252,21 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
 
           {/* Popular suggestions */}
           {suggestions.length > 0 && (
-            <div className="mt-2 flex items-center gap-1.5 flex-wrap">
-              <span className="text-[11px]" style={{ color: "var(--muted)" }}>Популярные:</span>
+            <div className="mt-2 flex items-center gap-1 flex-wrap">
+              <span className="text-[10.5px] mr-0.5" style={{ color: "var(--muted)" }}>Популярные:</span>
               {suggestions.map((t) => (
                 <button
                   key={t}
                   type="button"
                   onClick={() => addSuggestion(t)}
-                  className="inline-flex items-center h-6 px-2 rounded-full text-[11px] font-medium transition-colors"
+                  className="inline-flex items-center gap-0.5 h-[22px] pl-1.5 pr-2 rounded-full text-[10.5px] font-medium transition-colors max-w-[180px]"
                   style={{ background: "var(--panel-soft)", boxShadow: "inset 0 0 0 1px var(--line)", color: "var(--ink-secondary)" }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-soft)"; e.currentTarget.style.color = "var(--ink)"; }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--brand-soft)"; e.currentTarget.style.color = "var(--brand-strong)"; }}
                   onMouseLeave={(e) => { e.currentTarget.style.background = "var(--panel-soft)"; e.currentTarget.style.color = "var(--ink-secondary)"; }}
+                  title={t}
                 >
-                  + {t}
+                  <span className="opacity-60" style={{ fontSize: 11, lineHeight: 1 }}>+</span>
+                  <span className="truncate">{t}</span>
                 </button>
               ))}
             </div>
