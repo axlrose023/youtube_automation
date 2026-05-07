@@ -138,6 +138,7 @@ class EmulationHistoryGateway:
         requested_duration_minutes: int,
         requested_topics: list[str],
         queued_at: datetime.datetime | None = None,
+        proxy_country_code: str | None = None,
     ) -> EmulationSessionHistory:
         existing = await self.get_by_session_id(session_id)
         if existing:
@@ -149,6 +150,7 @@ class EmulationHistoryGateway:
             requested_duration_minutes=requested_duration_minutes,
             requested_topics=requested_topics,
             queued_at=queued_at or datetime.datetime.now(datetime.UTC),
+            proxy_country_code=proxy_country_code,
         )
         self.session.add(payload)
         await self.session.flush()

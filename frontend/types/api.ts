@@ -170,6 +170,7 @@ export interface EmulationHistoryItem {
   watched_ads?: EmulationWatchedAd[] | null;
   watched_ads_analytics?: EmulationAnalyticsAd[] | null;
   error?: string | null;
+  proxy_country_code?: string | null;
   captures: CaptureSummary;
   ad_captures?: EmulationAdCapture[] | null;
 }

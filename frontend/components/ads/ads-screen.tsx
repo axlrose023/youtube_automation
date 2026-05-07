@@ -1036,7 +1036,7 @@ export function AdsScreen() {
           session_id: item.session_id,
           session_started_at: item.started_at ?? null,
           session_topics: item.requested_topics,
-          session_proxy_country: (item as unknown as Record<string, unknown>)["session_proxy_country"] as string | null ?? null,
+          session_proxy_country: item.proxy_country_code ?? null,
           _index: result.length,
         });
       }

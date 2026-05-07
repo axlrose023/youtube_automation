@@ -165,4 +165,6 @@ class EmulationSessionHistory(Base, DateTimeMixin):
         default=list,
     )
 
+    proxy_country_code: Mapped[str | None] = mapped_column(String(8), nullable=True)
+
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

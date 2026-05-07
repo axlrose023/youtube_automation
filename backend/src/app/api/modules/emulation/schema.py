@@ -246,6 +246,7 @@ class EmulationHistoryItem(BaseModel):
     watched_ads: list[EmulationWatchedAd] | None = None
     watched_ads_analytics: list[EmulationAnalyticsAd] | None = None
     error: str | None = None
+    proxy_country_code: str | None = None
     captures: EmulationCaptureSummary = Field(default_factory=EmulationCaptureSummary)
     ad_captures: list[EmulationAdCaptureHistory] | None = None
 

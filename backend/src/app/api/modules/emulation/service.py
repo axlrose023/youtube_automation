@@ -68,8 +68,9 @@ class EmulationSessionService:
         runner_kind = "android"
 
         proxy_url: str | None = None
+        proxy_country_code: str | None = None
         if runner_kind == "android" and request.proxy_id is not None:
-            proxy_url = await self._resolve_proxy_url(request.proxy_id)
+            proxy_url, proxy_country_code = await self._resolve_proxy_url(request.proxy_id)
             if proxy_url is None:
                 raise HTTPException(status_code=404, detail="Proxy not found")
 
@@ -89,6 +90,7 @@ class EmulationSessionService:
             session_id=session_id,
             duration_minutes=request.duration_minutes,
             topics=request.topics,
+            proxy_country_code=proxy_country_code,
         )
 
         try:
@@ -117,11 +119,12 @@ class EmulationSessionService:
 
         return StartEmulationResponse(session_id=session_id, status=SessionStatus.QUEUED)
 
-    async def _resolve_proxy_url(self, proxy_id: uuid.UUID) -> str | None:
+    async def _resolve_proxy_url(self, proxy_id: uuid.UUID) -> tuple[str | None, str | None]:
+        """Returns (proxy_url, country_code)."""
         proxy = await self._history_service.uow.proxies.get_by_id(proxy_id)
         if proxy is None:
-            return None
-        return proxy.to_url()
+            return None, None
+        return proxy.to_url(), proxy.country_code
 
     async def stop_session(self, session_id: str) -> StopEmulationResponse:
         data = await self._session_store.get(session_id)
@@ -441,11 +444,13 @@ class EmulationHistoryService:
         session_id: str,
         duration_minutes: int,
         topics: list[str],
+        proxy_country_code: str | None = None,
     ) -> None:
         await self.uow.emulation_history.create_if_missing(
             session_id=session_id,
             requested_duration_minutes=duration_minutes,
             requested_topics=topics,
+            proxy_country_code=proxy_country_code,
         )
         await self.uow.commit()
 
@@ -777,6 +782,7 @@ class EmulationHistoryService:
             watched_ads=watched_ads,
             watched_ads_analytics=watched_ads_analytics,
             error=payload.error,
+            proxy_country_code=payload.proxy_country_code,
             captures=capture_summary,
             ad_captures=ad_captures,
         )
