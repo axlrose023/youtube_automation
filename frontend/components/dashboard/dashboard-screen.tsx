@@ -607,12 +607,12 @@ export function DashboardScreen() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1" style={{ gridTemplateColumns: "35fr 65fr", gap: 20 }}>
-          <div style={{ minWidth: 0 }}>
-            <GeoBreakdown items={items} />
-          </div>
-          <div style={{ minWidth: 0 }}>
+        <div className="grid grid-cols-1 lg:grid-cols-5" style={{ gap: 20 }}>
+          <div className="lg:col-span-3" style={{ minWidth: 0 }}>
             <RecentAdsStrip items={items} />
+          </div>
+          <div className="lg:col-span-2" style={{ minWidth: 0 }}>
+            <GeoBreakdown items={items} />
           </div>
         </div>
       </div>
