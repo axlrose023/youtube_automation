@@ -173,7 +173,7 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
                 <span className="text-[15px] leading-none">{proxyCountry.flag}</span>
               ) : null}
               <span className="flex-1 text-left truncate font-medium" style={{ color: selectedProxy ? "var(--ink)" : "var(--muted)" }}>
-                {selectedProxy ? (proxyCountry?.name ?? selectedProxy.label) : "Нет прокси"}
+                {selectedProxy ? selectedProxy.label : "Нет прокси"}
               </span>
               <ChevronDown size={13} style={{ color: "var(--muted)", transform: proxyOpen ? "rotate(180deg)" : undefined, transition: "transform 0.15s" }} />
             </button>
@@ -197,7 +197,7 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
                       onMouseLeave={(e) => { if (!sel) e.currentTarget.style.background = ""; }}
                     >
                       {c ? <span className="w-5 text-[16px] leading-none text-center">{c.flag}</span> : <span className="w-5" />}
-                      <span className="flex-1 truncate" style={{ color: "var(--ink)" }}>{c?.name ?? p.label}</span>
+                      <span className="flex-1 truncate" style={{ color: "var(--ink)" }}>{p.label}</span>
                       <span className="font-mono text-[11px]" style={{ color: "var(--muted)" }}>{p.country_code ?? ""}</span>
                       {sel && <Check size={14} strokeWidth={2.2} style={{ color: "var(--ink-secondary)", marginLeft: 4 }} />}
                     </button>
@@ -252,21 +252,19 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
 
           {/* Popular suggestions */}
           {suggestions.length > 0 && (
-            <div className="mt-2 flex items-center gap-1 flex-wrap">
-              <span className="text-[10.5px] mr-0.5" style={{ color: "var(--muted)" }}>Популярные:</span>
+            <div className="mt-2.5 flex items-baseline gap-x-2 gap-y-1.5 flex-wrap">
+              <span className="text-[10.5px] uppercase tracking-wider" style={{ color: "var(--muted)" }}>Популярные</span>
               {suggestions.map((t) => (
                 <button
                   key={t}
                   type="button"
                   onClick={() => addSuggestion(t)}
-                  className="inline-flex items-center gap-0.5 h-[22px] pl-1.5 pr-2 rounded-full text-[10.5px] font-medium transition-colors max-w-[180px]"
-                  style={{ background: "var(--panel-soft)", boxShadow: "inset 0 0 0 1px var(--line)", color: "var(--ink-secondary)" }}
+                  className="inline-flex items-center h-[22px] px-2 rounded-full text-[11px] font-medium transition-colors"
+                  style={{ background: "var(--panel-soft)", color: "var(--ink-secondary)" }}
                   onMouseEnter={(e) => { e.currentTarget.style.background = "var(--brand-soft)"; e.currentTarget.style.color = "var(--brand-strong)"; }}
                   onMouseLeave={(e) => { e.currentTarget.style.background = "var(--panel-soft)"; e.currentTarget.style.color = "var(--ink-secondary)"; }}
-                  title={t}
                 >
-                  <span className="opacity-60" style={{ fontSize: 11, lineHeight: 1 }}>+</span>
-                  <span className="truncate">{t}</span>
+                  {t}
                 </button>
               ))}
             </div>
