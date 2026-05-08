@@ -156,9 +156,9 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
                 })}
               </div>
               <input
-                type="number"
-                min={1}
-                max={1440}
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
                 value={durationDraft}
                 onChange={(e) => {
                   const raw = e.target.value;
@@ -257,7 +257,6 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
                     onChange={(e) => updateTopic(index, e.target.value)}
                     onFocus={(e) => { e.currentTarget.style.boxShadow = "inset 0 0 0 1.5px var(--brand)"; }}
                     onBlur={(e) => { e.currentTarget.style.boxShadow = "inset 0 0 0 1px var(--line)"; }}
-                    required={index === 0}
                   />
                   {topics.length > 1 && !(isLast && isEmpty) && (
                     <button
@@ -276,8 +275,8 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
 
           {/* Popular suggestions */}
           {suggestions.length > 0 && (
-            <div className="mt-2.5 flex items-center gap-x-1.5 gap-y-1.5 flex-wrap">
-              <span className="text-[10.5px] uppercase tracking-wider mr-0.5" style={{ color: "var(--muted)" }}>Популярные</span>
+            <div className="mt-2 flex items-center gap-x-1 gap-y-1 flex-wrap">
+              <span className="text-[9px] uppercase tracking-wider mr-0.5" style={{ color: "var(--muted)" }}>Популярные</span>
               {suggestions.map((t) => {
                 const sel = selectedSuggestions.has(t);
                 return (
@@ -285,12 +284,12 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
                     key={t}
                     type="button"
                     onClick={() => toggleSuggestion(t)}
-                    className="inline-flex items-center h-[22px] px-2.5 rounded-full text-[10.5px] font-medium transition-colors"
+                    className="inline-flex items-center h-[18px] px-2 rounded-full text-[9px] font-medium transition-colors"
                     style={sel
                       ? { background: "var(--ink)", color: "#fff", boxShadow: "inset 0 0 0 1px var(--ink)" }
-                      : { background: "transparent", color: "var(--ink-secondary)", boxShadow: "inset 0 0 0 1px var(--line)" }}
-                    onMouseEnter={(e) => { if (!sel) e.currentTarget.style.boxShadow = "inset 0 0 0 1px var(--line-strong, rgba(0,0,0,0.13))"; }}
-                    onMouseLeave={(e) => { if (!sel) e.currentTarget.style.boxShadow = "inset 0 0 0 1px var(--line)"; }}
+                      : { background: "transparent", color: "var(--muted)", boxShadow: "inset 0 0 0 1px var(--line)" }}
+                    onMouseEnter={(e) => { if (!sel) { e.currentTarget.style.color = "var(--ink-secondary)"; e.currentTarget.style.boxShadow = "inset 0 0 0 1px var(--line-strong, rgba(0,0,0,0.13))"; } }}
+                    onMouseLeave={(e) => { if (!sel) { e.currentTarget.style.color = "var(--muted)"; e.currentTarget.style.boxShadow = "inset 0 0 0 1px var(--line)"; } }}
                   >
                     {t}
                   </button>
