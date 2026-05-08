@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+
 from app.api.modules.emulation.models import (
     ANALYSIS_TERMINAL_STATUSES,
     AdCapture,
@@ -27,6 +29,24 @@ logger = logging.getLogger(__name__)
 
 _MAX_VIDEO_SIZE_MB = 20
 _MAX_SESSION_ANALYSIS_CONCURRENCY = 3
+
+
+def _is_retryable_database_error(exc: BaseException) -> bool:
+    if isinstance(exc, (InterfaceError, OperationalError)):
+        return True
+    if isinstance(exc, DBAPIError) and bool(getattr(exc, "connection_invalidated", False)):
+        return True
+
+    message = str(exc).lower()
+    retryable_fragments = (
+        "connection is closed",
+        "connection was closed",
+        "connection has been closed",
+        "connection terminated",
+        "server closed the connection",
+        "terminating connection",
+    )
+    return any(fragment in message for fragment in retryable_fragments)
 
 
 @dataclass(slots=True)
@@ -165,13 +185,34 @@ class AdAnalysisService:
                     outcome.summary,
                 )
                 await self._uow.commit()
-            except Exception:
+            except Exception as exc:
+                if _is_retryable_database_error(exc):
+                    logger.exception(
+                        "Session %s: retryable database failure while committing analysis result for capture %s",
+                        session_id,
+                        outcome.capture_id,
+                    )
+                    try:
+                        await self._uow.rollback()
+                    except Exception:
+                        logger.exception(
+                            "Session %s: rollback failed after retryable analysis commit error",
+                            session_id,
+                        )
+                    raise
+
                 logger.exception(
                     "Session %s: failed to commit analysis result for capture %s",
                     session_id,
                     outcome.capture_id,
                 )
-                await self._uow.rollback()
+                try:
+                    await self._uow.rollback()
+                except Exception:
+                    logger.exception(
+                        "Session %s: rollback failed after analysis commit error",
+                        session_id,
+                    )
                 failed += 1
                 continue
 

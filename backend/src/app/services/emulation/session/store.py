@@ -323,6 +323,9 @@ class EmulationSessionStore:
             return
         await self._redis.delete(key)
 
+    async def is_analysis_lock_active(self, session_id: str) -> bool:
+        return bool(await self._redis.exists(self._analysis_lock_key(session_id)))
+
     async def clear_session_locks(
         self,
         session_id: str,
