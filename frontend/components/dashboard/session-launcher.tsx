@@ -29,6 +29,7 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
   const [duration, setDuration] = useState(30);
   const [durationDraft, setDurationDraft] = useState("30");
   const [topics, setTopics] = useState([""]);
+  const [selectedSuggestions, setSelectedSuggestions] = useState<Set<string>>(new Set());
   const [proxyId, setProxyId] = useState("");
   const [proxies, setProxies] = useState<Proxy[]>([]);
   const [proxyOpen, setProxyOpen] = useState(false);
@@ -77,19 +78,31 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
     setTopics((prev) => normalizeTopics(prev.filter((_, i) => i !== index)));
   }
 
-  function addSuggestion(topic: string) {
-    const filled = topics.filter((t) => t.trim());
-    if (filled.includes(topic)) return;
-    setTopics(normalizeTopics([...filled, topic, ""]));
+  function toggleSuggestion(topic: string) {
+    setSelectedSuggestions((prev) => {
+      const next = new Set(prev);
+      if (next.has(topic)) next.delete(topic);
+      else next.add(topic);
+      return next;
+    });
   }
 
   const filledTopics = topics.filter((t) => t.trim());
-  const suggestions = topicPool.filter((t) => !filledTopics.includes(t)).slice(0, 6);
+  const suggestions = topicPool.slice(0, 6);
+  const totalSelected = filledTopics.length + Array.from(selectedSuggestions).filter((t) => !filledTopics.includes(t)).length;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    const payloadTopics = topics.map((t) => t.trim()).filter(Boolean);
+    const merged: string[] = [];
+    const seen = new Set<string>();
+    for (const t of topics.map((x) => x.trim()).filter(Boolean)) {
+      if (!seen.has(t)) { seen.add(t); merged.push(t); }
+    }
+    for (const t of selectedSuggestions) {
+      if (!seen.has(t)) { seen.add(t); merged.push(t); }
+    }
+    const payloadTopics = merged;
     if (payloadTopics.length === 0) { setError("Нужна хотя бы одна тема."); return; }
     if (!proxyId) { setError("Выбери прокси."); return; }
     setLoading(true);
@@ -223,7 +236,7 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <Label>Темы поиска</Label>
-            <span className="text-[11px] tabular-nums" style={{ color: "var(--muted)" }}>{filledTopics.length} выбрано</span>
+            <span className="text-[11px] tabular-nums" style={{ color: "var(--muted)" }}>{totalSelected} выбрано</span>
           </div>
 
           <div className="flex flex-col gap-1.5">
@@ -263,21 +276,26 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
 
           {/* Popular suggestions */}
           {suggestions.length > 0 && (
-            <div className="mt-2.5 flex items-baseline gap-x-2 gap-y-1.5 flex-wrap">
-              <span className="text-[10.5px] uppercase tracking-wider" style={{ color: "var(--muted)" }}>Популярные</span>
-              {suggestions.map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  onClick={() => addSuggestion(t)}
-                  className="inline-flex items-center h-[15px] px-1.5 rounded-full text-[8px] font-medium transition-colors"
-                  style={{ background: "var(--panel-soft)", color: "var(--ink-secondary)" }}
-                  onMouseEnter={(e) => { e.currentTarget.style.background = "var(--brand-soft)"; e.currentTarget.style.color = "var(--brand-strong)"; }}
-                  onMouseLeave={(e) => { e.currentTarget.style.background = "var(--panel-soft)"; e.currentTarget.style.color = "var(--ink-secondary)"; }}
-                >
-                  {t}
-                </button>
-              ))}
+            <div className="mt-2.5 flex items-center gap-x-1.5 gap-y-1.5 flex-wrap">
+              <span className="text-[10.5px] uppercase tracking-wider mr-0.5" style={{ color: "var(--muted)" }}>Популярные</span>
+              {suggestions.map((t) => {
+                const sel = selectedSuggestions.has(t);
+                return (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => toggleSuggestion(t)}
+                    className="inline-flex items-center h-[22px] px-2.5 rounded-full text-[10.5px] font-medium transition-colors"
+                    style={sel
+                      ? { background: "var(--ink)", color: "#fff", boxShadow: "inset 0 0 0 1px var(--ink)" }
+                      : { background: "transparent", color: "var(--ink-secondary)", boxShadow: "inset 0 0 0 1px var(--line)" }}
+                    onMouseEnter={(e) => { if (!sel) e.currentTarget.style.boxShadow = "inset 0 0 0 1px var(--line-strong, rgba(0,0,0,0.13))"; }}
+                    onMouseLeave={(e) => { if (!sel) e.currentTarget.style.boxShadow = "inset 0 0 0 1px var(--line)"; }}
+                  >
+                    {t}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
