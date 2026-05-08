@@ -44,7 +44,7 @@ echo "==> restart analysis worker"
 compose up -d --no-deps --force-recreate worker_analysis
 
 # ── 4. Android worker ─────────────────────────────────────────────────────────
-if android_enabled && systemctl list-units --type=service | grep -q yta-android-worker; then
+if android_enabled && systemctl list-unit-files yta-android-worker.service >/dev/null 2>&1; then
   echo "==> restart yta-android-worker"
   systemctl restart yta-android-worker
   sleep 2
