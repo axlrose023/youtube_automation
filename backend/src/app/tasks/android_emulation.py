@@ -100,7 +100,10 @@ async def _android_stop_watcher(
     while not heartbeat_stop.is_set():
         try:
             payload = await session_store.get(session_id)
-            if payload is not None and payload.get("status") == SessionStatus.STOPPING:
+            if payload is not None and (
+                payload.get("status") == SessionStatus.STOPPING
+                or bool(payload.get("stop_requested"))
+            ):
                 logger.info("Android session %s: stop_watcher detected STOPPING — signalling runner", session_id)
                 runner_stop_event.set()
                 return
@@ -390,6 +393,7 @@ async def android_emulation_task(
                 await session_store.update(
                     session_id,
                     status=SessionStatus.STOPPED,
+                    stop_requested=False,
                     finished_at=time.time(),
                     error="Stopped by user",
                     queue_reason=None,
@@ -571,6 +575,7 @@ async def android_emulation_task(
                 await session_store.update(
                     session_id,
                     status=SessionStatus.STOPPED,
+                    stop_requested=False,
                     finished_at=time.time(),
                     current_watch=None,
                     watched_ads=watched_ads,

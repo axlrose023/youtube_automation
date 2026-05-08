@@ -132,6 +132,9 @@ class EmulationSessionService:
             raise HTTPException(status_code=404, detail="Session not found")
 
         status = data.get("status")
+        if status == SessionStatus.STOPPING:
+            return StopEmulationResponse(session_id=session_id, status=SessionStatus.STOPPING)
+
         if status not in (SessionStatus.RUNNING, SessionStatus.QUEUED):
             raise HTTPException(
                 status_code=409,
@@ -156,6 +159,7 @@ class EmulationSessionService:
 
         await self._session_store.update(
             session_id,
+            status=SessionStatus.STOPPING,
             stop_requested=True,
             error=None,
         )

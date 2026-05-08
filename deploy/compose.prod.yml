@@ -76,6 +76,8 @@ services:
         condition: service_completed_successfully
 
   worker_browser:
+    profiles:
+      - legacy-browser-worker
     build:
       context: ..
       dockerfile: deploy/Dockerfile.emulation.standalone

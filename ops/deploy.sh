@@ -37,6 +37,9 @@ load_env_file "$BACKEND_ENV_FILE"
 echo "==> docker compose rebuild + restart"
 compose up -d --build
 
+echo "==> stop legacy browser worker"
+compose stop worker_browser >/dev/null 2>&1 || true
+
 echo "==> restart analysis worker"
 compose up -d --no-deps --force-recreate worker_analysis
 
