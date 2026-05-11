@@ -93,6 +93,11 @@ AD_CTA_WEB_LABEL_TOKENS = (
     "sign up",
     "subscribe",
     "book now",
+    "contact us",
+    "get offer",
+    "apply now",
+    "buy now",
+    "see more",
 )
 WATCH_PANEL_WEB_CTA_LABEL_TOKENS = AD_CTA_WEB_LABEL_TOKENS + (
     "get quote",
@@ -135,6 +140,33 @@ VIDEO_SUBSCRIBE_PROBABILITY = _env_probability(
 VIDEO_SOCIAL_MAX_ATTEMPTS = 6
 VIDEO_SOCIAL_RETRY_SECONDS = 3.0
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().casefold() not in {"0", "false", "no", "off"}
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
+SHORTS_PHASE_ENABLED = _env_bool("STANDALONE_SHORTS_PHASE_ENABLED", True)
+SHORTS_PHASE_MAX_SECONDS = _env_int("STANDALONE_SHORTS_PHASE_MAX_SECONDS", 120, minimum=15)
+SHORTS_PHASE_GROUPS = _env_int("STANDALONE_SHORTS_PHASE_GROUPS", 2, minimum=1)
+SHORTS_SWIPES_PER_OPEN = _env_int("STANDALONE_SHORTS_SWIPES_PER_OPEN", 3, minimum=0)
+SHORTS_WATCH_MIN_SECONDS = _env_int("STANDALONE_SHORTS_WATCH_MIN_SECONDS", 6, minimum=1)
+SHORTS_WATCH_MAX_SECONDS = _env_int("STANDALONE_SHORTS_WATCH_MAX_SECONDS", 10, minimum=1)
+SHORTS_AD_RECORD_SECONDS = _env_int("STANDALONE_SHORTS_AD_RECORD_SECONDS", 10, minimum=3)
+
 URL_DAT_RE = re.compile(r"\bdat=(https?://[^\s,}\]]+)", re.IGNORECASE)
 
 
@@ -161,6 +193,7 @@ class AdRecord:
     cta_kind: str  # "web", "play_store", "unknown", "none"
     landing_url: str | None
     landing_screenshot: str | None
+    screenshot: str | None = None
     captured_at: float = field(default_factory=time.time)
 
 
@@ -269,13 +302,16 @@ def adb_shell(serial: str, *args: str, timeout: float = 10.0) -> str:
 
 def adb_screencap(serial: str, out_path: Path) -> bool:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run(
-        [require_tool_path("adb"), "-s", serial, "exec-out", "screencap", "-p"],
-        capture_output=True,
-        check=False,
-        env=build_android_runtime_env(),
-        timeout=15,
-    )
+    try:
+        result = subprocess.run(
+            [require_tool_path("adb"), "-s", serial, "exec-out", "screencap", "-p"],
+            capture_output=True,
+            check=False,
+            env=build_android_runtime_env(),
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        return False
     if result.returncode != 0 or not result.stdout:
         return False
     out_path.write_bytes(result.stdout)
@@ -1533,6 +1569,41 @@ async def wait_for_resolved_landing_url(
     return best
 
 
+async def capture_settled_landing_screenshot(
+    *,
+    driver,
+    serial: str,
+    path: Path,
+    timeout: float = 15.0,
+    min_bytes: int = 120_000,
+) -> bool:
+    """Capture a landing screenshot only after the page has visibly painted.
+
+    Several real XML/screenshot samples showed Chrome with a resolved URL but
+    only a blank progress page after the old fixed 5s sleep. A byte-size gate is
+    intentionally simple here: retry while the screenshot still looks like an
+    empty Chrome shell, and don't attach a bad landing image if it never paints.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        await dismiss_browser_permission_prompt_if_present(driver, serial)
+        if adb_screencap(serial, path):
+            try:
+                if path.stat().st_size >= min_bytes:
+                    return True
+            except OSError:
+                pass
+        if time.monotonic() >= deadline:
+            break
+        await asyncio.sleep(1.0)
+    try:
+        if path.exists() and path.stat().st_size < min_bytes:
+            path.unlink()
+    except OSError:
+        pass
+    return False
+
+
 def extract_advertiser_hosts(landing_url: str | None) -> set[str]:
     """Pull real advertiser hostnames out of a googleadservices wrapper URL.
 
@@ -1579,7 +1650,11 @@ def extract_advertiser_hosts(landing_url: str | None) -> set[str]:
 
 
 def read_landing_url(serial: str, youtube_pkg: str) -> str | None:
-    result = adb(serial, "shell", "dumpsys", "activity", "activities", timeout=10)
+    try:
+        result = adb(serial, "shell", "dumpsys", "activity", "activities", timeout=10)
+    except subprocess.TimeoutExpired:
+        print("[topic-runner] read_landing_url:timeout", flush=True)
+        return None
     if result.returncode != 0:
         return None
     output = result.stdout or ""
@@ -1597,7 +1672,11 @@ def read_landing_url(serial: str, youtube_pkg: str) -> str | None:
 
 
 def current_foreground_package(serial: str) -> str:
-    output = adb_shell(serial, "dumpsys", "window", "windows", timeout=6)
+    try:
+        output = adb_shell(serial, "dumpsys", "window", "windows", timeout=6)
+    except subprocess.TimeoutExpired:
+        print("[topic-runner] foreground_package:timeout", flush=True)
+        return ""
     for pattern in (
         r"mCurrentFocus=.*?\s([\w.]+)/[\w.\$]+",
         r"mFocusedApp=.*?\s([\w.]+)/[\w.\$]+",
@@ -1672,13 +1751,33 @@ SYSTEM_ANR_WAIT_TOKENS = (
     "ожидать",
     "зачекати",
 )
+SYSTEM_ANR_CLOSE_TOKENS = (
+    "close app",
+    "закрыть приложение",
+    "закрити додаток",
+)
+BROWSER_PERMISSION_TITLE_TOKENS = (
+    "wants to use your device's location",
+    "wants to use your location",
+    "wants to know your location",
+    "wants to show notifications",
+)
+BROWSER_PERMISSION_BLOCK_TOKENS = (
+    "block",
+    "deny",
+    "don't allow",
+)
 
 
-def _system_anr_wait_bounds(page_source: str | None) -> tuple[int, int, int, int] | None:
+def _system_anr_action(
+    page_source: str | None,
+) -> tuple[str, tuple[int, int, int, int], str] | None:
     root = parse_xml(page_source)
     if root is None:
         return None
     has_anr = False
+    title_text = ""
+    close_bounds: list[tuple[int, int, int, int]] = []
     wait_bounds: list[tuple[int, int, int, int]] = []
     for node in root.iter():
         text = (
@@ -1689,24 +1788,84 @@ def _system_anr_wait_bounds(page_source: str | None) -> tuple[int, int, int, int
         low = text.casefold()
         if any(token in low for token in SYSTEM_ANR_TITLE_TOKENS):
             has_anr = True
+            title_text = text
+        if any(token == low or token in low for token in SYSTEM_ANR_CLOSE_TOKENS):
+            bounds = parse_bounds(node.attrib.get("bounds"))
+            if bounds is not None:
+                close_bounds.append(bounds)
         if any(token == low or token in low for token in SYSTEM_ANR_WAIT_TOKENS):
             bounds = parse_bounds(node.attrib.get("bounds"))
             if bounds is not None:
                 wait_bounds.append(bounds)
-    if not has_anr or not wait_bounds:
+    if not has_anr:
         return None
-    return sorted(wait_bounds, key=lambda b: (b[1], b[0]))[0]
+    title_low = title_text.casefold()
+    if "chrome" in title_low and close_bounds:
+        return "close_app", sorted(close_bounds, key=lambda b: (b[1], b[0]))[0], title_text
+    if wait_bounds:
+        return "wait", sorted(wait_bounds, key=lambda b: (b[1], b[0]))[0], title_text
+    return None
 
 
-def tap_system_anr_wait_if_present(driver, serial: str) -> bool:
-    bounds = _system_anr_wait_bounds(safe_page_source(driver))
-    if bounds is None:
+def handle_system_anr_dialog_if_present(driver, serial: str) -> bool:
+    action = _system_anr_action(safe_page_source(driver))
+    if action is None:
         return False
+    action_name, bounds, title = action
     left, top, right, bottom = bounds
     tapped = adb_tap(serial, (left + right) // 2, (top + bottom) // 2)
     if tapped:
-        print("[topic-runner] system_dialog:tap_wait", flush=True)
+        print(
+            f"[topic-runner] system_dialog:{action_name} title={title!r}",
+            flush=True,
+        )
+        if action_name == "close_app" and "chrome" in title.casefold():
+            try:
+                adb_force_stop(serial, CHROME_PACKAGE)
+            except Exception as exc:
+                print(
+                    f"[topic-runner] system_dialog:chrome_force_stop_failed err={type(exc).__name__}",
+                    flush=True,
+                )
     return tapped
+
+
+def _browser_permission_block_bounds(page_source: str | None) -> tuple[int, int, int, int] | None:
+    root = parse_xml(page_source)
+    if root is None:
+        return None
+    has_permission_dialog = False
+    block_bounds: list[tuple[int, int, int, int]] = []
+    for node in root.iter():
+        text = (
+            (node.attrib.get("text") or "")
+            + " "
+            + (node.attrib.get("content-desc") or "")
+        ).strip()
+        low = text.casefold()
+        if any(token in low for token in BROWSER_PERMISSION_TITLE_TOKENS):
+            has_permission_dialog = True
+        if any(token == low for token in BROWSER_PERMISSION_BLOCK_TOKENS):
+            bounds = parse_bounds(node.attrib.get("bounds"))
+            if bounds is not None:
+                block_bounds.append(bounds)
+    if not has_permission_dialog or not block_bounds:
+        return None
+    return sorted(block_bounds, key=lambda b: (b[1], b[0]))[0]
+
+
+async def dismiss_browser_permission_prompt_if_present(driver, serial: str) -> bool:
+    bounds = _browser_permission_block_bounds(safe_page_source(driver))
+    if bounds is None:
+        bounds = _browser_permission_block_bounds(adb_uiautomator_page_source(serial))
+    if bounds is None:
+        return False
+    left, top, right, bottom = bounds
+    if not adb_tap(serial, (left + right) // 2, (top + bottom) // 2):
+        return False
+    print("[topic-runner] browser_permission:block", flush=True)
+    await asyncio.sleep(0.8)
+    return True
 
 
 async def wait_for_results(driver, timeout: float, serial: str | None = None) -> bool:
@@ -1714,7 +1873,7 @@ async def wait_for_results(driver, timeout: float, serial: str | None = None) ->
     while time.monotonic() - started < timeout:
         if has_results_surface(driver):
             return True
-        if serial and tap_system_anr_wait_if_present(driver, serial):
+        if serial and handle_system_anr_dialog_if_present(driver, serial):
             await asyncio.sleep(1.0)
             continue
         if serial:
@@ -1722,6 +1881,12 @@ async def wait_for_results(driver, timeout: float, serial: str | None = None) ->
             if detect_surface_from_source(adb_source) == SURFACE_RESULTS:
                 return True
         await asyncio.sleep(0.7)
+    if has_results_surface(driver):
+        return True
+    if serial:
+        adb_source = adb_uiautomator_page_source(serial)
+        if detect_surface_from_source(adb_source) == SURFACE_RESULTS:
+            return True
     return False
 
 
@@ -1730,7 +1895,7 @@ async def wait_for_watch(driver, timeout: float, serial: str | None = None) -> b
     while time.monotonic() - started < timeout:
         if detect_surface(driver) == SURFACE_WATCH_FULL:
             return True
-        if serial and tap_system_anr_wait_if_present(driver, serial):
+        if serial and handle_system_anr_dialog_if_present(driver, serial):
             await asyncio.sleep(1.0)
             continue
         if serial:
@@ -1755,19 +1920,30 @@ def adb_swipe(
     end_y: int,
     duration_ms: int = 600,
 ) -> bool:
-    result = adb(
-        serial,
-        "shell",
-        "input",
-        "swipe",
-        str(x),
-        str(start_y),
-        str(x),
-        str(end_y),
-        str(duration_ms),
-        timeout=5,
-    )
-    return result.returncode == 0
+    for attempt in range(2):
+        try:
+            result = adb(
+                serial,
+                "shell",
+                "input",
+                "swipe",
+                str(x),
+                str(start_y),
+                str(x),
+                str(end_y),
+                str(duration_ms),
+                timeout=8,
+            )
+            if result.returncode == 0:
+                return True
+        except subprocess.TimeoutExpired:
+            print(
+                f"[topic-runner] adb_swipe timeout serial={serial} "
+                f"attempt={attempt + 1}",
+                flush=True,
+            )
+        time.sleep(0.3)
+    return False
 
 
 def get_screen_size(driver) -> tuple[int, int]:
@@ -1817,6 +1993,14 @@ async def center_banner_in_view(
 SPONSORED_LABEL_TOKENS = ("sponsored", "промо", "спонс", "реклама")
 RESULT_TILE_DESC_TOKENS = ("play video", "воспроизвести видео")
 SHORT_TILE_DESC_TOKENS = ("play short", "воспроизвести short")
+SHORTS_FILTER_CHIP_LABELS = ("Shorts", "Шортс")
+RESULTS_VIDEO_FILTER_CHIP_LABELS = ("Videos", "Видео")
+RESULTS_ALL_FILTER_CHIP_LABELS = ("All", "Все")
+REEL_WATCH_RESOURCE_IDS = (
+    "com.google.android.youtube:id/reel_watch_player",
+    "com.google.android.youtube:id/reel_watch_fragment_root",
+    "com.google.android.youtube:id/reel_time_bar",
+)
 DISPLAY_URL_RE = re.compile(
     r"\b(?:https?://)?(?:www\.)?([a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,})(/[^\s|]*)?",
     re.IGNORECASE,
@@ -1840,6 +2024,18 @@ class _WatchPanelAd:
 
 @dataclass(frozen=True)
 class _VideoTile:
+    bounds: tuple[int, int, int, int]
+    title: str
+
+
+@dataclass(frozen=True)
+class _ShortTile:
+    bounds: tuple[int, int, int, int]
+    title: str
+
+
+@dataclass(frozen=True)
+class _ShortsReelAd:
     bounds: tuple[int, int, int, int]
     title: str
 
@@ -2447,37 +2643,867 @@ def find_top_sponsored_banner(driver) -> _Banner | None:
     return sorted(banner_candidates, key=lambda banner: banner.bounds[1])[0]
 
 
-def collect_video_tiles(driver) -> list[_VideoTile]:
+def collect_video_tiles(driver, serial: str | None = None) -> list[_VideoTile]:
     """Return all tappable video tiles on the current results page (Shorts excluded)."""
-    root = parse_xml(safe_page_source(driver))
-    if root is None:
-        return []
     _, height = get_screen_size(driver)
     feed_top = int(height * 0.10)
     feed_bottom = int(height * 0.92)
-    tiles: list[_VideoTile] = []
+
+    def _collect(root: ET.Element | None) -> list[_VideoTile]:
+        if root is None:
+            return []
+        tiles: list[_VideoTile] = []
+        for node in root.iter():
+            desc = (node.attrib.get("content-desc") or "").casefold()
+            if not desc:
+                continue
+            if not any(token in desc for token in RESULT_TILE_DESC_TOKENS):
+                continue
+            if any(token in desc for token in SHORT_TILE_DESC_TOKENS):
+                continue
+            bounds = parse_bounds(node.attrib.get("bounds"))
+            if bounds is None:
+                continue
+            left, top, right, bottom = bounds
+            if top < feed_top or bottom > feed_bottom:
+                continue
+            if (right - left) < 200 or (bottom - top) < 120:
+                continue
+            # Geometry-based Short rejection (vertical narrow cards).
+            if (right - left) < 360:
+                continue
+            title = (node.attrib.get("content-desc") or "").strip()
+            tiles.append(_VideoTile(bounds=bounds, title=title))
+        return tiles
+
+    tiles = _collect(parse_xml(safe_page_source(driver)))
+    if not tiles and serial:
+        tiles = _collect(parse_xml(adb_uiautomator_page_source(serial)))
+    return tiles
+
+
+def has_shorts_reel_surface_source(page_source: str | None) -> bool:
+    root = parse_xml(page_source)
+    if root is None:
+        return False
+    if _root_has_resource_id(root, RESULTS_RESOURCE_IDS):
+        return False
+    return _root_has_resource_id(root, REEL_WATCH_RESOURCE_IDS)
+
+
+def has_shorts_reel_surface(driver) -> bool:
+    return has_shorts_reel_surface_source(safe_page_source(driver))
+
+
+async def wait_for_shorts_reel(driver, timeout: float, serial: str | None = None) -> bool:
+    started = time.monotonic()
+    while time.monotonic() - started < timeout:
+        if has_shorts_reel_surface(driver):
+            return True
+        if serial:
+            adb_source = adb_uiautomator_page_source(serial)
+            if has_shorts_reel_surface_source(adb_source):
+                return True
+        await asyncio.sleep(0.35)
+    return False
+
+
+def reveal_results_filter_chips(driver, serial: str) -> None:
+    width, height = get_screen_size(driver)
+    adb_swipe(
+        serial,
+        x=width // 2,
+        start_y=int(height * 0.36),
+        end_y=int(height * 0.62),
+        duration_ms=500,
+    )
+
+
+def _find_filter_chip_bounds(
+    driver,
+    labels: tuple[str, ...],
+    serial: str | None = None,
+) -> list[tuple[int, int, int, int]]:
+    _, height = get_screen_size(driver)
+    normalized = {label.casefold() for label in labels}
+
+    def _collect(root: ET.Element | None) -> list[tuple[int, int, int, int]]:
+        if root is None:
+            return []
+        candidates: list[tuple[int, int, int, int]] = []
+        seen: set[tuple[int, int, int, int]] = set()
+        for node in root.iter():
+            text = (node.attrib.get("text") or "").strip()
+            desc = (node.attrib.get("content-desc") or "").strip()
+            if text.casefold() not in normalized and desc.casefold() not in normalized:
+                continue
+            bounds = parse_bounds(node.attrib.get("bounds"))
+            if bounds is None:
+                continue
+            left, top, right, bottom = bounds
+            if top > int(height * 0.35):
+                # Excludes the bottom-navigation Shorts tab.
+                continue
+            if right - left < 24 or bottom - top < 24:
+                continue
+            if bounds in seen:
+                continue
+            seen.add(bounds)
+            candidates.append(bounds)
+        return sorted(candidates, key=lambda b: (b[1], b[0]))
+
+    candidates = _collect(parse_xml(safe_page_source(driver)))
+    if not candidates and serial:
+        candidates = _collect(parse_xml(adb_uiautomator_page_source(serial)))
+    return candidates
+
+
+async def tap_results_filter_chip(
+    driver,
+    serial: str,
+    labels: tuple[str, ...],
+    *,
+    attempts: int = 3,
+) -> bool:
+    for attempt in range(attempts):
+        chip_bounds = _find_filter_chip_bounds(driver, labels, serial=serial)
+        if chip_bounds:
+            left, top, right, bottom = chip_bounds[0]
+            if adb_tap(serial, (left + right) // 2, (top + bottom) // 2):
+                await asyncio.sleep(1.0)
+                return True
+        if attempt + 1 < attempts:
+            reveal_results_filter_chips(driver, serial)
+            await asyncio.sleep(0.8)
+    return False
+
+
+def collect_short_tiles(driver, serial: str | None = None) -> list[_ShortTile]:
+    width, height = get_screen_size(driver)
+
+    def _collect(root: ET.Element | None) -> list[_ShortTile]:
+        if root is None:
+            return []
+        tiles: list[_ShortTile] = []
+        seen: set[tuple[str, tuple[int, int, int, int]]] = set()
+        for node in root.iter():
+            desc = (node.attrib.get("content-desc") or "").strip()
+            if not desc:
+                continue
+            lowered = desc.casefold()
+            if not any(token in lowered for token in SHORT_TILE_DESC_TOKENS):
+                continue
+            bounds = parse_bounds(node.attrib.get("bounds"))
+            if bounds is None:
+                continue
+            left, top, right, bottom = bounds
+            if bottom <= int(height * 0.18) or top >= int(height * 0.94):
+                continue
+            if right <= 0 or left >= width:
+                continue
+            if (right - left) < 140 or (bottom - top) < 120:
+                continue
+            title = desc
+            for marker in (" - play Short", " - Play Short", " - PLAY SHORT"):
+                if marker in title:
+                    title = title.split(marker, 1)[0].strip()
+                    break
+            if not title:
+                title = "Shorts"
+            key = (title, bounds)
+            if key in seen:
+                continue
+            seen.add(key)
+            tiles.append(_ShortTile(bounds=bounds, title=title))
+        return sorted(tiles, key=lambda tile: (tile.bounds[1], tile.bounds[0]))
+
+    tiles = _collect(parse_xml(safe_page_source(driver)))
+    if not tiles and serial:
+        tiles = _collect(parse_xml(adb_uiautomator_page_source(serial)))
+    return tiles
+
+
+def shorts_reel_signature(driver) -> str | None:
+    root = parse_xml(safe_page_source(driver))
+    if root is None:
+        return None
+    width, height = get_screen_size(driver)
+    values: list[str] = []
+    seen: set[str] = set()
+    generic_values = {
+        "go to channel",
+        "pause video",
+        "play video",
+        "previous video",
+        "next video",
+        "dislike this video",
+        "share this video",
+        "remix",
+        "home",
+        "shorts",
+        "create",
+        "subscriptions",
+        "you",
+        "search",
+        "more",
+        "navigate up",
+    }
+    progress_re = re.compile(r"\bminutes?\b.*\bseconds?\b.*\bof\b", re.IGNORECASE)
+
+    def add(prefix: str, value: str) -> None:
+        normalized = re.sub(r"\s+", " ", value).strip()
+        if not normalized:
+            return
+        item = f"{prefix}:{normalized.casefold()}"
+        if item in seen:
+            return
+        seen.add(item)
+        values.append(item)
+
     for node in root.iter():
-        desc = (node.attrib.get("content-desc") or "").casefold()
-        if not desc:
+        text = (node.attrib.get("text") or "").strip()
+        desc = (node.attrib.get("content-desc") or "").strip()
+        value = text or desc
+        if not value:
             continue
-        if not any(token in desc for token in RESULT_TILE_DESC_TOKENS):
+        lowered = value.casefold()
+        if lowered in generic_values or progress_re.search(value):
             continue
-        if any(token in desc for token in SHORT_TILE_DESC_TOKENS):
+        bounds = parse_bounds(node.attrib.get("bounds"))
+        if desc.casefold().startswith("subscribe to @"):
+            add("channel", desc)
+            continue
+        if "like this video along with" in lowered:
+            add("like", value)
+            continue
+        if lowered.startswith("view ") and "comment" in lowered:
+            add("comments", value)
+            continue
+        if bounds is None:
+            continue
+        left, top, right, bottom = bounds
+        if left < int(width * 0.88) and top > int(height * 0.70) and bottom < int(height * 0.93):
+            if len(value) >= 8:
+                add("caption", value)
+    if not values:
+        return None
+    return "|".join(values[:6])
+
+
+def _shorts_reel_ad_title(value: str) -> str | None:
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    if not cleaned:
+        return None
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if any(line.casefold() == "ad" for line in lines):
+        title = " ".join(line for line in lines if line.casefold() != "ad").strip()
+        return title or "Shorts ad"
+    if re.search(r"\bSponsored\b", cleaned, flags=re.IGNORECASE):
+        return re.sub(r"\bSponsored\b", "", cleaned, flags=re.IGNORECASE).strip() or "Shorts ad"
+    return None
+
+
+def find_shorts_reel_ad(driver) -> _ShortsReelAd | None:
+    root = parse_xml(safe_page_source(driver))
+    if root is None or not _root_has_resource_id(root, REEL_WATCH_RESOURCE_IDS):
+        return None
+    candidates: list[tuple[int, int, tuple[int, int, int, int], str]] = []
+    fallback: list[tuple[int, int, tuple[int, int, int, int], str]] = []
+    for node in root.iter():
+        text = (node.attrib.get("text") or "").strip()
+        desc = (node.attrib.get("content-desc") or "").strip()
+        value = desc or text
+        title = _shorts_reel_ad_title(value)
+        if title is None:
+            continue
+        bounds = parse_bounds(node.attrib.get("bounds"))
+        if bounds is None:
+            continue
+        score = 0 if node.attrib.get("clickable") == "true" else 1
+        item = (score, -(bounds[2] - bounds[0]) * (bounds[3] - bounds[1]), bounds, title)
+        if node.attrib.get("clickable") == "true":
+            candidates.append(item)
+        else:
+            fallback.append(item)
+    pool = candidates or fallback
+    if not pool:
+        return None
+    _, _, bounds, title = sorted(pool, key=lambda item: (item[0], item[1]))[0]
+    return _ShortsReelAd(bounds=bounds, title=title)
+
+
+def find_shorts_reel_ad_cta_bounds(driver) -> tuple[int, int, int, int] | None:
+    root = parse_xml(safe_page_source(driver))
+    if root is None or not _root_has_resource_id(root, REEL_WATCH_RESOURCE_IDS):
+        return None
+    width, height = get_screen_size(driver)
+    candidates: list[tuple[int, int, int, tuple[int, int, int, int]]] = []
+    for node in root.iter():
+        label = _node_text(node).strip()
+        if not label:
+            continue
+        if not _label_has_any_token(label, WATCH_PANEL_WEB_CTA_LABEL_TOKENS):
+            continue
+        if _label_has_any_token(label, AD_CTA_PLAY_STORE_LABEL_TOKENS):
             continue
         bounds = parse_bounds(node.attrib.get("bounds"))
         if bounds is None:
             continue
         left, top, right, bottom = bounds
-        if top < feed_top or bottom > feed_bottom:
+        node_width = right - left
+        node_height = bottom - top
+        if top < int(height * 0.55) or bottom > int(height * 0.94):
             continue
-        if (right - left) < 200 or (bottom - top) < 120:
+        if node_width < int(width * 0.40) or node_height < 45:
             continue
-        # Geometry-based Short rejection (vertical narrow cards).
-        if (right - left) < 360:
+        candidates.append(
+            (
+                0 if node.attrib.get("clickable") == "true" else 1,
+                -bottom,
+                -node_width,
+                bounds,
+            )
+        )
+    if not candidates:
+        return None
+    return sorted(candidates)[0][3]
+
+
+def is_shorts_reel_play_store_ad(driver) -> bool:
+    root = parse_xml(safe_page_source(driver))
+    if root is None or not _root_has_resource_id(root, REEL_WATCH_RESOURCE_IDS):
+        return False
+    width, height = get_screen_size(driver)
+    for node in root.iter():
+        label = _node_text(node).strip()
+        if not label:
             continue
-        title = (node.attrib.get("content-desc") or "").strip()
-        tiles.append(_VideoTile(bounds=bounds, title=title))
-    return tiles
+        bounds = parse_bounds(node.attrib.get("bounds"))
+        if bounds is None:
+            continue
+        left, top, right, bottom = bounds
+        if top < int(height * 0.55) or bottom > int(height * 0.94):
+            continue
+        if right - left < int(width * 0.20) or bottom - top < 35:
+            continue
+        label_low = label.casefold()
+        if any(hint in label_low for hint in PLAY_STORE_BANNER_HINT_TOKENS):
+            return True
+        if _label_has_any_token(label, AD_CTA_PLAY_STORE_LABEL_TOKENS):
+            return True
+    return False
+
+
+async def capture_shorts_reel_ad(
+    *,
+    driver,
+    serial: str,
+    youtube_pkg: str,
+    activity: str,
+    topic: str,
+    record: TopicRecord,
+    run_dir: Path,
+    recorder: AndroidScreenRecorder,
+    ad: _ShortsReelAd,
+    debug_dir: Path,
+    record_seconds: float,
+    stop_event: asyncio.Event | None = None,
+    on_progress: StandaloneProgressCallback | None = None,
+) -> bool:
+    ads_dir = run_dir / "ads" / safe_topic_slug(topic)
+    ad_index = len(record.ads) + 1
+    tag = f"shorts_ad{ad_index:02d}"
+    dump_xml_snapshot(driver, debug_dir, f"{tag}_detect")
+    dump_debug_screenshot(serial, debug_dir, f"{tag}_detect")
+    screenshot_path = ads_dir / f"{tag}.png"
+    screenshot_rel = (
+        str(screenshot_path.relative_to(run_dir))
+        if adb_screencap(serial, screenshot_path)
+        else None
+    )
+
+    rec_handle = None
+    video_rel: str | None = None
+    recorded_seconds = 0.0
+    play_store_seen = is_shorts_reel_play_store_ad(driver)
+    try:
+        rec_handle = await recorder.start(
+            artifact_prefix=f"shorts_ad_{ad_index}_{int(time.time())}"
+        )
+    except Exception as exc:
+        print(
+            f"[topic-runner] shorts_ad recorder.start failed: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+    if rec_handle is not None:
+        started = time.monotonic()
+        while time.monotonic() - started < max(3.0, record_seconds):
+            if stop_event is not None and stop_event.is_set():
+                break
+            if not has_shorts_reel_surface(driver):
+                break
+            if is_shorts_reel_play_store_ad(driver):
+                play_store_seen = True
+                break
+            await asyncio.sleep(0.5)
+        recorded_seconds = round(time.monotonic() - started, 2)
+        try:
+            video_path = await recorder.stop(rec_handle, keep_local=True)
+        except Exception:
+            video_path = None
+        if video_path:
+            video_rel = str(video_path.relative_to(run_dir))
+    dump_xml_snapshot(driver, debug_dir, f"{tag}_record_stop")
+    dump_debug_screenshot(serial, debug_dir, f"{tag}_record_stop")
+
+    if play_store_seen or is_shorts_reel_play_store_ad(driver):
+        if video_rel:
+            try:
+                (run_dir / video_rel).unlink(missing_ok=True)
+            except Exception:
+                pass
+        if screenshot_rel:
+            try:
+                (run_dir / screenshot_rel).unlink(missing_ok=True)
+            except Exception:
+                pass
+        print(
+            f"[topic-runner] shorts_ad_play_store_skip topic={topic!r} "
+            f"title={ad.title!r} sec={recorded_seconds}",
+            flush=True,
+        )
+        return False
+
+    tap_bounds = find_shorts_reel_ad_cta_bounds(driver) or ad.bounds
+    landing_path = ads_dir / f"{tag}_landing.png"
+    landing_url, landing_screenshot_taken = await click_banner_and_capture_landing(
+        driver=driver,
+        serial=serial,
+        youtube_pkg=youtube_pkg,
+        activity=activity,
+        bounds=ad.bounds,
+        tap_bounds=tap_bounds,
+        landing_screenshot_path=landing_path,
+    )
+    landing_screenshot_rel = (
+        str(landing_path.relative_to(run_dir))
+        if landing_screenshot_taken and landing_path.exists()
+        else None
+    )
+    await asyncio.sleep(0.8)
+    if has_shorts_reel_surface(driver) or await wait_for_shorts_reel(
+        driver, timeout=3.0, serial=serial
+    ):
+        dump_xml_snapshot(driver, debug_dir, f"{tag}_after_landing_reel")
+        dump_debug_screenshot(serial, debug_dir, f"{tag}_after_landing_reel")
+    else:
+        dump_xml_snapshot(driver, debug_dir, f"{tag}_after_landing_unknown")
+        dump_debug_screenshot(serial, debug_dir, f"{tag}_after_landing_unknown")
+
+    record.ads.append(
+        AdRecord(
+            video=video_rel,
+            recorded_seconds=recorded_seconds,
+            cta_label=ad.title,
+            cta_kind="web",
+            landing_url=landing_url,
+            landing_screenshot=landing_screenshot_rel,
+            screenshot=screenshot_rel,
+        )
+    )
+    await emit_progress(
+        on_progress,
+        event="ad_captured",
+        run_dir=run_dir,
+        topic=topic,
+        topic_record=record,
+    )
+    print(
+        f"[topic-runner] shorts_ad captured topic={topic!r} idx={ad_index} "
+        f"title={ad.title!r} sec={recorded_seconds} landing={landing_url}",
+        flush=True,
+    )
+    return True
+
+
+async def capture_shorts_results_banner_if_present(
+    *,
+    driver,
+    serial: str,
+    youtube_pkg: str,
+    activity: str,
+    topic: str,
+    record: TopicRecord,
+    run_dir: Path,
+    debug_dir: Path,
+    on_progress: StandaloneProgressCallback | None = None,
+) -> bool:
+    # Duplicates search-results banner capture on purpose: Shorts-filter
+    # result pages expose Sponsored cards with the same XML/CTA contract.
+    banner = find_top_sponsored_banner(driver)
+    if banner is None:
+        dump_xml_snapshot(driver, debug_dir, "shorts_banner_none")
+        return False
+    if banner.tap_bounds is None:
+        await center_banner_in_view(driver, serial, banner.bounds)
+        await asyncio.sleep(0.6)
+        banner = find_top_sponsored_banner(driver) or banner
+
+    banners_dir = run_dir / "banners" / safe_topic_slug(topic)
+    banner_index = len(record.banners)
+    screenshot_path = banners_dir / f"shorts_banner_{banner_index}.png"
+    screenshot_rel = (
+        str(screenshot_path.relative_to(run_dir))
+        if adb_screencap(serial, screenshot_path)
+        else ""
+    )
+    landing_path = banners_dir / f"shorts_banner_{banner_index}_landing.png"
+    landing_url, landing_screenshot_taken = await click_banner_and_capture_landing(
+        driver=driver,
+        serial=serial,
+        youtube_pkg=youtube_pkg,
+        activity=activity,
+        bounds=banner.bounds,
+        tap_bounds=banner.tap_bounds,
+        landing_screenshot_path=landing_path,
+    )
+    landing_screenshot_rel = (
+        str(landing_path.relative_to(run_dir))
+        if landing_screenshot_taken and landing_path.exists()
+        else None
+    )
+    if await recover_youtube_surface_after_banner_click(
+        driver=driver,
+        serial=serial,
+        youtube_pkg=youtube_pkg,
+        activity=activity,
+        expected_surface=SURFACE_RESULTS,
+        timeout=8.0,
+    ):
+        dump_xml_snapshot(driver, debug_dir, "shorts_banner_after_landing_close")
+        dump_debug_screenshot(serial, debug_dir, "shorts_banner_after_landing_close")
+    else:
+        dump_xml_snapshot(driver, debug_dir, "shorts_banner_after_landing_not_results")
+        dump_debug_screenshot(serial, debug_dir, "shorts_banner_after_landing_not_results")
+        return False
+
+    landing_key = _landing_destination_key(landing_url)
+    existing_keys = {
+        _landing_destination_key(existing.landing_url)
+        for existing in record.banners
+        if existing.landing_url
+    }
+    if landing_key and landing_key in existing_keys:
+        print(
+            f"[topic-runner] shorts_banner_duplicate topic={topic!r} key={landing_key!r}",
+            flush=True,
+        )
+        return False
+
+    record.banners.append(
+        BannerRecord(
+            scroll_round=record.scroll_rounds,
+            position=1,
+            title=banner.title,
+            screenshot=screenshot_rel,
+            bounds=banner.bounds,
+            landing_url=landing_url,
+            landing_screenshot=landing_screenshot_rel,
+        )
+    )
+    await emit_progress(
+        on_progress,
+        event="banner_captured",
+        run_dir=run_dir,
+        topic=topic,
+        topic_record=record,
+    )
+    print(
+        f"[topic-runner] shorts_banner topic={topic!r} "
+        f"title={banner.title!r} landing={landing_url}",
+        flush=True,
+    )
+    return True
+
+
+async def open_short_tile(
+    driver,
+    serial: str,
+    tile: _ShortTile,
+    *,
+    debug_dir: Path,
+) -> bool:
+    left, top, right, bottom = tile.bounds
+    width = max(1, right - left)
+    height = max(1, bottom - top)
+    tap_points = (
+        (int(left + width * 0.50), int(top + height * 0.46)),
+        (int(left + width * 0.50), int(top + height * 0.72)),
+        (int(left + width * 0.34), int(top + height * 0.30)),
+        (int(left + width * 0.66), int(top + height * 0.30)),
+    )
+    for idx, (x, y) in enumerate(dict.fromkeys(tap_points)):
+        dump_xml_snapshot(driver, debug_dir, f"open_short_attempt_{idx:02d}_pre")
+        if not adb_tap(serial, x, y):
+            continue
+        if await wait_for_shorts_reel(driver, timeout=5.0, serial=serial):
+            dump_xml_snapshot(driver, debug_dir, f"open_short_attempt_{idx:02d}_opened")
+            return True
+    dump_xml_snapshot(driver, debug_dir, "open_short_failed")
+    dump_debug_screenshot(serial, debug_dir, "open_short_failed")
+    return False
+
+
+async def swipe_to_next_short(
+    driver,
+    serial: str,
+    *,
+    debug_dir: Path,
+    index: int,
+) -> bool:
+    if not has_shorts_reel_surface(driver):
+        return False
+    before_signature = shorts_reel_signature(driver)
+    width, height = get_screen_size(driver)
+    paths = (
+        (width // 2, int(height * 0.82), int(height * 0.20)),
+        (width // 2, int(height * 0.86), int(height * 0.16)),
+    )
+    for attempt, (x, start_y, end_y) in enumerate(paths):
+        adb_swipe(serial, x=x, start_y=start_y, end_y=end_y, duration_ms=650)
+        deadline = time.monotonic() + 3.5
+        while time.monotonic() < deadline:
+            if not has_shorts_reel_surface(driver):
+                await asyncio.sleep(0.25)
+                continue
+            after_signature = shorts_reel_signature(driver)
+            if before_signature and after_signature and after_signature != before_signature:
+                dump_xml_snapshot(driver, debug_dir, f"short_swipe_{index:02d}_{attempt:02d}_changed")
+                return True
+            await asyncio.sleep(0.3)
+    dump_xml_snapshot(driver, debug_dir, f"short_swipe_{index:02d}_not_changed")
+    dump_debug_screenshot(serial, debug_dir, f"short_swipe_{index:02d}_not_changed")
+    return False
+
+
+async def restore_regular_results_after_shorts(
+    driver,
+    serial: str,
+    youtube_pkg: str,
+    topic: str,
+    *,
+    debug_dir: Path,
+) -> bool:
+    if has_shorts_reel_surface(driver):
+        adb_keyevent(serial, "4")
+        await asyncio.sleep(1.0)
+    if has_results_surface(driver):
+        reveal_results_filter_chips(driver, serial)
+        await asyncio.sleep(0.8)
+        # Prefer Videos before opening a normal watch page. This duplicates the
+        # result-chip tapper above intentionally; keep it local to this one-file
+        # runner until the Shorts flow stabilizes.
+        if await tap_results_filter_chip(driver, serial, RESULTS_VIDEO_FILTER_CHIP_LABELS, attempts=2):
+            dump_xml_snapshot(driver, debug_dir, "restore_videos_chip")
+            return True
+        if await tap_results_filter_chip(driver, serial, RESULTS_ALL_FILTER_CHIP_LABELS, attempts=2):
+            dump_xml_snapshot(driver, debug_dir, "restore_all_chip")
+            return True
+    if open_results_deeplink(serial, topic, youtube_pkg):
+        restored = await wait_for_results(driver, timeout=12.0, serial=serial)
+        if restored:
+            dump_xml_snapshot(driver, debug_dir, "restore_deeplink")
+        return restored
+    return False
+
+
+async def run_shorts_phase(
+    *,
+    driver,
+    serial: str,
+    youtube_pkg: str,
+    activity: str,
+    topic: str,
+    record: TopicRecord,
+    run_dir: Path,
+    recorder: AndroidScreenRecorder,
+    max_duration_seconds: float,
+    stop_event: asyncio.Event | None = None,
+    on_progress: StandaloneProgressCallback | None = None,
+) -> int:
+    if not SHORTS_PHASE_ENABLED or max_duration_seconds < 20:
+        return 0
+    debug_dir = run_dir / "debug" / safe_topic_slug(topic) / "shorts"
+    deadline = time.monotonic() + min(max_duration_seconds, float(SHORTS_PHASE_MAX_SECONDS))
+    watched_count = 0
+    opened_groups = 0
+    seen_tiles: set[tuple[str, tuple[int, int, int, int]]] = set()
+    seen_tile_titles: set[str] = set()
+
+    print(
+        f"[topic-runner] shorts_phase:start topic={topic!r} "
+        f"budget={min(max_duration_seconds, float(SHORTS_PHASE_MAX_SECONDS)):.1f}s",
+        flush=True,
+    )
+    dump_xml_snapshot(driver, debug_dir, "before_reveal")
+    reveal_results_filter_chips(driver, serial)
+    await asyncio.sleep(0.8)
+    dump_xml_snapshot(driver, debug_dir, "after_reveal")
+
+    if not await tap_results_filter_chip(driver, serial, SHORTS_FILTER_CHIP_LABELS, attempts=3):
+        dump_xml_snapshot(driver, debug_dir, "no_shorts_chip")
+        dump_debug_screenshot(serial, debug_dir, "no_shorts_chip")
+        print(f"[topic-runner] shorts_phase:no_chip topic={topic!r}", flush=True)
+        return 0
+    dump_xml_snapshot(driver, debug_dir, "after_chip")
+
+    # Shorts-filter results often start with a normal Sponsored card. This is a
+    # one-file duplicate of the banner-scroll primitive on purpose: it reuses
+    # the proven banner landing capture while keeping the main search harvest
+    # untouched.
+    await capture_shorts_results_banner_if_present(
+        driver=driver,
+        serial=serial,
+        youtube_pkg=youtube_pkg,
+        activity=activity,
+        topic=topic,
+        record=record,
+        run_dir=run_dir,
+        debug_dir=debug_dir,
+        on_progress=on_progress,
+    )
+    await slow_scroll_step(driver, serial, step_fraction=0.36)
+    await asyncio.sleep(0.8)
+    dump_xml_snapshot(driver, debug_dir, "after_initial_scroll")
+
+    while opened_groups < SHORTS_PHASE_GROUPS and time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            break
+        tile: _ShortTile | None = None
+        for attempt in range(3):
+            tiles = collect_short_tiles(driver, serial=serial)
+            for candidate in tiles:
+                key = (candidate.title, candidate.bounds)
+                # Duplicate of the local Shorts tile tracking above, but title-only:
+                # after returning from a Short, the same tile can move to new bounds.
+                title_key = re.sub(r"\s+", " ", candidate.title.casefold()).strip()
+                if key not in seen_tiles and title_key not in seen_tile_titles:
+                    tile = candidate
+                    seen_tiles.add(key)
+                    seen_tile_titles.add(title_key)
+                    break
+            if tile is not None:
+                break
+            if attempt < 2:
+                await slow_scroll_step(driver, serial, step_fraction=0.42)
+                await asyncio.sleep(0.8)
+                dump_xml_snapshot(driver, debug_dir, f"group_{opened_groups:02d}_scroll_{attempt:02d}")
+        if tile is None:
+            print(f"[topic-runner] shorts_phase:no_tiles topic={topic!r}", flush=True)
+            break
+
+        if not await open_short_tile(driver, serial, tile, debug_dir=debug_dir):
+            await slow_scroll_step(driver, serial, step_fraction=0.42)
+            await asyncio.sleep(0.8)
+            continue
+
+        print(
+            f"[topic-runner] shorts_phase:opened topic={topic!r} "
+            f"group={opened_groups + 1} title={tile.title!r}",
+            flush=True,
+        )
+        for swipe_idx in range(SHORTS_SWIPES_PER_OPEN + 1):
+            if stop_event is not None and stop_event.is_set():
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 2.0:
+                break
+            reel_ad = find_shorts_reel_ad(driver)
+            if reel_ad is not None:
+                await capture_shorts_reel_ad(
+                    driver=driver,
+                    serial=serial,
+                    youtube_pkg=youtube_pkg,
+                    activity=activity,
+                    topic=topic,
+                    record=record,
+                    run_dir=run_dir,
+                    recorder=recorder,
+                    ad=reel_ad,
+                    debug_dir=debug_dir,
+                    record_seconds=min(float(SHORTS_AD_RECORD_SECONDS), remaining),
+                    stop_event=stop_event,
+                    on_progress=on_progress,
+                )
+                if not has_shorts_reel_surface(driver):
+                    if not await wait_for_shorts_reel(
+                        driver, timeout=3.0, serial=serial
+                    ):
+                        break
+                if swipe_idx >= SHORTS_SWIPES_PER_OPEN:
+                    break
+                if not await swipe_to_next_short(
+                    driver,
+                    serial,
+                    debug_dir=debug_dir,
+                    index=watched_count + 1,
+                ):
+                    break
+                continue
+            watch_for = min(
+                random.uniform(
+                    float(SHORTS_WATCH_MIN_SECONDS),
+                    float(max(SHORTS_WATCH_MIN_SECONDS, SHORTS_WATCH_MAX_SECONDS)),
+                ),
+                remaining,
+            )
+            await asyncio.sleep(max(0.5, watch_for))
+            watched_count += 1
+            dump_xml_snapshot(driver, debug_dir, f"watched_{watched_count:02d}")
+            print(
+                f"[topic-runner] shorts_phase:watched topic={topic!r} "
+                f"n={watched_count} seconds={watch_for:.1f}",
+                flush=True,
+            )
+            if swipe_idx >= SHORTS_SWIPES_PER_OPEN:
+                break
+            if not await swipe_to_next_short(
+                driver,
+                serial,
+                debug_dir=debug_dir,
+                index=watched_count,
+            ):
+                print(
+                    f"[topic-runner] shorts_phase:swipe_failed topic={topic!r} "
+                    f"after={watched_count}",
+                    flush=True,
+                )
+                break
+
+        adb_keyevent(serial, "4")
+        await asyncio.sleep(1.0)
+        if not await wait_for_results(driver, timeout=6.0, serial=serial):
+            dump_xml_snapshot(driver, debug_dir, f"group_{opened_groups:02d}_after_back_not_results")
+            break
+        dump_xml_snapshot(driver, debug_dir, f"group_{opened_groups:02d}_after_back")
+        opened_groups += 1
+        if opened_groups < SHORTS_PHASE_GROUPS and time.monotonic() < deadline:
+            await slow_scroll_step(driver, serial, step_fraction=0.42)
+            await asyncio.sleep(0.8)
+
+    await restore_regular_results_after_shorts(
+        driver,
+        serial,
+        youtube_pkg,
+        topic,
+        debug_dir=debug_dir,
+    )
+    print(
+        f"[topic-runner] shorts_phase:done topic={topic!r} watched={watched_count}",
+        flush=True,
+    )
+    return watched_count
 
 
 VIDEO_END_TEXT_TOKENS = (
@@ -2519,6 +3545,41 @@ def is_video_ended_source(page_source: str | None) -> bool:
 
 def is_video_ended_state(driver) -> bool:
     return is_video_ended_source(safe_page_source(driver))
+
+
+def read_watch_video_duration_pair(driver) -> tuple[int, int] | None:
+    """Read the active normal video seekbar duration from the watch player.
+
+    This intentionally scans for the same elapsed/total pattern used by the
+    ad-state reader, but it is only called from the non-ad branch. Recommendation
+    tiles expose plain durations, not "elapsed of total" pairs.
+    """
+    root = parse_xml(safe_page_source(driver))
+    if root is None:
+        return None
+    if _root_has_resource_id(root, MINIPLAYER_RESOURCE_IDS):
+        return None
+    if not _root_has_resource_id(root, WATCH_FULL_RESOURCE_IDS):
+        return None
+    duration_pairs: list[tuple[int, int]] = []
+    for node in root.iter():
+        pair = parse_duration_pair(_node_text(node))
+        if pair is None:
+            continue
+        elapsed, total = pair
+        if total > 0 and 0 <= elapsed <= total + 2:
+            duration_pairs.append(pair)
+    if not duration_pairs:
+        return None
+    return max(duration_pairs, key=lambda p: p[1])
+
+
+def watch_video_total_changed(anchor_total: int | None, current_total: int | None) -> bool:
+    if anchor_total is None or current_total is None:
+        return False
+    if anchor_total < 30 or current_total < 30:
+        return False
+    return abs(current_total - anchor_total) >= max(10, int(anchor_total * 0.08))
 
 
 async def click_banner_and_capture_landing(
@@ -2578,7 +3639,11 @@ async def click_banner_and_capture_landing(
         return None, False
 
     landing_url = await wait_for_resolved_landing_url(serial, youtube_pkg)
-    screenshot_taken = adb_screencap(serial, landing_screenshot_path)
+    screenshot_taken = await capture_settled_landing_screenshot(
+        driver=driver,
+        serial=serial,
+        path=landing_screenshot_path,
+    )
 
     await close_external_surface(serial, youtube_pkg, activity)
     return landing_url, screenshot_taken
@@ -3033,7 +4098,7 @@ async def open_random_video(
         if debug_dir is not None:
             dump_xml_snapshot(driver, debug_dir, f"pick_video_attempt_{attempt:02d}")
             dump_debug_screenshot(serial, debug_dir, f"pick_video_attempt_{attempt:02d}")
-        tiles = collect_video_tiles(driver)
+        tiles = collect_video_tiles(driver, serial=serial)
         eligible_tiles = [
             tile
             for tile in tiles
@@ -3150,6 +4215,11 @@ async def recover_youtube_surface_after_banner_click(
         driver_source = safe_page_source(driver)
         driver_root = parse_xml(driver_source)
         driver_top_package = _source_top_package(driver_root) if driver_root is not None else ""
+        if handle_system_anr_dialog_if_present(driver, serial):
+            await close_external_surface(serial, youtube_pkg, activity)
+            await asyncio.sleep(0.5)
+            iter_idx += 1
+            continue
         print(
             f"[topic-runner] recover_surface:iter id={call_id} i={iter_idx} "
             f"fg={fg!r} driver_top={driver_top_package!r}",
@@ -3252,9 +4322,13 @@ async def click_cta_and_capture(
         if fg and fg != youtube_pkg:
             break
 
-    # Give redirects a moment to settle before screenshot/URL read.
+    # Give redirects and page paint a moment to settle before screenshot.
     landing_url = await wait_for_resolved_landing_url(serial, youtube_pkg)
-    screenshot_taken = adb_screencap(serial, landing_screenshot_path)
+    screenshot_taken = await capture_settled_landing_screenshot(
+        driver=driver,
+        serial=serial,
+        path=landing_screenshot_path,
+    )
 
     await close_external_surface(serial, youtube_pkg, activity)
     return CtaOutcome(
@@ -3303,6 +4377,7 @@ async def watch_video_loop(
     social_subscribe_pending = random.random() < VIDEO_SUBSCRIBE_PROBABILITY
     social_attempts = 0
     next_social_action_at = started + random.uniform(4.0, 12.0)
+    watch_video_total_anchor: int | None = None
     if opened_video is not None:
         opened_video["like_planned"] = social_like_pending
         opened_video["subscribe_planned"] = social_subscribe_pending
@@ -3338,6 +4413,26 @@ async def watch_video_loop(
 
         detect_state = read_ad_playback_state(driver)
         if not detect_state.is_ad:
+            duration_pair = read_watch_video_duration_pair(driver)
+            if duration_pair is not None:
+                _, current_total = duration_pair
+                if watch_video_total_anchor is None:
+                    watch_video_total_anchor = current_total
+                    if opened_video is not None:
+                        opened_video["duration_total_seconds"] = current_total
+                elif watch_video_total_changed(watch_video_total_anchor, current_total):
+                    dump_xml_snapshot(driver, debug_dir, "video_changed")
+                    dump_debug_screenshot(serial, debug_dir, "video_changed")
+                    if opened_video is not None:
+                        opened_video["duration_changed_from_seconds"] = watch_video_total_anchor
+                        opened_video["duration_changed_to_seconds"] = current_total
+                    print(
+                        f"[topic-runner] video:duration_changed topic={topic!r} "
+                        f"from={watch_video_total_anchor}s to={current_total}s",
+                        flush=True,
+                    )
+                    watch_end_reason = "autoplay_changed"
+                    break
             if (
                 (social_like_pending or social_subscribe_pending)
                 and time.monotonic() >= next_social_action_at
@@ -3499,21 +4594,35 @@ async def watch_video_loop(
             dump_debug_screenshot(serial, debug_dir, f"{tag}_{note}")
             if ad_ended_during_cta:
                 await wait_past_terminal_ad_tail(driver)
-            record.ads.append(ad_record)
-            await emit_progress(
-                on_progress,
-                event="ad_captured",
-                run_dir=run_dir,
-                topic=topic,
-                topic_record=record,
+            has_recorded_payload = bool(
+                ad_record.video
+                or ad_record.landing_url
+                or ad_record.landing_screenshot
+                or ad_record.screenshot
+                or ad_record.recorded_seconds > 0
             )
-            print(
-                f"[topic-runner] ad captured topic={topic!r} idx={ad_index} "
-                f"sec=0.0 cta_kind={ad_record.cta_kind} "
-                f"cta={ad_record.cta_label} landing={ad_record.landing_url} "
-                f"note={note}",
-                flush=True,
-            )
+            if has_recorded_payload:
+                record.ads.append(ad_record)
+                await emit_progress(
+                    on_progress,
+                    event="ad_captured",
+                    run_dir=run_dir,
+                    topic=topic,
+                    topic_record=record,
+                )
+                print(
+                    f"[topic-runner] ad captured topic={topic!r} idx={ad_index} "
+                    f"sec=0.0 cta_kind={ad_record.cta_kind} "
+                    f"cta={ad_record.cta_label} landing={ad_record.landing_url} "
+                    f"note={note}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[topic-runner] ad skipped_empty topic={topic!r} idx={ad_index} "
+                    f"note={note}",
+                    flush=True,
+                )
             continue
 
         recorded_full_window = False
@@ -3533,12 +4642,17 @@ async def watch_video_loop(
             )
         if rec_handle is not None:
             record_poll = 0.5
-            record_limit_state = read_ad_playback_state(driver)
-            record_time_limit = (
-                ad_record_time_limit(record_limit_state, ad_record_seconds)
-                if same_ad(record_start_state, record_limit_state)
-                else 1.0
+            record_time_limit = ad_record_time_limit(
+                record_start_state, ad_record_seconds
             )
+            record_limit_state = read_ad_playback_state(driver)
+            if same_ad(record_start_state, record_limit_state):
+                record_time_limit = min(
+                    record_time_limit,
+                    ad_record_time_limit(record_limit_state, ad_record_seconds),
+                )
+            else:
+                record_time_limit = min(record_time_limit, 1.0)
             rec_started_at = time.monotonic()
             while time.monotonic() - rec_started_at < record_time_limit:
                 if stop_event is not None and stop_event.is_set():
@@ -3576,8 +4690,39 @@ async def watch_video_loop(
             pod_tot = record_start_state.pod_total
             pod_known = pod_idx is not None and pod_tot is not None
             mid_pod = pod_known and pod_idx < pod_tot  # type: ignore[operator]
+            start_total_seconds = record_start_state.total_seconds
+            advertiser_hosts = extract_advertiser_hosts(ad_record.landing_url)
 
-            if mid_pod:
+            def _looks_like_same_advertiser_tail(state: AdPlaybackState) -> bool:
+                sig = state.signature
+                if not sig or not advertiser_hosts:
+                    return False
+                sig_low = sig.lower()
+                for host in advertiser_hosts:
+                    if host in sig_low or sig_low in host:
+                        return True
+                return False
+
+            strong_new_ad_evidence = (
+                start_total_seconds is not None
+                and current_state.total_seconds is not None
+                and current_state.total_seconds != start_total_seconds
+                and current_state.total_seconds > 10
+                and current_state.elapsed_seconds is not None
+                and current_state.elapsed_seconds <= 5
+                and not is_terminal_ad_tail(current_state)
+                and not _looks_like_same_advertiser_tail(current_state)
+            )
+
+            if mid_pod and strong_new_ad_evidence:
+                # XML already proves the next ad started; let the main loop
+                # capture it instead of waiting through a drain timeout.
+                print(
+                    f"[topic-runner] ad mid-pod next_ad_detected topic={topic!r} "
+                    f"idx={ad_index}",
+                    flush=True,
+                )
+            elif mid_pod:
                 # Drain — wait for the real next ad in the pod to take over.
                 # Cannot exit on every state change: the tail of an ad
                 # often shows a 5-second end-card with the same advertiser
@@ -3593,18 +4738,6 @@ async def watch_video_loop(
                 drain_timed_out = True
                 start_pod_index = record_start_state.pod_index
                 start_pod_total = record_start_state.pod_total
-                start_total_seconds = record_start_state.total_seconds
-                advertiser_hosts = extract_advertiser_hosts(ad_record.landing_url)
-
-                def _looks_like_same_advertiser_tail(state: AdPlaybackState) -> bool:
-                    sig = state.signature
-                    if not sig or not advertiser_hosts:
-                        return False
-                    sig_low = sig.lower()
-                    for host in advertiser_hosts:
-                        if host in sig_low or sig_low in host:
-                            return True
-                    return False
 
                 while time.monotonic() - drain_started < drain_budget:
                     if stop_event is not None and stop_event.is_set():
@@ -3648,8 +4781,10 @@ async def watch_video_loop(
                         start_total_seconds is not None
                         and drain_state.total_seconds is not None
                         and drain_state.total_seconds != start_total_seconds
+                        and drain_state.total_seconds > 10
                         and drain_state.elapsed_seconds is not None
                         and drain_state.elapsed_seconds <= 5
+                        and not is_terminal_ad_tail(drain_state)
                         and not _looks_like_same_advertiser_tail(drain_state)
                     ):
                         drain_timed_out = False
@@ -3717,9 +4852,17 @@ async def run_topic(
     _CLOSE_EXTERNAL_DEBUG_DIR = debug_root / "close_external"
 
     topic_started = time.monotonic()
-    video_count = 0
-    search_banners_harvested = False
-    seen_video_titles: set[str] = set()
+    video_count = len(record.opened_videos)
+    # On a follow-up pass for the same topic, keep the already harvested search
+    # banners/Shorts slice and go straight to picking another normal video.
+    search_banners_harvested = bool(record.banners or record.opened_videos)
+    seen_video_titles: set[str] = {
+        _normalized_video_title(
+            str(video.get("title") or video.get("video_title") or "")
+        )
+        for video in record.opened_videos
+        if video.get("title") or video.get("video_title")
+    }
 
     while time.monotonic() - topic_started < max_watch_seconds:
         if stop_event is not None and stop_event.is_set():
@@ -3738,7 +4881,7 @@ async def run_topic(
                 record.skip_reason = "deeplink_failed"
             break
 
-        if not await wait_for_results(driver, timeout=12.0, serial=serial):
+        if not await wait_for_results(driver, timeout=20.0, serial=serial):
             dump_results_not_loaded_debug(driver, serial, nav_dir)
             if video_count == 0:
                 record.skipped = True
@@ -3774,6 +4917,30 @@ async def run_topic(
                         record.skipped = True
                         record.skip_reason = "results_lost_after_banner"
                     break
+
+            remaining_after_banner = max_watch_seconds - (time.monotonic() - topic_started)
+            if SHORTS_PHASE_ENABLED and remaining_after_banner > 60:
+                # Optional Shorts slice after the normal search banner harvest.
+                # This keeps the old flow order intact: search results -> banner
+                # scrolls -> Shorts slice -> normal video pick/watch. Shorts
+                # banner/ad harvesting is intentionally not wired here yet.
+                shorts_budget = min(
+                    float(SHORTS_PHASE_MAX_SECONDS),
+                    max(20.0, remaining_after_banner * 0.25),
+                )
+                await run_shorts_phase(
+                    driver=driver,
+                    serial=serial,
+                    youtube_pkg=config.youtube_package,
+                    activity=config.youtube_activity,
+                    topic=topic,
+                    record=record,
+                    run_dir=run_dir,
+                    recorder=recorder,
+                    max_duration_seconds=shorts_budget,
+                    stop_event=stop_event,
+                    on_progress=on_progress,
+                )
 
         if not await recover_youtube_surface_after_banner_click(
             driver=driver,
@@ -3893,8 +5060,22 @@ async def run_topic(
         opened_video["watch_seconds"] = round(time.monotonic() - watch_started_at, 2)
         opened_video["end_reason"] = watch_result
         opened_video["finished_at"] = utc_now_iso()
-        if watch_result != "video_ended":
-            break
+        if watch_result == "video_ended":
+            continue
+        remaining_after_watch = max_watch_seconds - (time.monotonic() - topic_started)
+        if (
+            watch_result in {"surface_lost", "ad_drain_timeout", "autoplay_changed"}
+            and remaining_after_watch >= 60.0
+            and (max_videos is None or video_count < max_videos)
+        ):
+            print(
+                f"[topic-runner] video:recoverable_end topic={topic!r} "
+                f"reason={watch_result} remaining={remaining_after_watch:.1f}s; "
+                "opening another video",
+                flush=True,
+            )
+            continue
+        break
 
     record.finished_at = utc_now_iso()
     return record
@@ -4135,6 +5316,104 @@ async def run_standalone_session(options: StandaloneRunOptions) -> StandaloneRun
                 f"watch={record.watch_seconds}s",
                 flush=True,
             )
+
+        topup_round = 0
+        while not short_session_mode:
+            if options.stop_event is not None and options.stop_event.is_set():
+                print("[topic-runner] stop_event before top-up", flush=True)
+                break
+            session_elapsed = time.monotonic() - session_started
+            session_remaining = session_budget - session_elapsed
+            if session_remaining < 60.0:
+                break
+            playable_records = [
+                record
+                for record in topic_records
+                if record.opened_videos and record.skip_reason != "stopped"
+            ]
+            if not playable_records:
+                break
+            topup_round += 1
+            made_progress = False
+            for record in playable_records:
+                if options.stop_event is not None and options.stop_event.is_set():
+                    break
+                session_elapsed = time.monotonic() - session_started
+                session_remaining = session_budget - session_elapsed
+                if session_remaining < 60.0:
+                    break
+                topic_budget = max(60.0, session_remaining / len(playable_records))
+                before_watch = float(record.watch_seconds or 0.0)
+                before_videos = len(record.opened_videos)
+                print(
+                    f"[topic-runner] topic:topup_start {record.topic!r} "
+                    f"round={topup_round} budget={topic_budget:.1f}s",
+                    flush=True,
+                )
+
+                async def _topup_progress(event: StandaloneProgressEvent) -> None:
+                    await emit_progress(
+                        options.on_progress,
+                        event=event.event,
+                        run_dir=event.run_dir,
+                        topic=event.topic,
+                        topic_record=event.topic_record,
+                        topics=topic_records,
+                        payload=event.payload,
+                    )
+
+                try:
+                    await run_topic(
+                        driver=driver,
+                        serial=serial,
+                        config=config,
+                        topic=record.topic,
+                        scroll_rounds=options.scroll_rounds,
+                        ad_record_seconds=options.ad_record_seconds,
+                        max_watch_seconds=topic_budget,
+                        run_dir=run_dir,
+                        recorder=recorder,
+                        max_videos=None,
+                        record=record,
+                        stop_event=options.stop_event,
+                        on_progress=_topup_progress,
+                    )
+                except Exception as exc:
+                    record.skip_reason = f"topup_exception:{type(exc).__name__}:{exc}"
+                    record.finished_at = utc_now_iso()
+                    print(
+                        f"[topic-runner] topic:topup_error {record.topic!r} "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                after_watch = float(record.watch_seconds or 0.0)
+                after_videos = len(record.opened_videos)
+                made_progress = made_progress or (
+                    after_watch > before_watch + 5.0 or after_videos > before_videos
+                )
+                _write_result_json(
+                    run_dir=run_dir,
+                    started_at=started_at,
+                    finished_at=utc_now_iso(),
+                    avd_name=avd_name,
+                    topic_records=topic_records,
+                )
+                await emit_progress(
+                    options.on_progress,
+                    event="topic_finished",
+                    run_dir=run_dir,
+                    topic=record.topic,
+                    topic_record=record,
+                    topics=topic_records,
+                )
+                print(
+                    f"[topic-runner] topic:topup_done {record.topic!r} "
+                    f"videos={len(record.opened_videos)} watch={record.watch_seconds}s",
+                    flush=True,
+                )
+            if not made_progress:
+                print("[topic-runner] top-up made no progress; stopping", flush=True)
+                break
     finally:
         try:
             await appium.close_session(driver_handle)
