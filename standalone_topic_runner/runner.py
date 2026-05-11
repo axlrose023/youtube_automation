@@ -1756,6 +1756,12 @@ SYSTEM_ANR_CLOSE_TOKENS = (
     "закрыть приложение",
     "закрити додаток",
 )
+SYSTEM_ANR_CLOSE_TITLE_TOKENS = (
+    "chrome",
+    "pixel launcher",
+    "launcher",
+    "system ui",
+)
 BROWSER_PERMISSION_TITLE_TOKENS = (
     "wants to use your device's location",
     "wants to use your location",
@@ -1800,7 +1806,7 @@ def _system_anr_action(
     if not has_anr:
         return None
     title_low = title_text.casefold()
-    if "chrome" in title_low and close_bounds:
+    if any(token in title_low for token in SYSTEM_ANR_CLOSE_TITLE_TOKENS) and close_bounds:
         return "close_app", sorted(close_bounds, key=lambda b: (b[1], b[0]))[0], title_text
     if wait_bounds:
         return "wait", sorted(wait_bounds, key=lambda b: (b[1], b[0]))[0], title_text
