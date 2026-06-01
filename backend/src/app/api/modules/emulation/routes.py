@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from dishka import FromDishka
 from dishka.integrations.fastapi import DishkaRoute
 from fastapi import APIRouter, Depends, Request
@@ -7,6 +9,10 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.api.common.auth import AuthenticateMainRoles
 
 from .schema import (
+    AndroidAccountProfileCreate,
+    AndroidAccountProfileListResponse,
+    AndroidAccountProfileRead,
+    AndroidAccountProfileUpdate,
     EmulationCapturesResponse,
     EmulationDashboardSummaryResponse,
     EmulationHistoryDetailResponse,
@@ -38,6 +44,31 @@ async def start_emulation(
     session_service: FromDishka[EmulationSessionService],
 ) -> StartEmulationResponse:
     return await session_service.start_emulation(request)
+
+
+@router.get("/android-accounts")
+async def list_android_accounts(
+    session_service: FromDishka[EmulationSessionService],
+    active_only: bool = Query(False),
+) -> AndroidAccountProfileListResponse:
+    return await session_service.list_android_account_profiles(active_only=active_only)
+
+
+@router.post("/android-accounts", status_code=201)
+async def create_android_account(
+    request: AndroidAccountProfileCreate,
+    session_service: FromDishka[EmulationSessionService],
+) -> AndroidAccountProfileRead:
+    return await session_service.create_android_account_profile(request)
+
+
+@router.patch("/android-accounts/{profile_id}")
+async def update_android_account(
+    profile_id: UUID,
+    request: AndroidAccountProfileUpdate,
+    session_service: FromDishka[EmulationSessionService],
+) -> AndroidAccountProfileRead:
+    return await session_service.update_android_account_profile(profile_id, request)
 
 
 @router.get("/history")

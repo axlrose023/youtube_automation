@@ -29,6 +29,7 @@ export interface StartEmulationRequest {
   profile_id?: string | null;
   runner?: "desktop" | "android";
   proxy_id?: string | null;
+  android_account_id?: string | null;
   headless?: boolean | null;
 }
 
@@ -171,6 +172,9 @@ export interface EmulationHistoryItem {
   watched_ads_analytics?: EmulationAnalyticsAd[] | null;
   error?: string | null;
   proxy_country_code?: string | null;
+  android_account_id?: string | null;
+  android_google_email?: string | null;
+  android_avd_name?: string | null;
   captures: CaptureSummary;
   ad_captures?: EmulationAdCapture[] | null;
 }
@@ -183,6 +187,9 @@ export interface EmulationSessionStatus {
   post_processing_status?: string | null;
   post_processing_progress?: PostProcessingProgress | null;
   profile_id?: string | null;
+  android_account_id?: string | null;
+  android_google_email?: string | null;
+  android_avd_name?: string | null;
   elapsed_minutes?: number | null;
   orchestration_enabled: boolean;
   orchestration_phase?: string | null;
@@ -217,6 +224,31 @@ export interface EmulationSessionStatus {
 
 export interface EmulationStatusBatchResponse {
   statuses: Record<string, EmulationSessionStatus>;
+}
+
+export interface AndroidAccountProfile {
+  id: string;
+  label: string;
+  google_email: string;
+  avd_name: string;
+  snapshot_name?: string | null;
+  appium_port?: number | null;
+  uiautomator2_system_port?: number | null;
+  mjpeg_server_port?: number | null;
+  emulator_port?: number | null;
+  emulator_memory_mb?: number | null;
+  status: string;
+  is_active: boolean;
+  notes?: string | null;
+  last_used_at?: string | null;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AndroidAccountProfileListResponse {
+  items: AndroidAccountProfile[];
+  total: number;
 }
 
 export interface DashboardSummaryItem {

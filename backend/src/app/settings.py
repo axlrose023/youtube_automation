@@ -49,6 +49,8 @@ class AndroidAppConfig(BaseModel):
     appium_host: str = "127.0.0.1"
     appium_port: int = 4723
     appium_base_path: str = "/"
+    appium_uiautomator2_system_port: int | None = None
+    appium_mjpeg_server_port: int | None = None
     manage_appium_server: bool = True
     appium_command_timeout_seconds: int = 240
     appium_runtime_command_timeout_seconds: int = 60
@@ -73,6 +75,7 @@ class AndroidAppConfig(BaseModel):
     emulator_skip_adb_auth: bool = True
     emulator_force_restart_before_run: bool = True
     emulator_stop_after_run: bool = True
+    max_parallel_sessions: int = 1
     probe_watch_seconds: int = 20
     probe_watch_sample_interval_seconds: int = 1
     probe_watch_min_progress_delta_seconds: int = 3

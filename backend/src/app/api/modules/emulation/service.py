@@ -14,8 +14,12 @@ from app.services.emulation.core.ad_analytics import build_ads_analytics
 from app.services.emulation.session.store import EmulationSessionStore
 
 from .gateway import EmulationHistoryQuery
-from .models import EmulationSessionHistory, SessionStatus
+from .models import AndroidAccountProfile, EmulationSessionHistory, SessionStatus
 from .schema import (
+    AndroidAccountProfileCreate,
+    AndroidAccountProfileListResponse,
+    AndroidAccountProfileRead,
+    AndroidAccountProfileUpdate,
     EmulationAdCaptureHistory,
     EmulationCapturesResponse,
     EmulationCaptureSummary,
@@ -66,6 +70,16 @@ class EmulationSessionService:
         profile_id = normalize_profile_id(request.profile_id)
         requested_runner_kind = (request.runner or "android").lower()
         runner_kind = "android"
+        android_profile = (
+            await self._resolve_android_account_profile(request.android_account_id)
+            if request.android_account_id is not None
+            else None
+        )
+        android_runtime_profile = (
+            self._android_account_runtime_payload(android_profile)
+            if android_profile is not None
+            else None
+        )
 
         proxy_url: str | None = None
         proxy_country_code: str | None = None
@@ -85,12 +99,27 @@ class EmulationSessionService:
             runner_kind=runner_kind,
             requested_runner_kind=requested_runner_kind,
             proxy_id=str(request.proxy_id) if request.proxy_id else None,
+            android_account_id=(
+                str(android_profile.id) if android_profile is not None else None
+            ),
+            android_google_email=(
+                android_profile.google_email if android_profile is not None else None
+            ),
+            android_avd_name=(
+                android_profile.avd_name if android_profile is not None else None
+            ),
+            android_account_profile=android_runtime_profile,
         )
         await self._history_service.register_queued_session(
             session_id=session_id,
             duration_minutes=request.duration_minutes,
             topics=request.topics,
             proxy_country_code=proxy_country_code,
+            android_account_id=android_profile.id if android_profile is not None else None,
+            android_google_email=(
+                android_profile.google_email if android_profile is not None else None
+            ),
+            android_avd_name=android_profile.avd_name if android_profile is not None else None,
         )
 
         try:
@@ -106,6 +135,7 @@ class EmulationSessionService:
                 request.topics,
                 proxy_url=proxy_url,
                 headless=request.headless,
+                android_account_profile=android_runtime_profile,
             )
         except Exception as exc:
             await self._session_store.update(
@@ -125,6 +155,81 @@ class EmulationSessionService:
         if proxy is None:
             return None, None
         return proxy.to_url(), proxy.country_code
+
+    async def _resolve_android_account_profile(
+        self,
+        profile_id: uuid.UUID,
+    ) -> AndroidAccountProfile:
+        profile = await self._history_service.uow.android_account_profiles.get_by_id(
+            profile_id
+        )
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Android account profile not found")
+        if not profile.is_active or profile.status != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Android account profile is not ready "
+                    f"(status={profile.status}, active={profile.is_active})"
+                ),
+            )
+        return profile
+
+    @staticmethod
+    def _android_account_runtime_payload(
+        profile: AndroidAccountProfile,
+    ) -> dict[str, object]:
+        return {
+            "id": str(profile.id),
+            "label": profile.label,
+            "google_email": profile.google_email,
+            "avd_name": profile.avd_name,
+            "snapshot_name": profile.snapshot_name,
+            "appium_port": profile.appium_port,
+            "uiautomator2_system_port": profile.uiautomator2_system_port,
+            "mjpeg_server_port": profile.mjpeg_server_port,
+            "emulator_port": profile.emulator_port,
+            "emulator_memory_mb": profile.emulator_memory_mb,
+        }
+
+    @staticmethod
+    def _to_android_account_read(
+        profile: AndroidAccountProfile,
+    ) -> AndroidAccountProfileRead:
+        return AndroidAccountProfileRead.model_validate(profile)
+
+    async def list_android_account_profiles(
+        self,
+        active_only: bool = False,
+    ) -> AndroidAccountProfileListResponse:
+        rows = await self._history_service.uow.android_account_profiles.list_all(
+            active_only=active_only
+        )
+        items = [self._to_android_account_read(row) for row in rows]
+        return AndroidAccountProfileListResponse(items=items, total=len(items))
+
+    async def create_android_account_profile(
+        self,
+        payload: AndroidAccountProfileCreate,
+    ) -> AndroidAccountProfileRead:
+        profile = AndroidAccountProfile(**payload.model_dump())
+        created = await self._history_service.uow.android_account_profiles.create(profile)
+        await self._history_service.uow.commit()
+        return self._to_android_account_read(created)
+
+    async def update_android_account_profile(
+        self,
+        profile_id: uuid.UUID,
+        payload: AndroidAccountProfileUpdate,
+    ) -> AndroidAccountProfileRead:
+        updated = await self._history_service.uow.android_account_profiles.update(
+            profile_id,
+            **payload.model_dump(exclude_unset=True),
+        )
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Android account profile not found")
+        await self._history_service.uow.commit()
+        return self._to_android_account_read(updated)
 
     async def stop_session(self, session_id: str) -> StopEmulationResponse:
         data = await self._session_store.get(session_id)
@@ -173,6 +278,7 @@ class EmulationSessionService:
             profile_id = normalize_profile_id(data.get("profile_id"))
             runner_kind = data.get("runner_kind", "android")
             proxy_id_str = data.get("proxy_id")
+            android_account_id = data.get("android_account_id")
         else:
             assert history is not None
             topics = history.requested_topics or []
@@ -180,6 +286,7 @@ class EmulationSessionService:
             profile_id = None
             runner_kind = "android"
             proxy_id_str = None
+            android_account_id = history.android_account_id
 
         return await self.start_emulation(
             StartEmulationRequest(
@@ -188,6 +295,7 @@ class EmulationSessionService:
                 profile_id=profile_id,
                 runner=runner_kind,
                 proxy_id=proxy_id_str,
+                android_account_id=android_account_id,
             )
         )
 
@@ -202,6 +310,7 @@ class EmulationSessionService:
             resume_seed = build_resume_seed_from_live_payload(data)
             runner_kind = data.get("runner_kind", "android")
             proxy_id_str = data.get("proxy_id")
+            android_account_id = data.get("android_account_id")
         else:
             assert history is not None
             topics = history.requested_topics or []
@@ -211,6 +320,7 @@ class EmulationSessionService:
             resume_seed = build_resume_seed_from_history(history)
             runner_kind = "android"
             proxy_id_str = None
+            android_account_id = history.android_account_id
 
         remaining_minutes = self._calculate_remaining_minutes(
             requested_duration_minutes=duration_minutes,
@@ -224,6 +334,7 @@ class EmulationSessionService:
                 profile_id=profile_id,
                 runner=runner_kind,
                 proxy_id=proxy_id_str,
+                android_account_id=android_account_id,
             )
         )
 
@@ -336,7 +447,8 @@ class EmulationSessionService:
         )
         await self._session_store.clear_session_locks(
             session_id,
-            profile_id=normalize_profile_id(data.get("profile_id")),
+            profile_id=_live_android_lock_id(data)
+            or normalize_profile_id(data.get("profile_id")),
         )
         live_payload = await self._session_store.get(session_id) or {**data}
         live_payload["status"] = SessionStatus.FAILED
@@ -449,12 +561,18 @@ class EmulationHistoryService:
         duration_minutes: int,
         topics: list[str],
         proxy_country_code: str | None = None,
+        android_account_id: uuid.UUID | None = None,
+        android_google_email: str | None = None,
+        android_avd_name: str | None = None,
     ) -> None:
         await self.uow.emulation_history.create_if_missing(
             session_id=session_id,
             requested_duration_minutes=duration_minutes,
             requested_topics=topics,
             proxy_country_code=proxy_country_code,
+            android_account_id=android_account_id,
+            android_google_email=android_google_email,
+            android_avd_name=android_avd_name,
         )
         await self.uow.commit()
 
@@ -547,6 +665,9 @@ class EmulationHistoryService:
             watched_ads_analytics=live_payload.get("watched_ads_analytics")
             or build_ads_analytics(watched_ads),
             error=error,
+            android_account_id=_uuid_or_none(live_payload.get("android_account_id")),
+            android_google_email=live_payload.get("android_google_email"),
+            android_avd_name=live_payload.get("android_avd_name"),
         )
         await self.uow.commit()
 
@@ -787,6 +908,9 @@ class EmulationHistoryService:
             watched_ads_analytics=watched_ads_analytics,
             error=payload.error,
             proxy_country_code=payload.proxy_country_code,
+            android_account_id=payload.android_account_id,
+            android_google_email=payload.android_google_email,
+            android_avd_name=payload.android_avd_name,
             captures=capture_summary,
             ad_captures=ad_captures,
         )
@@ -812,5 +936,31 @@ class EmulationHistoryService:
                 "watched_ads": live_status.watched_ads if (include_details and include_raw_ads) else item.watched_ads,
                 "watched_ads_analytics": live_status.watched_ads_analytics if include_details else item.watched_ads_analytics,
                 "error": live_status.error,
+                "android_account_id": live_status.android_account_id,
+                "android_google_email": live_status.android_google_email,
+                "android_avd_name": live_status.android_avd_name,
             }
         )
+
+
+def _uuid_or_none(value: object) -> uuid.UUID | None:
+    if value is None:
+        return None
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _live_android_lock_id(data: dict[str, object]) -> str | None:
+    android_account_id = normalize_profile_id(data.get("android_account_id"))
+    if android_account_id:
+        return f"android-account:{android_account_id}"
+    android_avd_name = normalize_profile_id(data.get("android_avd_name"))
+    if android_avd_name:
+        return f"android-device:{android_avd_name}"
+    return None

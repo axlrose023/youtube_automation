@@ -5,7 +5,7 @@ import uuid
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import UUID, BigInteger, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import UUID, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -54,6 +54,13 @@ class PostProcessingStatus(StrEnum):
     FAILED = "failed"
 
 
+class AndroidAccountProfileStatus(StrEnum):
+    READY = "ready"
+    DISABLED = "disabled"
+    BROKEN = "broken"
+    CONFIGURING = "configuring"
+
+
 SESSION_TERMINAL_STATUSES = frozenset(
     {
         SessionStatus.COMPLETED,
@@ -70,6 +77,34 @@ ANALYSIS_TERMINAL_STATUSES = frozenset(
         AnalysisStatus.FAILED,
     }
 )
+
+
+class AndroidAccountProfile(Base, UUID7IDMixin, DateTimeMixin):
+    __tablename__ = "android_account_profiles"
+
+    label: Mapped[str] = mapped_column(String(128))
+    google_email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    avd_name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    snapshot_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    appium_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    uiautomator2_system_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mjpeg_server_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    emulator_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    emulator_memory_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    status: Mapped[str] = mapped_column(
+        String(32),
+        default=AndroidAccountProfileStatus.READY,
+        index=True,
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_used_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AdCapture(Base, UUID7IDMixin, DateTimeMixin):
@@ -166,5 +201,14 @@ class EmulationSessionHistory(Base, DateTimeMixin):
     )
 
     proxy_country_code: Mapped[str | None] = mapped_column(String(8), nullable=True)
+
+    android_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("android_account_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    android_google_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    android_avd_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

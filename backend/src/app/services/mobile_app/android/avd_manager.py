@@ -40,6 +40,8 @@ class AndroidEmulatorLaunchOptions:
     gpu_mode: str
     accel_mode: str | None = None
     http_proxy: str | None = None
+    emulator_port: int | None = None
+    memory_mb: int | None = None
     load_snapshot: bool = False
     save_snapshot: bool = False
     snapshot_name: str | None = None
@@ -112,6 +114,7 @@ class AndroidAvdManager:
             avd_name=avd_name,
             launch=launch,
         )
+        new_serial: str | None = None
         try:
             print(f"[android-avd] ensure_device:wait_new_serial avd={avd_name}", flush=True)
             new_serial = await self._wait_for_new_serial(
@@ -154,6 +157,11 @@ class AndroidAvdManager:
         except Exception:
             with contextlib.suppress(Exception):
                 process.terminate()
+            with contextlib.suppress(Exception):
+                await self.force_cleanup_device(
+                    adb_serial=new_serial,
+                    avd_name=avd_name,
+                )
             raise
 
     async def stop_device(self, adb_serial: str, *, avd_name: str | None = None) -> None:
@@ -364,6 +372,10 @@ class AndroidAvdManager:
             args.extend(["-accel", launch.accel_mode])
         if launch.http_proxy:
             args.extend(["-http-proxy", launch.http_proxy])
+        if launch.emulator_port is not None:
+            args.extend(["-port", str(launch.emulator_port)])
+        if launch.memory_mb is not None:
+            args.extend(["-memory", str(launch.memory_mb)])
         if launch.snapshot_name:
             args.extend(["-snapshot", launch.snapshot_name])
             if launch.force_snapshot_load:
@@ -439,6 +451,28 @@ class AndroidAvdManager:
             current_serials = set(await self._list_all_emulator_serials(adb_bin))
             new_serials = current_serials - existing_serials
             if new_serials:
+                if avd_name:
+                    matched_serial = await self._find_current_serial_for_avd_name(
+                        adb_bin,
+                        avd_name,
+                        new_serials,
+                    )
+                    if matched_serial:
+                        print(
+                            "[android-avd] wait_new_serial:matched_new_serial "
+                            f"avd={avd_name} existing={sorted(existing_serials)} "
+                            f"current={sorted(current_serials)} selected={matched_serial}",
+                            flush=True,
+                        )
+                        return matched_serial
+                    print(
+                        "[android-avd] wait_new_serial:new_serials_unmatched "
+                        f"avd={avd_name} existing={sorted(existing_serials)} "
+                        f"current={sorted(current_serials)} candidates={sorted(new_serials)}",
+                        flush=True,
+                    )
+                    await asyncio.sleep(2)
+                    continue
                 print(
                     "[android-avd] wait_new_serial:new_serials "
                     f"avd={avd_name or 'unknown'} existing={sorted(existing_serials)} "

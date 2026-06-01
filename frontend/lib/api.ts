@@ -3,6 +3,7 @@
 import { apiClient } from "@/lib/api-client";
 import { clearTokens, getAccessToken, getRefreshToken, setTokens } from "@/lib/tokens";
 import type {
+  AndroidAccountProfileListResponse,
   EmulationDashboardSummary,
   EmulationSessionActionRequest,
   EmulationHistoryDetail,
@@ -224,6 +225,13 @@ export function streamEmulationStatus(
 
 export async function startEmulation(payload: StartEmulationRequest) {
   const { data } = await apiClient.post<StartEmulationResponse>("/emulation/start", payload);
+  return data;
+}
+
+export async function getAndroidAccounts(activeOnly = false) {
+  const { data } = await apiClient.get<AndroidAccountProfileListResponse>("/emulation/android-accounts", {
+    params: { active_only: activeOnly },
+  });
   return data;
 }
 

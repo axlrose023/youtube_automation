@@ -237,6 +237,16 @@ class StandaloneRunOptions:
     proxy_url: str | None = None
     run_dir: Path | None = None
     android_config: AndroidAppConfig | None = None
+    videos: list[str] = field(default_factory=list)
+    per_video_max_seconds: float = 20 * 60
+    android_account_id: str | None = None
+    android_account_email: str | None = None
+    snapshot_name: str | None = None
+    appium_port: int | None = None
+    uiautomator2_system_port: int | None = None
+    mjpeg_server_port: int | None = None
+    emulator_port: int | None = None
+    emulator_memory_mb: int | None = None
     stop_event: asyncio.Event | None = None
     on_progress: StandaloneProgressCallback | None = None
 
@@ -4834,6 +4844,148 @@ async def watch_video_loop(
     return watch_end_reason
 
 
+def _parse_youtube_video_id(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host in {"youtu.be"}:
+        slug = parsed.path.strip("/").split("/", 1)[0]
+        return slug or None
+    if "youtube.com" in host or "youtube-nocookie.com" in host:
+        path = parsed.path or ""
+        if path.startswith("/watch"):
+            vals = parse_qs(parsed.query).get("v")
+            if vals:
+                return vals[0]
+        for prefix in ("/shorts/", "/embed/", "/v/"):
+            if path.startswith(prefix):
+                return path[len(prefix):].split("/", 1)[0] or None
+    return None
+
+
+def open_watch_deeplink(serial: str, video_url: str, youtube_pkg: str) -> bool:
+    result = adb(
+        serial,
+        "shell",
+        "am",
+        "start",
+        "-S",
+        "-a",
+        "android.intent.action.VIEW",
+        "-d",
+        video_url,
+        youtube_pkg,
+        timeout=8,
+    )
+    return result.returncode == 0
+
+
+async def run_direct_video(
+    *,
+    driver,
+    serial: str,
+    config: AndroidAppConfig,
+    video_url: str,
+    max_watch_seconds: float,
+    ad_record_seconds: float,
+    run_dir: Path,
+    recorder: AndroidScreenRecorder,
+    record: TopicRecord,
+    scroll_rounds: int,
+    stop_event: asyncio.Event | None = None,
+    on_progress: StandaloneProgressCallback | None = None,
+) -> TopicRecord:
+    video_id = _parse_youtube_video_id(video_url) or "unknown"
+    label = f"video_{video_id}"
+    debug_root = run_dir / "debug" / safe_topic_slug(label)
+    nav_dir = debug_root / "nav"
+
+    started_at_mono = time.monotonic()
+
+    if not open_watch_deeplink(serial, video_url, config.youtube_package):
+        record.skipped = True
+        record.skip_reason = "watch_deeplink_failed"
+        record.finished_at = utc_now_iso()
+        return record
+
+    if not await wait_for_watch(driver, timeout=25.0, serial=serial):
+        dump_xml_snapshot(driver, nav_dir, "watch_not_loaded_direct")
+        record.skipped = True
+        record.skip_reason = "watch_not_loaded"
+        record.finished_at = utc_now_iso()
+        return record
+    dump_xml_snapshot(driver, nav_dir, "watch_loaded_direct")
+
+    opened_video: dict = {
+        "url": video_url,
+        "video_id": video_id,
+        "title": None,
+        "channel_name": None,
+        "started_at": utc_now_iso(),
+        "like_planned": False,
+        "subscribe_planned": False,
+        "liked": False,
+        "liked_video_title": None,
+        "liked_at": None,
+        "subscribed": False,
+        "subscribed_channel_name": None,
+        "subscribed_at": None,
+        "social_actions": [],
+    }
+    if record.opened_video is None:
+        record.opened_video = opened_video
+    record.opened_videos.append(opened_video)
+    await emit_progress(
+        on_progress,
+        event="video_opened",
+        run_dir=run_dir,
+        topic=label,
+        topic_record=record,
+    )
+    print(
+        f"[topic-runner] direct video opened url={video_url} id={video_id}",
+        flush=True,
+    )
+
+    watch_started_at = time.monotonic()
+    try:
+        watch_result = await watch_video_loop(
+            driver=driver,
+            serial=serial,
+            youtube_pkg=config.youtube_package,
+            activity=config.youtube_activity,
+            topic=label,
+            record=record,
+            recorder=recorder,
+            ad_record_seconds=ad_record_seconds,
+            max_watch_seconds=max_watch_seconds,
+            watch_banner_rounds=scroll_rounds,
+            run_dir=run_dir,
+            opened_video=opened_video,
+            stop_event=stop_event,
+            on_progress=on_progress,
+        )
+    except Exception:
+        opened_video["watch_seconds"] = round(time.monotonic() - watch_started_at, 2)
+        opened_video["end_reason"] = "exception"
+        opened_video["finished_at"] = utc_now_iso()
+        record.watch_seconds = round(
+            record.watch_seconds + (time.monotonic() - watch_started_at), 2
+        )
+        record.finished_at = utc_now_iso()
+        raise
+
+    opened_video["watch_seconds"] = round(time.monotonic() - watch_started_at, 2)
+    opened_video["end_reason"] = watch_result
+    opened_video["finished_at"] = utc_now_iso()
+    print(
+        f"[topic-runner] direct video done id={video_id} reason={watch_result} "
+        f"elapsed={round(time.monotonic() - started_at_mono, 1)}s",
+        flush=True,
+    )
+    record.finished_at = utc_now_iso()
+    return record
+
+
 async def run_topic(
     *,
     driver,
@@ -5142,15 +5294,35 @@ async def _prepare_emulator_proxy(
 
 async def run_standalone_session(options: StandaloneRunOptions) -> StandaloneRunResult:
     base_config = options.android_config or AndroidAppConfig()
+    manage_appium_server = options.manage_appium or (
+        options.appium_port is not None
+        and options.appium_port != base_config.appium_port
+    )
     config = base_config.model_copy(
         update={
             "enabled": True,
-            "manage_appium_server": options.manage_appium,
+            "manage_appium_server": manage_appium_server,
             "emulator_force_restart_before_run": False,
         }
     )
+    config_updates: dict[str, object] = {}
     if options.avd_name:
-        config = config.model_copy(update={"default_avd_name": options.avd_name})
+        config_updates["default_avd_name"] = options.avd_name
+    if options.appium_port is not None:
+        config_updates["appium_port"] = options.appium_port
+        base_path = config.appium_base_path or "/"
+        normalized_base_path = "" if base_path == "/" else "/" + base_path.strip("/")
+        config_updates["appium_server_url"] = (
+            f"http://{config.appium_host}:{options.appium_port}{normalized_base_path}"
+        )
+    if options.uiautomator2_system_port is not None:
+        config_updates["appium_uiautomator2_system_port"] = (
+            options.uiautomator2_system_port
+        )
+    if options.mjpeg_server_port is not None:
+        config_updates["appium_mjpeg_server_port"] = options.mjpeg_server_port
+    if config_updates:
+        config = config.model_copy(update=config_updates)
     avd_name = options.avd_name or config.default_avd_name
 
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -5170,6 +5342,25 @@ async def run_standalone_session(options: StandaloneRunOptions) -> StandaloneRun
         emulator_start_timeout_seconds=config.emulator_start_timeout_seconds,
         device_ready_timeout_seconds=config.device_ready_timeout_seconds,
     )
+    requested_snapshot_name = (
+        (options.snapshot_name or "").strip()
+        or (
+            (config.runtime_snapshot_name or "").strip()
+            if config.emulator_use_snapshots
+            else ""
+        )
+    )
+    snapshot_exists = (
+        await avd_manager.snapshot_exists(avd_name, requested_snapshot_name)
+        if requested_snapshot_name
+        else False
+    )
+    if requested_snapshot_name and not snapshot_exists:
+        print(
+            f"[topic-runner] snapshot missing avd={avd_name} snapshot={requested_snapshot_name}",
+            flush=True,
+        )
+
     handle = await avd_manager.ensure_device(
         avd_name=avd_name,
         launch=AndroidEmulatorLaunchOptions(
@@ -5177,6 +5368,11 @@ async def run_standalone_session(options: StandaloneRunOptions) -> StandaloneRun
             gpu_mode=config.emulator_gpu_mode,
             accel_mode=config.emulator_accel_mode,
             http_proxy=emulator_proxy_url,
+            emulator_port=options.emulator_port,
+            memory_mb=options.emulator_memory_mb,
+            load_snapshot=snapshot_exists,
+            snapshot_name=requested_snapshot_name if snapshot_exists else None,
+            force_snapshot_load=snapshot_exists,
             skip_adb_auth=config.emulator_skip_adb_auth,
             # Proxy changes are process-level for `-http-proxy`; ADB global
             # settings alone cannot update a running emulator launched with a
@@ -5186,7 +5382,11 @@ async def run_standalone_session(options: StandaloneRunOptions) -> StandaloneRun
         ),
     )
     serial = handle.adb_serial
-    print(f"[topic-runner] device ready serial={serial}", flush=True)
+    print(
+        f"[topic-runner] device ready serial={serial} avd={avd_name} "
+        f"account={options.android_account_email or options.android_account_id or '<legacy>'}",
+        flush=True,
+    )
     if emulator_proxy_url:
         set_android_global_http_proxy(serial, emulator_proxy_url)
     else:
@@ -5210,9 +5410,15 @@ async def run_standalone_session(options: StandaloneRunOptions) -> StandaloneRun
     session_started = time.monotonic()
     session_budget = max(0.0, float(options.max_watch_seconds))
     topics = [topic.strip() for topic in options.topics if topic.strip()]
-    if not topics:
-        raise ValueError("Standalone runner requires at least one topic")
-    short_session_mode = len(topics) > 1 and session_budget <= 30 * 60
+    videos = [v.strip() for v in options.videos if v.strip()]
+    if not topics and not videos:
+        raise ValueError("Standalone runner requires --topic or --video/--videos-file")
+    if topics and videos:
+        raise ValueError("Cannot mix --topic and --video in one session")
+    direct_video_mode = bool(videos)
+    short_session_mode = (
+        not direct_video_mode and len(topics) > 1 and session_budget <= 30 * 60
+    )
     topic_records: list[TopicRecord] = []
 
     try:
@@ -5223,6 +5429,91 @@ async def run_standalone_session(options: StandaloneRunOptions) -> StandaloneRun
             topics=topic_records,
             payload={"avd": avd_name},
         )
+        if direct_video_mode:
+            print(
+                f"[topic-runner] schedule mode=direct_videos "
+                f"videos={len(videos)} session_budget={session_budget:.1f}s "
+                f"per_video_cap={options.per_video_max_seconds:.0f}s",
+                flush=True,
+            )
+            for video_idx, video_url in enumerate(videos):
+                if options.stop_event is not None and options.stop_event.is_set():
+                    print("[topic-runner] stop_event before next video", flush=True)
+                    break
+                session_elapsed = time.monotonic() - session_started
+                session_remaining = session_budget - session_elapsed
+                if session_remaining <= 0:
+                    print("[topic-runner] session budget exhausted", flush=True)
+                    break
+
+                per_video_budget = min(options.per_video_max_seconds, session_remaining)
+                vid = _parse_youtube_video_id(video_url) or f"idx{video_idx + 1}"
+                record_label = f"video_{video_idx + 1:02d}_{vid}"
+                print(
+                    f"[topic-runner] video:start {video_url!r} "
+                    f"budget={per_video_budget:.1f}s",
+                    flush=True,
+                )
+                record = TopicRecord(topic=record_label, started_at=utc_now_iso())
+                await emit_progress(
+                    options.on_progress,
+                    event="topic_started",
+                    run_dir=run_dir,
+                    topic=record_label,
+                    topic_record=record,
+                    topics=[*topic_records, record],
+                )
+
+                async def _video_progress(event: StandaloneProgressEvent) -> None:
+                    current_records = [*topic_records]
+                    if event.topic_record is not None:
+                        current_records.append(event.topic_record)
+                    await emit_progress(
+                        options.on_progress,
+                        event=event.event,
+                        run_dir=event.run_dir,
+                        topic=event.topic,
+                        topic_record=event.topic_record,
+                        topics=current_records,
+                        payload=event.payload,
+                    )
+
+                try:
+                    record = await run_direct_video(
+                        driver=driver,
+                        serial=serial,
+                        config=config,
+                        video_url=video_url,
+                        max_watch_seconds=per_video_budget,
+                        ad_record_seconds=options.ad_record_seconds,
+                        run_dir=run_dir,
+                        recorder=recorder,
+                        record=record,
+                        scroll_rounds=options.scroll_rounds,
+                        stop_event=options.stop_event,
+                        on_progress=_video_progress,
+                    )
+                except Exception as exc:
+                    record.skipped = True
+                    record.skip_reason = f"exception:{type(exc).__name__}:{exc}"
+                    record.finished_at = utc_now_iso()
+                    print(
+                        f"[topic-runner] video:error {video_url!r} "
+                        f"{type(exc).__name__}: {exc}",
+                        flush=True,
+                    )
+                topic_records.append(record)
+                await emit_progress(
+                    options.on_progress,
+                    event="topic_finished",
+                    run_dir=run_dir,
+                    topic=record_label,
+                    topic_record=record,
+                    topics=topic_records,
+                )
+
+            # Skip the topic-mode loop entirely.
+            topics = []
         print(
             f"[topic-runner] schedule mode="
             f"{'short_one_video_pass' if short_session_mode else 'topic_blocks'} "
@@ -5484,11 +5775,22 @@ async def main_async(args: argparse.Namespace) -> int:
     await run_standalone_session(
         StandaloneRunOptions(
             topics=args.topic,
+            videos=args.videos,
+            per_video_max_seconds=args.per_video_max_seconds,
             max_watch_seconds=args.max_watch_seconds,
             scroll_rounds=args.scroll_rounds,
             ad_record_seconds=args.ad_record_seconds,
             avd_name=args.avd,
             manage_appium=args.manage_appium,
+            proxy_url=args.proxy_url,
+            android_account_id=args.android_account_id,
+            android_account_email=args.android_account_email,
+            snapshot_name=args.snapshot,
+            appium_port=args.appium_port,
+            uiautomator2_system_port=args.uiautomator2_system_port,
+            mjpeg_server_port=args.mjpeg_server_port,
+            emulator_port=args.emulator_port,
+            emulator_memory_mb=args.emulator_memory_mb,
         )
     )
     return 0
@@ -5504,8 +5806,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--topic",
         action="append",
-        required=True,
-        help="Search query. Repeatable.",
+        default=None,
+        help="Search query. Repeatable. Mutually exclusive with --video/--videos-file.",
+    )
+    parser.add_argument(
+        "--video",
+        action="append",
+        default=None,
+        help="YouTube watch URL to play to the end. Repeatable. Mutually exclusive with --topic.",
+    )
+    parser.add_argument(
+        "--videos-file",
+        default=None,
+        help="Path to a text file with one YouTube URL per line.",
+    )
+    parser.add_argument(
+        "--per-video-max-seconds",
+        type=float,
+        default=20 * 60,
+        help="Hard ceiling per direct video in seconds (default 1200, i.e. 20 min).",
     )
     parser.add_argument("--scroll-rounds", type=int, default=30)
     parser.add_argument("--ad-record-seconds", type=float, default=30.0)
@@ -5515,7 +5834,48 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Start a local Appium server (default: assume one is already running on 4723).",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--proxy-url",
+        default=None,
+        help="Proxy URL for the emulator/browser flow. Supports http(s) and socks5 via local bridge.",
+    )
+    parser.add_argument(
+        "--android-account-id",
+        default=None,
+        help="Optional account profile id for logs/artifacts.",
+    )
+    parser.add_argument(
+        "--android-account-email",
+        default=None,
+        help="Optional Google account email for logs/artifacts.",
+    )
+    parser.add_argument(
+        "--snapshot",
+        default=None,
+        help="Optional AVD snapshot name to load when it exists.",
+    )
+    parser.add_argument("--appium-port", type=int, default=None)
+    parser.add_argument("--uiautomator2-system-port", type=int, default=None)
+    parser.add_argument("--mjpeg-server-port", type=int, default=None)
+    parser.add_argument("--emulator-port", type=int, default=None)
+    parser.add_argument("--emulator-memory-mb", type=int, default=None)
+    args = parser.parse_args(argv)
+
+    videos: list[str] = list(args.video or [])
+    if args.videos_file:
+        with open(args.videos_file, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    videos.append(line)
+    args.videos = videos
+    args.topic = list(args.topic or [])
+
+    if args.videos and args.topic:
+        parser.error("--video/--videos-file is mutually exclusive with --topic")
+    if not args.videos and not args.topic:
+        parser.error("Provide --topic ... or --video/--videos-file ...")
+    return args
 
 
 def main() -> int:

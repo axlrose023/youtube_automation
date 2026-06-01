@@ -14,6 +14,7 @@ from .models import (
     ANALYSIS_TERMINAL_STATUSES,
     AdCapture,
     AdCaptureScreenshot,
+    AndroidAccountProfile,
     AnalysisStatus,
     EmulationSessionHistory,
     SessionStatus,
@@ -27,6 +28,61 @@ class EmulationHistoryListRow:
     ads_total: int
     video_captures: int
     screenshot_fallbacks: int
+
+
+class AndroidAccountProfileGateway:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def list_all(self, active_only: bool = False) -> list[AndroidAccountProfile]:
+        stmt = select(AndroidAccountProfile).order_by(
+            AndroidAccountProfile.label.asc(),
+            AndroidAccountProfile.google_email.asc(),
+        )
+        if active_only:
+            stmt = stmt.where(AndroidAccountProfile.is_active.is_(True))
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_by_id(self, profile_id: uuid.UUID) -> AndroidAccountProfile | None:
+        stmt = select(AndroidAccountProfile).where(AndroidAccountProfile.id == profile_id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def create(self, profile: AndroidAccountProfile) -> AndroidAccountProfile:
+        self.session.add(profile)
+        await self.session.flush()
+        await self.session.refresh(profile)
+        return profile
+
+    async def update(
+        self,
+        profile_id: uuid.UUID,
+        **fields: object,
+    ) -> AndroidAccountProfile | None:
+        profile = await self.get_by_id(profile_id)
+        if profile is None:
+            return None
+        for key, value in fields.items():
+            if hasattr(profile, key) and value is not None:
+                setattr(profile, key, value)
+        await self.session.flush()
+        await self.session.refresh(profile)
+        return profile
+
+    async def mark_used(
+        self,
+        profile_id: uuid.UUID,
+        *,
+        last_used_at: datetime.datetime,
+        last_error: str | None = None,
+    ) -> None:
+        profile = await self.get_by_id(profile_id)
+        if profile is None:
+            return
+        profile.last_used_at = last_used_at
+        profile.last_error = last_error
+        await self.session.flush()
 
 
 @dataclass(frozen=True)
@@ -139,6 +195,9 @@ class EmulationHistoryGateway:
         requested_topics: list[str],
         queued_at: datetime.datetime | None = None,
         proxy_country_code: str | None = None,
+        android_account_id: uuid.UUID | None = None,
+        android_google_email: str | None = None,
+        android_avd_name: str | None = None,
     ) -> EmulationSessionHistory:
         existing = await self.get_by_session_id(session_id)
         if existing:
@@ -151,6 +210,9 @@ class EmulationHistoryGateway:
             requested_topics=requested_topics,
             queued_at=queued_at or datetime.datetime.now(datetime.UTC),
             proxy_country_code=proxy_country_code,
+            android_account_id=android_account_id,
+            android_google_email=android_google_email,
+            android_avd_name=android_avd_name,
         )
         self.session.add(payload)
         await self.session.flush()

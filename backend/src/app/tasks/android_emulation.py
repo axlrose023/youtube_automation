@@ -8,6 +8,7 @@ import time
 import traceback
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dishka import FromDishka
 from dishka.integrations.taskiq import inject
@@ -26,6 +27,10 @@ from app.services.mobile_app.android.config_ui import (
     load_android_config_state,
     patch_android_config_state,
 )
+from app.services.mobile_app.android.proxy_bridge import (
+    AndroidHttpProxyBridge,
+    AndroidHttpProxyBridgeHandle,
+)
 from app.services.mobile_app.android.runtime import build_android_probe_runtime
 from app.services.mobile_app.android.tooling import build_android_runtime_env, require_tool_path
 from app.settings import Config
@@ -36,11 +41,86 @@ logger = logging.getLogger(__name__)
 _ANDROID_QUEUE_POLL_SECONDS = 5
 _ANDROID_HEARTBEAT_SECONDS = 5
 _ANDROID_CONFIG_TIMEOUT_SECONDS = 8 * 60 * 60
+_ANDROID_CONFIG_LOCK_TTL_SECONDS = _ANDROID_CONFIG_TIMEOUT_SECONDS + 30 * 60
+_ANDROID_CONFIG_STATE_HEARTBEAT_SECONDS = 15
 
 
 def _android_device_lock_id(config: Config) -> str:
     avd_name = (config.android_app.default_avd_name or "").strip() or "default"
     return f"android-device:{avd_name}"
+
+
+def _profile_str(profile: dict | None, key: str) -> str | None:
+    if not isinstance(profile, dict):
+        return None
+    value = profile.get(key)
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _profile_int(profile: dict | None, key: str) -> int | None:
+    if not isinstance(profile, dict):
+        return None
+    value = profile.get(key)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value)
+    return None
+
+
+def _android_account_lock_id(
+    config: Config,
+    profile: dict | None,
+) -> str:
+    account_id = _profile_str(profile, "id")
+    if account_id:
+        return f"android-account:{account_id}"
+    avd_name = _android_profile_avd_name(config, profile)
+    return f"android-device:{avd_name}"
+
+
+def _android_profile_avd_name(config: Config, profile: dict | None) -> str:
+    return (
+        _profile_str(profile, "avd_name")
+        or (config.android_app.default_avd_name or "").strip()
+        or "default"
+    )
+
+
+def _android_config_avd_name(config: Config, profile: dict | None) -> str:
+    return (
+        _profile_str(profile, "avd_name")
+        or (config.android_app.bootstrap_avd_name or "").strip()
+        or (config.android_app.default_avd_name or "").strip()
+        or "default"
+    )
+
+
+def _android_config_lock_id(config: Config, profile: dict | None) -> str:
+    account_id = _profile_str(profile, "id")
+    if account_id:
+        return f"android-account:{account_id}"
+    return f"android-device:{_android_config_avd_name(config, profile)}"
+
+
+def _android_config_snapshot_name(config: Config, profile: dict | None) -> str:
+    return (
+        _profile_str(profile, "snapshot_name")
+        or android_config_snapshot_name(
+            config.android_app.runtime_snapshot_name,
+            config.android_app.warm_snapshot_name,
+        )
+    )
+
+
+def _android_lock_ttl_seconds(duration_minutes: int) -> int:
+    requested = max(1, int(duration_minutes)) * 60
+    return max(ORCHESTRATION_RUN_LOCK_TTL_SECONDS, requested + 30 * 60)
 
 
 def _project_root() -> Path:
@@ -88,6 +168,62 @@ def _clear_android_global_http_proxy_sync(serial: str) -> None:
             )
         except Exception:
             continue
+
+
+def _android_global_proxy_value(emulator_proxy_url: str | None) -> str | None:
+    if not emulator_proxy_url:
+        return None
+    parsed = urlparse(emulator_proxy_url)
+    if not parsed.hostname or not parsed.port:
+        return None
+    return f"{parsed.hostname}:{parsed.port}"
+
+
+def _set_android_global_http_proxy_sync(serial: str, emulator_proxy_url: str) -> None:
+    proxy_value = _android_global_proxy_value(emulator_proxy_url)
+    if not proxy_value:
+        return
+    adb_bin = require_tool_path("adb")
+    subprocess.run(
+        [
+            adb_bin,
+            "-s",
+            serial,
+            "shell",
+            "settings",
+            "put",
+            "global",
+            "http_proxy",
+            proxy_value,
+        ],
+        capture_output=True,
+        text=True,
+        env=build_android_runtime_env(),
+        check=False,
+        timeout=8,
+    )
+
+
+async def _prepare_android_config_proxy(
+    proxy_url: str | None,
+) -> tuple[str | None, AndroidHttpProxyBridge | None, AndroidHttpProxyBridgeHandle | None]:
+    resolved = (proxy_url or "").strip()
+    if not resolved:
+        return None, None, None
+
+    lowered = resolved.casefold()
+    if lowered.startswith(("http://", "https://")):
+        emulator_proxy = (
+            resolved
+            .replace("//0.0.0.0:", "//10.0.2.2:")
+            .replace("//127.0.0.1:", "//10.0.2.2:")
+            .replace("//localhost:", "//10.0.2.2:")
+        )
+        return emulator_proxy, None, None
+
+    proxy_bridge = AndroidHttpProxyBridge()
+    bridge_handle = await proxy_bridge.start(resolved)
+    return bridge_handle.emulator_proxy_url, proxy_bridge, bridge_handle
 
 
 async def _android_stop_watcher(
@@ -140,27 +276,50 @@ async def _android_session_heartbeat(
             continue
 
 
+async def _android_config_state_heartbeat(
+    holder: str,
+    redis: Redis,
+    stop_event: asyncio.Event,
+) -> None:
+    while not stop_event.is_set():
+        try:
+            state = await load_android_config_state(redis)
+            if not state or state.get("holder") != holder:
+                return
+            await patch_android_config_state(redis, heartbeat_at=time.time())
+        except Exception:
+            logger.exception("Android config UI heartbeat failed")
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=_ANDROID_CONFIG_STATE_HEARTBEAT_SECONDS,
+            )
+        except TimeoutError:
+            continue
+
+
 @broker.task(task_name="android_config_ui_task", timeout=28800)
 @inject
 async def android_config_ui_task(
     holder: str,
+    android_account_profile: dict | None,
+    proxy_url: str | None,
     session_store: FromDishka[EmulationSessionStore],
     redis: FromDishka[Redis],
     config: FromDishka[Config],
 ) -> dict:
-    device_lock_id = _android_device_lock_id(config)
+    device_lock_id = _android_config_lock_id(config, android_account_profile)
     lock_holder = f"{ANDROID_CONFIG_SESSION_ID}:{holder}"
-    avd_name = (
-        config.android_app.bootstrap_avd_name
-        or config.android_app.default_avd_name
-    )
-    snapshot_name = android_config_snapshot_name(
-        config.android_app.runtime_snapshot_name,
-        config.android_app.warm_snapshot_name,
-    )
+    avd_name = _android_config_avd_name(config, android_account_profile)
+    snapshot_name = _android_config_snapshot_name(config, android_account_profile)
     runtime = build_android_probe_runtime(config.android_app)
     run_lock_acquired = False
     device_lock_acquired = False
+    proxy_bridge: AndroidHttpProxyBridge | None = None
+    proxy_bridge_handle: AndroidHttpProxyBridgeHandle | None = None
+    emulator_proxy_url: str | None = None
+    config_heartbeat_stop = asyncio.Event()
+    config_heartbeat_task: asyncio.Task[None] | None = None
     serial: str | None = None
     saved_snapshot = False
     started_at = time.monotonic()
@@ -174,12 +333,27 @@ async def android_config_ui_task(
             ANDROID_CONFIG_SESSION_ID,
             ["android_ui_config"],
             duration_minutes=max(1, _ANDROID_CONFIG_TIMEOUT_SECONDS // 60),
-            profile_id=None,
+            profile_id=device_lock_id,
+        )
+        await session_store.update(
+            ANDROID_CONFIG_SESSION_ID,
+            android_account_id=_profile_str(android_account_profile, "id"),
+            android_google_email=_profile_str(android_account_profile, "google_email"),
+            android_avd_name=avd_name,
+            android_account_profile=android_account_profile,
+            mode="android_config",
+        )
+        config_heartbeat_task = asyncio.create_task(
+            _android_config_state_heartbeat(
+                holder=holder,
+                redis=redis,
+                stop_event=config_heartbeat_stop,
+            )
         )
         run_lock_acquired = await session_store.try_acquire_run_lock(
             session_id=ANDROID_CONFIG_SESSION_ID,
             holder=lock_holder,
-            ttl_seconds=ORCHESTRATION_RUN_LOCK_TTL_SECONDS,
+            ttl_seconds=_ANDROID_CONFIG_LOCK_TTL_SECONDS,
         )
         if not run_lock_acquired:
             await patch_android_config_state(
@@ -206,13 +380,14 @@ async def android_config_ui_task(
             device_lock_acquired = await session_store.try_acquire_profile_lock(
                 profile_id=device_lock_id,
                 holder=lock_holder,
-                ttl_seconds=ORCHESTRATION_RUN_LOCK_TTL_SECONDS,
+                ttl_seconds=_ANDROID_CONFIG_LOCK_TTL_SECONDS,
             )
             if device_lock_acquired:
                 break
             await patch_android_config_state(
                 redis,
                 status="queued",
+                device_lock_id=device_lock_id,
                 queue_reason=f"Waiting for Android device slot {device_lock_id}",
             )
             await asyncio.sleep(_ANDROID_QUEUE_POLL_SECONDS)
@@ -230,9 +405,17 @@ async def android_config_ui_task(
             status="starting",
             started_at=time.time(),
             snapshot_name=snapshot_name,
+            android_account_id=_profile_str(android_account_profile, "id"),
+            android_google_email=_profile_str(android_account_profile, "google_email"),
+            android_avd_name=avd_name,
+            device_lock_id=device_lock_id,
+            proxy_enabled=bool((proxy_url or "").strip()),
             error=None,
         )
 
+        emulator_proxy_url, proxy_bridge, proxy_bridge_handle = await _prepare_android_config_proxy(
+            proxy_url
+        )
         snapshot_exists = await runtime.avd_manager.snapshot_exists(avd_name, snapshot_name)
         device = await runtime.avd_manager.ensure_device(
             avd_name=avd_name,
@@ -240,6 +423,9 @@ async def android_config_ui_task(
                 headless=False,
                 gpu_mode=config.android_app.bootstrap_emulator_gpu_mode,
                 accel_mode=config.android_app.bootstrap_emulator_accel_mode,
+                http_proxy=emulator_proxy_url,
+                emulator_port=_profile_int(android_account_profile, "emulator_port"),
+                memory_mb=_profile_int(android_account_profile, "emulator_memory_mb"),
                 load_snapshot=snapshot_exists,
                 save_snapshot=False,
                 snapshot_name=snapshot_name if snapshot_exists else None,
@@ -249,10 +435,22 @@ async def android_config_ui_task(
             ),
         )
         serial = device.adb_serial
-        # Config mode must never inherit a proxy from a previous run or a
-        # saved snapshot. Normal emulation can opt into a proxy explicitly.
-        await asyncio.to_thread(_clear_android_global_http_proxy_sync, serial)
-        await patch_android_config_state(redis, status="running", serial=serial)
+        if emulator_proxy_url:
+            await asyncio.to_thread(
+                _set_android_global_http_proxy_sync,
+                serial,
+                emulator_proxy_url,
+            )
+        else:
+            # Config mode without an explicit proxy must never inherit a proxy
+            # from a previous run or a saved snapshot.
+            await asyncio.to_thread(_clear_android_global_http_proxy_sync, serial)
+        await patch_android_config_state(
+            redis,
+            status="running",
+            serial=serial,
+            queue_reason=None,
+        )
 
         while True:
             if not await _state_matches():
@@ -266,6 +464,7 @@ async def android_config_ui_task(
             )
             if state.get("finish_requested"):
                 await patch_android_config_state(redis, status="saving")
+                await asyncio.to_thread(_clear_android_global_http_proxy_sync, serial)
                 await runtime.avd_manager.save_snapshot(serial, snapshot_name)
                 saved_snapshot = True
                 break
@@ -283,6 +482,7 @@ async def android_config_ui_task(
 
         if serial is not None:
             await patch_android_config_state(redis, status="stopping")
+            await asyncio.to_thread(_clear_android_global_http_proxy_sync, serial)
             try:
                 await runtime.avd_manager.stop_device(serial, avd_name=avd_name)
             except Exception:
@@ -329,6 +529,7 @@ async def android_config_ui_task(
         )
         if serial is not None:
             try:
+                await asyncio.to_thread(_clear_android_global_http_proxy_sync, serial)
                 await runtime.avd_manager.force_cleanup_device(
                     adb_serial=serial,
                     avd_name=avd_name,
@@ -337,6 +538,17 @@ async def android_config_ui_task(
                 logger.exception("Android config UI cleanup failed")
         raise
     finally:
+        config_heartbeat_stop.set()
+        if config_heartbeat_task is not None:
+            try:
+                await config_heartbeat_task
+            except Exception:
+                logger.exception("Android config UI heartbeat cleanup failed")
+        if proxy_bridge is not None and proxy_bridge_handle is not None:
+            try:
+                await proxy_bridge.stop(proxy_bridge_handle)
+            except Exception:
+                logger.exception("Android config proxy bridge cleanup failed")
         if device_lock_acquired:
             await session_store.release_profile_lock(device_lock_id, lock_holder)
         if run_lock_acquired:
@@ -354,6 +566,7 @@ async def android_emulation_task(
     config: FromDishka[Config],
     proxy_url: str | None = None,
     headless: bool | None = None,
+    android_account_profile: dict | None = None,
 ) -> dict:
     _ensure_project_root_on_path()
     from standalone_topic_runner.runner import (
@@ -363,8 +576,12 @@ async def android_emulation_task(
     )
 
     run_holder = f"{session_id}:{uuid.uuid4().hex}"
-    device_lock_id = _android_device_lock_id(config)
+    lock_ttl_seconds = _android_lock_ttl_seconds(duration_minutes)
+    avd_name = _android_profile_avd_name(config, android_account_profile)
+    device_lock_id = _android_account_lock_id(config, android_account_profile)
     device_lock_holder = f"{run_holder}:android-device"
+    capacity_holder = f"{run_holder}:android-capacity"
+    capacity_slot: int | None = None
     _last_persisted_ads_count = 0
     heartbeat_stop = asyncio.Event()
     heartbeat_task: asyncio.Task[None] | None = None
@@ -374,7 +591,7 @@ async def android_emulation_task(
     lock_acquired = await session_store.try_acquire_run_lock(
         session_id=session_id,
         holder=run_holder,
-        ttl_seconds=ORCHESTRATION_RUN_LOCK_TTL_SECONDS,
+        ttl_seconds=lock_ttl_seconds,
     )
     if not lock_acquired:
         logger.info("Android session %s: skipping duplicate task", session_id)
@@ -408,21 +625,43 @@ async def android_emulation_task(
                 logger.info("Android session %s: already finished, skipping", session_id)
                 return {"status": "already_finished", "session_id": session_id}
 
-            device_lock_acquired = await session_store.try_acquire_profile_lock(
-                profile_id=device_lock_id,
-                holder=device_lock_holder,
-                ttl_seconds=ORCHESTRATION_RUN_LOCK_TTL_SECONDS,
-            )
-            if device_lock_acquired:
-                break
+            if not device_lock_acquired:
+                device_lock_acquired = await session_store.try_acquire_profile_lock(
+                    profile_id=device_lock_id,
+                    holder=device_lock_holder,
+                    ttl_seconds=lock_ttl_seconds,
+                )
+                if not device_lock_acquired:
+                    await session_store.update(
+                        session_id,
+                        status=SessionStatus.QUEUED,
+                        mode="android",
+                        queue_reason=f"Waiting for Android account slot {device_lock_id}",
+                    )
+                    await asyncio.sleep(_ANDROID_QUEUE_POLL_SECONDS)
+                    continue
 
-            await session_store.update(
-                session_id,
-                status=SessionStatus.QUEUED,
-                mode="android",
-                queue_reason=f"Waiting for Android device slot {device_lock_id}",
-            )
-            await asyncio.sleep(_ANDROID_QUEUE_POLL_SECONDS)
+            max_parallel_sessions = max(1, int(config.android_app.max_parallel_sessions or 1))
+            if capacity_slot is None:
+                capacity_slot = await session_store.try_acquire_android_capacity_slot(
+                    holder=capacity_holder,
+                    limit=max_parallel_sessions,
+                    ttl_seconds=lock_ttl_seconds,
+                )
+                if capacity_slot is None:
+                    await session_store.update(
+                        session_id,
+                        status=SessionStatus.QUEUED,
+                        mode="android",
+                        queue_reason=(
+                            "Waiting for Android host capacity "
+                            f"{max_parallel_sessions}/{max_parallel_sessions}"
+                        ),
+                    )
+                    await asyncio.sleep(_ANDROID_QUEUE_POLL_SECONDS)
+                    continue
+
+            break
 
         started_at_ts = time.time()
         await session_store.update(
@@ -433,6 +672,10 @@ async def android_emulation_task(
             error=None,
             mode="android",
             queue_reason=None,
+            android_account_id=_profile_str(android_account_profile, "id"),
+            android_google_email=_profile_str(android_account_profile, "google_email"),
+            android_avd_name=avd_name,
+            android_account_profile=android_account_profile,
         )
         live_payload = await session_store.get(session_id) or {}
         try:
@@ -546,12 +789,29 @@ async def android_emulation_task(
                     max_watch_seconds=float(duration_minutes * 60),
                     scroll_rounds=20,
                     ad_record_seconds=30.0,
-                    avd_name=config.android_app.default_avd_name,
+                    avd_name=avd_name,
                     manage_appium=config.android_app.manage_appium_server,
                     headless=headless,
                     proxy_url=proxy_url,
                     run_dir=run_dir,
                     android_config=config.android_app,
+                    android_account_id=_profile_str(android_account_profile, "id"),
+                    android_account_email=_profile_str(android_account_profile, "google_email"),
+                    snapshot_name=_profile_str(android_account_profile, "snapshot_name"),
+                    appium_port=_profile_int(android_account_profile, "appium_port"),
+                    uiautomator2_system_port=_profile_int(
+                        android_account_profile,
+                        "uiautomator2_system_port",
+                    ),
+                    mjpeg_server_port=_profile_int(
+                        android_account_profile,
+                        "mjpeg_server_port",
+                    ),
+                    emulator_port=_profile_int(android_account_profile, "emulator_port"),
+                    emulator_memory_mb=_profile_int(
+                        android_account_profile,
+                        "emulator_memory_mb",
+                    ),
                     stop_event=runner_stop_event,
                     on_progress=on_progress,
                 )
@@ -712,4 +972,9 @@ async def android_emulation_task(
                 pass
         if device_lock_acquired:
             await session_store.release_profile_lock(device_lock_id, device_lock_holder)
+        if capacity_slot is not None:
+            await session_store.release_android_capacity_slot(
+                capacity_slot,
+                capacity_holder,
+            )
         await session_store.release_run_lock(session_id, run_holder)

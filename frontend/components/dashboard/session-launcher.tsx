@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { Bolt, Check, ChevronDown, Clock, Trash2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
-import { getProxies, startEmulation } from "@/lib/api";
-import type { Proxy } from "@/types/api";
+import { getAndroidAccounts, getProxies, startEmulation } from "@/lib/api";
+import type { AndroidAccountProfile, Proxy } from "@/types/api";
 
 const FALLBACK_TOPICS = [
   "best forex profit",
@@ -33,18 +33,30 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
   const [proxyId, setProxyId] = useState("");
   const [proxies, setProxies] = useState<Proxy[]>([]);
   const [proxyOpen, setProxyOpen] = useState(false);
+  const [androidAccountId, setAndroidAccountId] = useState("");
+  const [androidAccounts, setAndroidAccounts] = useState<AndroidAccountProfile[]>([]);
+  const [accountOpen, setAccountOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const popRef = useRef<HTMLDivElement>(null);
+  const accountRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
   const selectedProxy = proxies.find((p) => p.id === proxyId) ?? null;
+  const selectedAccount = androidAccounts.find((a) => a.id === androidAccountId) ?? null;
 
   useEffect(() => {
     void getProxies(true)
       .then((data) => {
         setProxies(data.items);
         if (data.items.length > 0) setProxyId(data.items[0].id);
+      })
+      .catch(() => {});
+    void getAndroidAccounts(true)
+      .then((data) => {
+        setAndroidAccounts(data.items);
+        const ready = data.items.find((item) => item.status === "ready") ?? data.items[0];
+        if (ready) setAndroidAccountId(ready.id);
       })
       .catch(() => {});
   }, []);
@@ -59,6 +71,17 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
     document.addEventListener("keydown", onEsc);
     return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onEsc); };
   }, [proxyOpen]);
+
+  useEffect(() => {
+    if (!accountOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      if (accountRef.current && !accountRef.current.contains(e.target as Node)) setAccountOpen(false);
+    };
+    const onEsc = (e: KeyboardEvent) => { if (e.key === "Escape") setAccountOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onEsc);
+    return () => { document.removeEventListener("mousedown", onDoc); document.removeEventListener("keydown", onEsc); };
+  }, [accountOpen]);
 
   function normalizeTopics(next: string[]) {
     const normalized = [...next];
@@ -104,10 +127,17 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
     }
     const payloadTopics = merged;
     if (payloadTopics.length === 0) { setError("Нужна хотя бы одна тема."); return; }
+    if (androidAccounts.length > 0 && !androidAccountId) { setError("Выбери Google аккаунт."); return; }
     if (!proxyId) { setError("Выбери прокси."); return; }
     setLoading(true);
     try {
-      const response = await startEmulation({ duration_minutes: duration, topics: payloadTopics, runner: "android", proxy_id: proxyId });
+      const response = await startEmulation({
+        duration_minutes: duration,
+        topics: payloadTopics,
+        runner: "android",
+        proxy_id: proxyId,
+        android_account_id: androidAccountId || null,
+      });
       navigate(`/sessions/${response.session_id}`);
     } catch {
       setError("Не удалось запустить эмуляцию. Проверь API и логи.");
@@ -131,8 +161,8 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
       </div>
 
       <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        {/* Duration + Proxy */}
-        <div className="grid grid-cols-2 gap-3">
+        {/* Duration + Account + Proxy */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
           {/* Duration segment + custom input */}
           <div>
             <Label>Длительность</Label>
@@ -187,6 +217,51 @@ export function SessionLauncher({ popularTopics }: { popularTopics?: string[] })
               />
             </div>
             <div className="mt-1 text-[11px]" style={{ color: "var(--muted)" }}>минуты · до 24ч</div>
+          </div>
+
+          {/* Android account dropdown */}
+          <div ref={accountRef} className="relative">
+            <Label>Google аккаунт</Label>
+            <button
+              type="button"
+              onClick={() => setAccountOpen((o) => !o)}
+              className="w-full h-9 px-2.5 rounded-lg flex items-center gap-1.5 text-[13px] transition-colors"
+              style={{ background: accountOpen ? "var(--panel-soft)" : "var(--panel)", boxShadow: "inset 0 0 0 1px var(--line)", color: "var(--ink)" }}
+            >
+              <span className="flex-1 text-left truncate font-medium" style={{ color: selectedAccount ? "var(--ink)" : "var(--muted)" }}>
+                {selectedAccount ? selectedAccount.label : "Legacy AVD"}
+              </span>
+              <ChevronDown size={13} style={{ color: "var(--muted)", transform: accountOpen ? "rotate(180deg)" : undefined, transition: "transform 0.15s" }} />
+            </button>
+            <div className="mt-1 text-[11px] truncate" style={{ color: "var(--muted)" }}>
+              {selectedAccount ? selectedAccount.google_email : "default_avd_name"}
+            </div>
+
+            {accountOpen && androidAccounts.length > 0 && (
+              <div className="absolute left-0 right-0 z-30 rounded-xl overflow-hidden" style={{ top: "calc(100% + 6px)", background: "var(--panel)", boxShadow: "0 8px 24px rgba(0,0,0,0.10), inset 0 0 0 1px var(--line)", maxHeight: 240, overflowY: "auto" }}>
+                {androidAccounts.map((account) => {
+                  const sel = account.id === androidAccountId;
+                  return (
+                    <button
+                      key={account.id}
+                      type="button"
+                      onClick={() => { setAndroidAccountId(account.id); setAccountOpen(false); }}
+                      className="w-full h-10 px-3 flex items-center gap-2.5 text-[13px] text-left transition-colors"
+                      style={{ background: sel ? "var(--panel-soft)" : undefined }}
+                      onMouseEnter={(e) => { if (!sel) e.currentTarget.style.background = "var(--panel-soft)"; }}
+                      onMouseLeave={(e) => { if (!sel) e.currentTarget.style.background = ""; }}
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate" style={{ color: "var(--ink)" }}>{account.label}</span>
+                        <span className="block truncate text-[11px]" style={{ color: "var(--muted)" }}>{account.google_email}</span>
+                      </span>
+                      <span className="font-mono text-[10.5px]" style={{ color: "var(--muted)" }}>{account.avd_name}</span>
+                      {sel && <Check size={14} strokeWidth={2.2} style={{ color: "var(--ink-secondary)", marginLeft: 4 }} />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           {/* Proxy dropdown */}

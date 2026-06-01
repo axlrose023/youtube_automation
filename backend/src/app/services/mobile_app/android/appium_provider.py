@@ -32,7 +32,7 @@ class LocalAppiumServer:
     def __init__(self, config: AndroidAppConfig) -> None:
         self._config = config
         self._process: asyncio.subprocess.Process | None = None
-        self._log_path = Path("/tmp/android_appium_server.log")
+        self._log_path = Path(f"/tmp/android_appium_server_{config.appium_port}.log")
 
     async def start(self, *, force_restart: bool = False) -> bool:
         if force_restart:
@@ -393,6 +393,16 @@ class AppiumSessionProvider:
             self._config.appium_new_command_timeout_seconds,
         )
         options.auto_grant_permissions = True
+        if self._config.appium_uiautomator2_system_port is not None:
+            options.set_capability(
+                "systemPort",
+                self._config.appium_uiautomator2_system_port,
+            )
+        if self._config.appium_mjpeg_server_port is not None:
+            options.set_capability(
+                "mjpegServerPort",
+                self._config.appium_mjpeg_server_port,
+            )
         options.set_capability(
             "skipDeviceInitialization",
             skip_device_initialization,

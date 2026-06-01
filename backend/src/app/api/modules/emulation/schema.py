@@ -25,6 +25,10 @@ class StartEmulationRequest(BaseModel):
         default=None,
         description="Optional proxy id from /proxies table for android runner",
     )
+    android_account_id: UUID | None = Field(
+        default=None,
+        description="Optional Android Google account profile id. Resolves to a fixed AVD.",
+    )
     headless: bool = Field(
         default=False,
         description="Run android emulator without a visible window",
@@ -177,6 +181,9 @@ class EmulationSessionStatus(BaseModel):
     post_processing_status: PostProcessingStatus | None = None
     post_processing_progress: EmulationPostProcessingProgress | None = None
     profile_id: str | None = None
+    android_account_id: UUID | None = None
+    android_google_email: str | None = None
+    android_avd_name: str | None = None
     requested_topics: list[str] = Field(default_factory=list)
     elapsed_minutes: float | None = None
     orchestration_enabled: bool = False
@@ -247,6 +254,9 @@ class EmulationHistoryItem(BaseModel):
     watched_ads_analytics: list[EmulationAnalyticsAd] | None = None
     error: str | None = None
     proxy_country_code: str | None = None
+    android_account_id: UUID | None = None
+    android_google_email: str | None = None
+    android_avd_name: str | None = None
     captures: EmulationCaptureSummary = Field(default_factory=EmulationCaptureSummary)
     ad_captures: list[EmulationAdCaptureHistory] | None = None
 
@@ -297,6 +307,58 @@ class EmulationCapturesResponse(BaseModel):
     session_id: UUID
     total: int
     captures: list[EmulationAdCaptureHistory] = Field(default_factory=list)
+
+
+class AndroidAccountProfileBase(BaseModel):
+    label: str = Field(min_length=1, max_length=128)
+    google_email: str = Field(min_length=3, max_length=255)
+    avd_name: str = Field(min_length=1, max_length=128)
+    snapshot_name: str | None = Field(default=None, max_length=128)
+    appium_port: int | None = Field(default=None, ge=1, le=65535)
+    uiautomator2_system_port: int | None = Field(default=None, ge=1, le=65535)
+    mjpeg_server_port: int | None = Field(default=None, ge=1, le=65535)
+    emulator_port: int | None = Field(default=None, ge=5554, le=5682)
+    emulator_memory_mb: int | None = Field(default=None, ge=1024, le=8192)
+    status: str = Field(default="ready", pattern=r"^(ready|disabled|broken|configuring)$")
+    is_active: bool = True
+    notes: str | None = None
+
+
+class AndroidAccountProfileCreate(AndroidAccountProfileBase):
+    pass
+
+
+class AndroidAccountProfileUpdate(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=128)
+    google_email: str | None = Field(default=None, min_length=3, max_length=255)
+    avd_name: str | None = Field(default=None, min_length=1, max_length=128)
+    snapshot_name: str | None = Field(default=None, max_length=128)
+    appium_port: int | None = Field(default=None, ge=1, le=65535)
+    uiautomator2_system_port: int | None = Field(default=None, ge=1, le=65535)
+    mjpeg_server_port: int | None = Field(default=None, ge=1, le=65535)
+    emulator_port: int | None = Field(default=None, ge=5554, le=5682)
+    emulator_memory_mb: int | None = Field(default=None, ge=1024, le=8192)
+    status: str | None = Field(
+        default=None,
+        pattern=r"^(ready|disabled|broken|configuring)$",
+    )
+    is_active: bool | None = None
+    notes: str | None = None
+
+
+class AndroidAccountProfileRead(AndroidAccountProfileBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    last_used_at: datetime.datetime | None = None
+    last_error: str | None = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+
+class AndroidAccountProfileListResponse(BaseModel):
+    items: list[AndroidAccountProfileRead]
+    total: int
 
 
 class EmulationHistoryParams(PaginationParams):

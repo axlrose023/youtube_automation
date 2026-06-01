@@ -112,6 +112,9 @@ class EmulationSessionStore:
     def _analysis_lock_key(self, session_id: str) -> str:
         return f"emulation:session:analysis_lock:{session_id}"
 
+    def _android_capacity_slot_key(self, slot: int) -> str:
+        return f"emulation:android:capacity:{slot}"
+
     @staticmethod
     def _holder_session_id(holder: str | None) -> str | None:
         if not holder:
@@ -137,6 +140,10 @@ class EmulationSessionStore:
             "duration_minutes": duration_minutes,
             "topics": topics,
             "profile_id": profile_id,
+            "android_account_id": None,
+            "android_google_email": None,
+            "android_avd_name": None,
+            "android_account_profile": None,
             "current_topic": None,
             "current_watch": None,
             "topics_searched": [],
@@ -289,6 +296,34 @@ class EmulationSessionStore:
 
     async def release_profile_lock(self, profile_id: str, holder: str) -> None:
         key = self._profile_lock_key(profile_id)
+        current_holder = await self._redis.get(key)
+        if current_holder is None:
+            return
+        if isinstance(current_holder, bytes):
+            current_holder = current_holder.decode("utf-8", errors="ignore")
+        if str(current_holder) != holder:
+            return
+        await self._redis.delete(key)
+
+    async def try_acquire_android_capacity_slot(
+        self,
+        *,
+        holder: str,
+        limit: int,
+        ttl_seconds: int,
+    ) -> int | None:
+        if limit <= 0:
+            return None
+        ttl = max(ttl_seconds, 1)
+        for slot in range(limit):
+            key = self._android_capacity_slot_key(slot)
+            locked = await self._redis.set(key, holder, ex=ttl, nx=True)
+            if locked:
+                return slot
+        return None
+
+    async def release_android_capacity_slot(self, slot: int, holder: str) -> None:
+        key = self._android_capacity_slot_key(slot)
         current_holder = await self._redis.get(key)
         if current_holder is None:
             return
