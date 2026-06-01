@@ -67,3 +67,43 @@ def test_banner_mapper_uses_landing_domain_for_generic_cta_placeholder() -> None
     assert ad["headline_text"] == "lp2.mexem.com"
     assert ad["advertiser_domain"] == "lp2.mexem.com"
     assert ad["full_text"] == "Visit site banner"
+
+
+def test_video_ad_mapper_prefers_youtube_pre_click_before_landing() -> None:
+    payload = build_standalone_live_payload(
+        topic_records=[
+            {
+                "topic": "gagner de largent en ligne",
+                "ads": [
+                    {
+                        "video": "ads/ad_1.mp4",
+                        "recorded_seconds": 5.0,
+                        "cta_label": "En savoir plus",
+                        "cta_kind": "web",
+                        "landing_url": "https://example.com/fr",
+                        "screenshot": "ads/ad_1_youtube.png",
+                        "landing_screenshot": "ads/ad_1_landing.png",
+                        "captured_at": 1.0,
+                    }
+                ],
+            }
+        ],
+        run_dir=Path("/tmp/standalone-run"),
+        storage_base=Path("/tmp"),
+        recorded_at=123.0,
+    )
+
+    capture = payload.watched_ads[0]["capture"]
+
+    assert capture["screenshot_paths"] == [
+        {
+            "offset_ms": 0,
+            "file_path": "standalone-run/ads/ad_1_youtube.png",
+            "kind": "youtube_pre_click",
+        },
+        {
+            "offset_ms": 1000,
+            "file_path": "standalone-run/ads/ad_1_landing.png",
+            "kind": "landing",
+        },
+    ]

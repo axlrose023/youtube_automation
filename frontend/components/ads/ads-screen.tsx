@@ -21,6 +21,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Loader } from "@/components/ui/loader";
 import { apiClient } from "@/lib/api-client";
 import { getEmulationHistory } from "@/lib/api";
+import { getPreferredAdScreenshot } from "@/lib/ad-screenshots";
 import { formatDate } from "@/lib/format";
 import type { EmulationAdCapture, EmulationHistoryItem } from "@/types/api";
 
@@ -600,7 +601,7 @@ function RelevanceMeter({ relevant, total }: { relevant: number; total: number }
 // ─── Ad Thumbnail ─────────────────────────────────────────────────────────────
 
 function AdThumbnail({ ad }: { ad: AdEntry }) {
-  const firstShot = ad.screenshot_paths[0];
+  const firstShot = getPreferredAdScreenshot(ad.screenshot_paths);
   const shotUrl = firstShot ? buildMediaPath(firstShot.file_path) : null;
   const hasVideo = Boolean(ad.video_file && ad.video_status === "completed");
   const [failed, setFailed] = useState(false);

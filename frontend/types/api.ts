@@ -72,7 +72,7 @@ export interface EmulationAdCapture {
   video_status: string;
   analysis_status?: string | null;
   analysis_summary?: Record<string, unknown> | null;
-  screenshot_paths: Array<{ offset_ms: number; file_path: string }>;
+  screenshot_paths: Array<{ offset_ms: number; file_path: string; kind?: string | null }>;
 }
 
 export interface EmulationLiveAdCapture {
@@ -84,7 +84,7 @@ export interface EmulationLiveAdCapture {
   landing_dir?: string | null;
   analysis_status?: string | null;
   analysis_summary?: Record<string, unknown> | null;
-  screenshot_paths: Array<{ offset_ms: number; file_path: string }>;
+  screenshot_paths: Array<{ offset_ms: number; file_path: string; kind?: string | null }>;
 }
 
 export interface EmulationWatchedVideo {

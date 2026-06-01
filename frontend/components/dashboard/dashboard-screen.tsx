@@ -17,6 +17,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Loader } from "@/components/ui/loader";
 import { apiClient } from "@/lib/api-client";
 import { getDashboardSummary, getEmulationHistory } from "@/lib/api";
+import { getPreferredAdScreenshot } from "@/lib/ad-screenshots";
 import { formatSessionStatus } from "@/lib/metrics";
 import { formatDate, formatMinutes } from "@/lib/format";
 import type { EmulationDashboardSummary, EmulationHistoryItem, EmulationAdCapture } from "@/types/api";
@@ -384,7 +385,7 @@ function AdResultPill({ capture }: { capture: EmulationAdCapture }) {
 }
 
 function AdThumbnailSmall({ capture, sessionId }: { capture: EmulationAdCapture; sessionId: string }) {
-  const firstShot = capture.screenshot_paths?.[0];
+  const firstShot = getPreferredAdScreenshot(capture.screenshot_paths);
   const shotUrl = firstShot ? buildMediaPath(firstShot.file_path) : null;
   const hasVideo = Boolean(capture.video_file && capture.video_status === "completed");
   const [failed, setFailed] = useState(false);

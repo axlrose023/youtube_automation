@@ -6,16 +6,17 @@ import time
 from pathlib import Path
 
 from fastapi import HTTPException
-from app.settings import get_config
+
 from app.services.emulation.common import watched_videos_count
+from app.settings import get_config
 
 from .models import (
     ANALYSIS_TERMINAL_STATUSES,
+    SESSION_TERMINAL_STATUSES,
     AdCapture,
     AnalysisStatus,
     EmulationSessionHistory,
     PostProcessingStatus,
-    SESSION_TERMINAL_STATUSES,
     SessionStatus,
     VideoStatus,
 )
@@ -216,8 +217,10 @@ def normalize_screenshot_paths(
         if isinstance(item, dict):
             offset_ms = item.get("offset_ms")
             file_path = item.get("file_path")
+            kind = item.get("kind")
         elif isinstance(item, (list, tuple)) and len(item) == 2:
             offset_ms, file_path = item
+            kind = None
         else:
             continue
 
@@ -226,12 +229,13 @@ def normalize_screenshot_paths(
         normalized_file_path = normalize_media_reference(file_path)
         if normalized_file_path is None:
             continue
-        normalized.append(
-            {
-                "offset_ms": int(offset_ms),
-                "file_path": normalized_file_path,
-            },
-        )
+        entry: dict[str, object] = {
+            "offset_ms": int(offset_ms),
+            "file_path": normalized_file_path,
+        }
+        if isinstance(kind, str) and kind.strip():
+            entry["kind"] = kind.strip()
+        normalized.append(entry)
     return normalized
 
 

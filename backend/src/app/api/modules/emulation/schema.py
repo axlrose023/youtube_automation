@@ -4,6 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.common.schema import Pagination, PaginationParams
+
 from .models import PostProcessingStatus, SessionStatus
 
 
@@ -84,6 +85,7 @@ class EmulationAdTextSample(BaseModel):
 class EmulationAdCaptureScreenshotPath(BaseModel):
     offset_ms: int
     file_path: str
+    kind: str | None = None
 
 
 class EmulationLiveAdCapture(BaseModel):

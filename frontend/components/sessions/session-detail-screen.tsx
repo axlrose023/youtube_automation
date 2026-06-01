@@ -33,6 +33,7 @@ import {
   streamEmulationStatus,
   stopEmulation,
 } from "@/lib/api";
+import { getPreferredAdScreenshotIndex } from "@/lib/ad-screenshots";
 import { formatBytes, formatDate, formatMinutes, formatNumber } from "@/lib/format";
 import { formatSessionStatus, getStatusTone } from "@/lib/metrics";
 import type {
@@ -449,7 +450,11 @@ function CaptureMediaPreview({
   totalSegments: number;
 }) {
   const videoUrl = useProtectedMediaBlobUrl(capture.video_file);
-  const [shotIndex, setShotIndex] = useState(0);
+  const preferredShotIndex = Math.max(
+    0,
+    getPreferredAdScreenshotIndex(capture.screenshot_paths),
+  );
+  const [shotIndex, setShotIndex] = useState(preferredShotIndex);
   const [activeTab, setActiveTab] = useState<"screens" | "video" | "landing" | null>(null);
   const total = capture.screenshot_paths.length;
   const activeScreenshot = capture.screenshot_paths[shotIndex]?.file_path;
@@ -462,6 +467,10 @@ function CaptureMediaPreview({
   const hasScreenshots = total > 0;
   const hasVideo = Boolean(videoUrl);
   const landingHost = getLandingHost(capture.landing_url) || getLandingHost(capture.landing_dir) || "—";
+
+  useEffect(() => {
+    setShotIndex(preferredShotIndex);
+  }, [preferredShotIndex, total]);
 
   const toggleTab = (t: "screens" | "video" | "landing") =>
     setActiveTab((cur) => (cur === t ? null : t));

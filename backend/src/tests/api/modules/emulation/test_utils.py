@@ -37,6 +37,24 @@ def test_normalize_screenshot_paths_relativizes_absolute_entries() -> None:
     ]
 
 
+def test_normalize_screenshot_paths_preserves_kind_for_live_entries() -> None:
+    assert normalize_screenshot_paths(
+        [
+            {
+                "offset_ms": 0,
+                "file_path": "android_probe/ad.png",
+                "kind": "youtube_pre_click",
+            }
+        ]
+    ) == [
+        {
+            "offset_ms": 0,
+            "file_path": "android_probe/ad.png",
+            "kind": "youtube_pre_click",
+        }
+    ]
+
+
 def test_normalize_media_reference_relativizes_host_storage_alias(
     tmp_path,
     monkeypatch,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import time
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -212,14 +212,14 @@ def _map_banner(
         storage_base=storage_base,
     )
     if screenshot:
-        screenshot_paths.append({"offset_ms": 0, "file_path": screenshot})
+        screenshot_paths.append(_screenshot_entry(0, screenshot, "youtube_pre_click"))
     landing_screenshot = _media_ref(
         _as_str(_get(banner, "landing_screenshot")),
         run_dir=run_dir,
         storage_base=storage_base,
     )
     if landing_screenshot:
-        screenshot_paths.append({"offset_ms": 1000, "file_path": landing_screenshot})
+        screenshot_paths.append(_screenshot_entry(1000, landing_screenshot, "landing"))
 
     title = _as_str(_get(banner, "title"))
     parsed_text = _parse_banner_text(title)
@@ -290,11 +290,16 @@ def _map_video_ad(
         run_dir=run_dir,
         storage_base=storage_base,
     )
-    screenshot_paths = (
-        [{"offset_ms": 0, "file_path": landing_screenshot}]
-        if landing_screenshot
-        else []
+    screenshot = _media_ref(
+        _as_str(_get(ad, "screenshot")),
+        run_dir=run_dir,
+        storage_base=storage_base,
     )
+    screenshot_paths: list[dict[str, object]] = []
+    if screenshot:
+        screenshot_paths.append(_screenshot_entry(0, screenshot, "youtube_pre_click"))
+    if landing_screenshot:
+        screenshot_paths.append(_screenshot_entry(1000, landing_screenshot, "landing"))
     watched_seconds = round(_as_float(_get(ad, "recorded_seconds")), 2)
     cta_label = _as_str(_get(ad, "cta_label")) or None
     advertiser_domain = _domain_from_url(landing_url)
@@ -302,7 +307,7 @@ def _map_video_ad(
         "started_at": recorded_at,
         "ended_at": recorded_at + watched_seconds,
         "watched_seconds": watched_seconds,
-        "completed": bool(video_file or landing_url or landing_screenshot),
+        "completed": bool(video_file or landing_url or screenshot_paths),
         "skip_clicked": False,
         "skip_visible": False,
         "cta_text": cta_label,
@@ -328,7 +333,11 @@ def _map_video_ad(
         "capture": {
             "video_file": video_file,
             "video_status": (
-                VideoStatus.COMPLETED if video_file else VideoStatus.NO_SRC
+                VideoStatus.COMPLETED
+                if video_file
+                else VideoStatus.FALLBACK_SCREENSHOTS
+                if screenshot_paths
+                else VideoStatus.NO_SRC
             ),
             "recorded_video_duration_seconds": watched_seconds,
             "landing_url": landing_url,
@@ -354,6 +363,14 @@ def _media_ref(value: str, *, run_dir: Path, storage_base: Path) -> str | None:
         return path.relative_to(storage_base.resolve()).as_posix()
     except ValueError:
         return str(path)
+
+
+def _screenshot_entry(offset_ms: int, file_path: str, kind: str) -> dict[str, object]:
+    return {
+        "offset_ms": offset_ms,
+        "file_path": file_path,
+        "kind": kind,
+    }
 
 
 def _capture_time(item: object, fallback_order: int) -> float:

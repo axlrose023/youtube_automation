@@ -88,6 +88,7 @@ AD_DISPLAY_URL_IDS = (
 AD_CTA_WEB_LABEL_TOKENS = (
     "visit advertiser",
     "visit site",
+    "visit website",
     "learn more",
     "shop now",
     "sign up",
@@ -98,6 +99,43 @@ AD_CTA_WEB_LABEL_TOKENS = (
     "apply now",
     "buy now",
     "see more",
+    "visitez le site",
+    "visiter le site",
+    "en savoir plus",
+    "acheter maintenant",
+    "inscrivez-vous",
+    "visitar el sitio",
+    "visitar sitio",
+    "más información",
+    "mas información",
+    "saber más",
+    "saber mas",
+    "comprar ahora",
+    "registrarse",
+    "visitar site",
+    "saiba mais",
+    "comprar agora",
+    "website besuchen",
+    "webseite besuchen",
+    "mehr erfahren",
+    "jetzt kaufen",
+    "visita il sito",
+    "scopri di più",
+    "scopri di piu",
+    "acquista ora",
+    "website bezoeken",
+    "meer informatie",
+    "odwiedź witrynę",
+    "odwiedz witryne",
+    "dowiedz się więcej",
+    "dowiedz sie wiecej",
+    "siteyi ziyaret et",
+    "daha fazla bilgi",
+    "访问网站",
+    "了解详情",
+    "詳しく見る",
+    "사이트 방문",
+    "자세히 알아보기",
 )
 WATCH_PANEL_WEB_CTA_LABEL_TOKENS = AD_CTA_WEB_LABEL_TOKENS + (
     "get quote",
@@ -106,12 +144,23 @@ WATCH_PANEL_WEB_CTA_LABEL_TOKENS = AD_CTA_WEB_LABEL_TOKENS + (
     "відвідайте сайт",
     "відвідати сайт",
     "перейти на сайт",
+    "узнать больше",
+    "докладнее",
 )
 AD_CTA_PLAY_STORE_LABEL_TOKENS = (
     "install",
     "get the app",
     "open",
     "update",
+    "installer",
+    "instalar",
+    "installieren",
+    "installa",
+    "zainstaluj",
+    "установить",
+    "встановити",
+    "відкрити",
+    "открыть",
 )
 PLAY_STORE_BANNER_HINT_TOKENS = (
     "play.google.com",
@@ -1039,7 +1088,20 @@ def parse_bounds(raw: str | None) -> tuple[int, int, int, int] | None:
 def _label_contains_token(label: str, token: str) -> bool:
     """Word-boundary token match — keeps 'subscribe' from matching the
     'subscribers' channel-info text under the player."""
-    return re.search(rf"\b{re.escape(token)}\b", label, flags=re.IGNORECASE) is not None
+    normalized_label = label.casefold()
+    normalized_token = token.casefold()
+    if not normalized_token:
+        return False
+    if not re.fullmatch(r"[a-z0-9_]+", normalized_token):
+        return normalized_token in normalized_label
+    return (
+        re.search(
+            rf"\b{re.escape(normalized_token)}\b",
+            normalized_label,
+            flags=re.IGNORECASE,
+        )
+        is not None
+    )
 
 
 def _classify_cta_label(label: str) -> str:
@@ -1584,6 +1646,7 @@ async def capture_settled_landing_screenshot(
     driver,
     serial: str,
     path: Path,
+    youtube_pkg: str | None = None,
     timeout: float = 15.0,
     min_bytes: int = 120_000,
 ) -> bool:
@@ -1597,9 +1660,24 @@ async def capture_settled_landing_screenshot(
     deadline = time.monotonic() + timeout
     while True:
         await dismiss_browser_permission_prompt_if_present(driver, serial)
+        await dismiss_browser_interstitial_if_present(driver, serial)
+        if await accept_landing_cookie_banner_if_present(driver, serial):
+            continue
+        current_url: str | None = None
+        if youtube_pkg is not None:
+            current_url = resolve_landing_url(read_landing_url(serial, youtube_pkg))
+        page_source = safe_page_source(driver) or adb_uiautomator_page_source(serial)
+        page_has_error = _landing_source_has_error(page_source)
+        page_has_interstitial = _landing_source_has_browser_interstitial(page_source)
+        url_is_tracking = bool(current_url and _is_tracking_landing_url(current_url))
         if adb_screencap(serial, path):
             try:
-                if path.stat().st_size >= min_bytes:
+                if (
+                    path.stat().st_size >= min_bytes
+                    and not page_has_error
+                    and not page_has_interstitial
+                    and not url_is_tracking
+                ):
                     return True
             except OSError:
                 pass
@@ -1750,6 +1828,19 @@ def safe_topic_slug(topic: str) -> str:
     return cleaned or "topic"
 
 
+def _next_banner_media_stem(
+    record: TopicRecord,
+    prefix: str,
+    *,
+    round_idx: int | None = None,
+) -> str:
+    stem = f"{prefix}_{len(record.banners) + 1:03d}"
+    if round_idx is not None:
+        stem += f"_round_{round_idx:02d}"
+    stem += f"_{int(time.time() * 1000)}"
+    return stem
+
+
 SYSTEM_ANR_TITLE_TOKENS = (
     "isn't responding",
     "is not responding",
@@ -1782,6 +1873,100 @@ BROWSER_PERMISSION_BLOCK_TOKENS = (
     "block",
     "deny",
     "don't allow",
+)
+BROWSER_INTERSTITIAL_TITLE_TOKENS = (
+    "translate",
+    "traduire",
+    "traducir",
+    "traduzir",
+    "übersetzen",
+    "uebersetzen",
+    "traduci",
+    "tłumacz",
+    "tlumacz",
+    "перевести",
+    "перекласти",
+)
+BROWSER_INTERSTITIAL_DISMISS_TOKENS = (
+    "not now",
+    "no thanks",
+    "never",
+    "close",
+    "pas maintenant",
+    "non merci",
+    "no ahora",
+    "ahora no",
+    "agora não",
+    "agora nao",
+    "nicht jetzt",
+    "no grazie",
+    "nie teraz",
+    "закрыть",
+    "не сейчас",
+    "ні",
+    "закрити",
+)
+LANDING_ERROR_TEXT_TOKENS = (
+    "this page isn't working",
+    "this page is not working",
+    "this site can't be reached",
+    "this site can’t be reached",
+    "webpage not available",
+    "page not found",
+    "http error",
+    "err_",
+    "dns_probe",
+    "aw, snap",
+    "cette page ne fonctionne pas",
+    "ce site est inaccessible",
+    "page web inaccessible",
+    "no se puede acceder a este sitio",
+    "não é possível aceder a este site",
+    "nao e possivel aceder a este site",
+    "diese website ist nicht erreichbar",
+    "die website ist nicht erreichbar",
+    "impossible raggiungere il sito",
+    "site kan niet worden bereikt",
+    "nie można uzyskać dostępu",
+    "nie mozna uzyskac dostepu",
+    "не удается получить доступ",
+    "не вдається отримати доступ",
+)
+LANDING_COOKIE_TEXT_TOKENS = (
+    "cookie",
+    "cookies",
+    "consent",
+    "utilisons des cookies",
+    "utilisation des cookies",
+    "galletas",
+    "cookies",
+    "ciasteczek",
+    "куки",
+)
+LANDING_COOKIE_ACCEPT_TOKENS = (
+    "accept",
+    "accept all",
+    "agree",
+    "allow all",
+    "accepter",
+    "tout accepter",
+    "j'accepte",
+    "j’accepte",
+    "aceptar",
+    "aceptar todo",
+    "aceitar",
+    "aceitar tudo",
+    "akzeptieren",
+    "alle akzeptieren",
+    "accetta",
+    "accetta tutto",
+    "akkoord",
+    "alles accepteren",
+    "zaakceptuj",
+    "zgadzam się",
+    "zgadzam sie",
+    "принять",
+    "погодитись",
 )
 
 
@@ -1870,6 +2055,71 @@ def _browser_permission_block_bounds(page_source: str | None) -> tuple[int, int,
     return sorted(block_bounds, key=lambda b: (b[1], b[0]))[0]
 
 
+def _browser_interstitial_dismiss_bounds(
+    page_source: str | None,
+) -> tuple[int, int, int, int] | None:
+    root = parse_xml(page_source)
+    if root is None or not _is_external_package(_source_top_package(root)):
+        return None
+    has_interstitial = False
+    dismiss_bounds: list[tuple[int, int, int, int]] = []
+    for node in root.iter():
+        text = _node_text(node).strip()
+        if not text:
+            continue
+        low = text.casefold()
+        if any(token in low for token in BROWSER_INTERSTITIAL_TITLE_TOKENS):
+            has_interstitial = True
+        if any(token == low or token in low for token in BROWSER_INTERSTITIAL_DISMISS_TOKENS):
+            bounds = parse_bounds(node.attrib.get("bounds"))
+            if bounds is not None:
+                dismiss_bounds.append(bounds)
+    if not has_interstitial or not dismiss_bounds:
+        return None
+    return sorted(dismiss_bounds, key=lambda b: (b[1], b[0]))[0]
+
+
+def _browser_interstitial_present(page_source: str | None) -> bool:
+    root = parse_xml(page_source)
+    if root is None or not _is_external_package(_source_top_package(root)):
+        return False
+    for node in root.iter():
+        text = _node_text(node).strip()
+        if not text:
+            continue
+        low = text.casefold()
+        if any(token in low for token in BROWSER_INTERSTITIAL_TITLE_TOKENS):
+            return True
+    return False
+
+
+def _landing_cookie_accept_bounds(
+    page_source: str | None,
+) -> tuple[int, int, int, int] | None:
+    root = parse_xml(page_source)
+    if root is None or not _is_external_package(_source_top_package(root)):
+        return None
+    has_cookie_text = False
+    accept_bounds: list[tuple[int, int, tuple[int, int, int, int]]] = []
+    for node in root.iter():
+        text = _node_text(node).strip()
+        if not text:
+            continue
+        low = text.casefold()
+        if any(token in low for token in LANDING_COOKIE_TEXT_TOKENS):
+            has_cookie_text = True
+        if any(token == low or token in low for token in LANDING_COOKIE_ACCEPT_TOKENS):
+            bounds = parse_bounds(node.attrib.get("bounds"))
+            if bounds is None:
+                continue
+            left, top, right, bottom = bounds
+            area = max(0, right - left) * max(0, bottom - top)
+            accept_bounds.append((-bottom, -area, bounds))
+    if not has_cookie_text or not accept_bounds:
+        return None
+    return sorted(accept_bounds)[0][2]
+
+
 async def dismiss_browser_permission_prompt_if_present(driver, serial: str) -> bool:
     bounds = _browser_permission_block_bounds(safe_page_source(driver))
     if bounds is None:
@@ -1882,6 +2132,58 @@ async def dismiss_browser_permission_prompt_if_present(driver, serial: str) -> b
     print("[topic-runner] browser_permission:block", flush=True)
     await asyncio.sleep(0.8)
     return True
+
+
+async def dismiss_browser_interstitial_if_present(driver, serial: str) -> bool:
+    page_source = safe_page_source(driver)
+    bounds = _browser_interstitial_dismiss_bounds(page_source)
+    if bounds is None:
+        page_source = adb_uiautomator_page_source(serial)
+        bounds = _browser_interstitial_dismiss_bounds(page_source)
+    if bounds is None:
+        if not _browser_interstitial_present(page_source):
+            return False
+        width, height = get_screen_size(driver)
+        if not adb_tap(serial, width // 2, int(height * 0.52)):
+            return False
+    else:
+        left, top, right, bottom = bounds
+        if not adb_tap(serial, (left + right) // 2, (top + bottom) // 2):
+            return False
+    print("[topic-runner] browser_interstitial:dismiss", flush=True)
+    await asyncio.sleep(0.8)
+    return True
+
+
+async def accept_landing_cookie_banner_if_present(driver, serial: str) -> bool:
+    bounds = _landing_cookie_accept_bounds(safe_page_source(driver))
+    if bounds is None:
+        bounds = _landing_cookie_accept_bounds(adb_uiautomator_page_source(serial))
+    if bounds is None:
+        return False
+    left, top, right, bottom = bounds
+    if not adb_tap(serial, (left + right) // 2, (top + bottom) // 2):
+        return False
+    print("[topic-runner] landing_cookie:accept", flush=True)
+    await asyncio.sleep(1.0)
+    return True
+
+
+def _landing_source_has_error(page_source: str | None) -> bool:
+    root = parse_xml(page_source)
+    if root is None:
+        return False
+    parts: list[str] = []
+    for node in root.iter():
+        text = _node_text(node).strip()
+        if text:
+            parts.append(text)
+    blob = " ".join(parts).casefold()
+    return any(token in blob for token in LANDING_ERROR_TEXT_TOKENS)
+
+
+def _landing_source_has_browser_interstitial(page_source: str | None) -> bool:
+    return _browser_interstitial_present(page_source)
 
 
 async def wait_for_results(driver, timeout: float, serial: str | None = None) -> bool:
@@ -2006,12 +2308,98 @@ async def center_banner_in_view(
     await asyncio.sleep(0.9)
 
 
-SPONSORED_LABEL_TOKENS = ("sponsored", "промо", "спонс", "реклама")
-RESULT_TILE_DESC_TOKENS = ("play video", "воспроизвести видео")
-SHORT_TILE_DESC_TOKENS = ("play short", "воспроизвести short")
-SHORTS_FILTER_CHIP_LABELS = ("Shorts", "Шортс")
-RESULTS_VIDEO_FILTER_CHIP_LABELS = ("Videos", "Видео")
-RESULTS_ALL_FILTER_CHIP_LABELS = ("All", "Все")
+SPONSORED_LABEL_TOKENS = (
+    "sponsored",
+    "advertisement",
+    "sponsorisé",
+    "sponsorise",
+    "publicité",
+    "publicite",
+    "patrocinado",
+    "sponsorizado",
+    "sponsorizzato",
+    "gesponsert",
+    "anzeige",
+    "werbung",
+    "advertentie",
+    "reklama",
+    "ogłoszenie",
+    "ogloszenie",
+    "sponsrad",
+    "sponseret",
+    "реклама",
+    "реклам",
+    "промо",
+    "спонс",
+    "sponsorlu",
+    "광고",
+    "広告",
+    "广告",
+)
+RESULT_TILE_DESC_TOKENS = (
+    "play video",
+    "watch video",
+    "regarder la vidéo",
+    "regarder la video",
+    "reproducir vídeo",
+    "reproducir video",
+    "assistir ao vídeo",
+    "assistir ao video",
+    "video ansehen",
+    "guarda il video",
+    "bekijk video",
+    "obejrzyj film",
+    "videoyu oynat",
+    "воспроизвести видео",
+    "дивитися відео",
+    "переглянути відео",
+    "동영상 재생",
+    "動画を再生",
+    "播放视频",
+)
+SHORT_TILE_DESC_TOKENS = (
+    "play short",
+    "play shorts",
+    "lire le short",
+    "ver short",
+    "reproducir short",
+    "assistir ao short",
+    "short ansehen",
+    "short abspielen",
+    "guarda lo short",
+    "bekijk short",
+    "obejrzyj short",
+    "short oynat",
+    "воспроизвести short",
+    "дивитися short",
+    "short 재생",
+    "ショートを再生",
+    "播放短片",
+)
+SHORTS_FILTER_CHIP_LABELS = (
+    "Shorts",
+    "Шортс",
+)
+RESULTS_VIDEO_FILTER_CHIP_LABELS = (
+    "Videos",
+    "Видео",
+    "Vidéos",
+    "Videos",
+    "Vídeos",
+    "Video",
+    "Wideo",
+    "Відео",
+)
+RESULTS_ALL_FILTER_CHIP_LABELS = (
+    "All",
+    "Все",
+    "Tous",
+    "Todos",
+    "Alle",
+    "Tutti",
+    "Wszystko",
+    "Усі",
+)
 REEL_WATCH_RESOURCE_IDS = (
     "com.google.android.youtube:id/reel_watch_player",
     "com.google.android.youtube:id/reel_watch_fragment_root",
@@ -2165,6 +2553,72 @@ def _is_play_store_card(root: ET.Element, card_bounds: tuple[int, int, int, int]
 def _label_has_any_token(label: str, tokens: tuple[str, ...]) -> bool:
     low = label.casefold()
     return any(token in low for token in tokens)
+
+
+def _looks_like_sponsored_text(value: str) -> bool:
+    low = value.casefold()
+    return any(token in low for token in SPONSORED_LABEL_TOKENS)
+
+
+def _looks_like_web_cta_text(value: str) -> bool:
+    return _label_has_any_token(value, WATCH_PANEL_WEB_CTA_LABEL_TOKENS)
+
+
+def _looks_like_short_tile_desc(
+    desc: str,
+    bounds: tuple[int, int, int, int] | None = None,
+    *,
+    screen_width: int | None = None,
+) -> bool:
+    low = desc.casefold()
+    if any(token in low for token in SHORT_TILE_DESC_TOKENS):
+        return True
+    if "#shorts" in low or "#short" in low:
+        return True
+    if bounds is None or screen_width is None:
+        return False
+    left, _, right, bottom = bounds
+    node_width = right - left
+    node_height = bottom - bounds[1]
+    return (
+        node_width <= int(screen_width * 0.58)
+        and node_height >= max(220, int(node_width * 0.85))
+        and len(desc.strip()) >= 18
+    )
+
+
+def _looks_like_video_tile_desc(
+    desc: str,
+    bounds: tuple[int, int, int, int],
+    *,
+    screen_width: int,
+) -> bool:
+    low = desc.casefold()
+    if not desc.strip():
+        return False
+    if _looks_like_short_tile_desc(desc, bounds, screen_width=screen_width):
+        return False
+    if _looks_like_sponsored_text(desc):
+        return False
+    if DISPLAY_URL_RE.search(desc):
+        return False
+    if _looks_like_web_cta_text(desc):
+        return False
+    if _label_has_any_token(desc, AD_CTA_PLAY_STORE_LABEL_TOKENS):
+        return False
+    if any(token in low for token in RESULT_TILE_DESC_TOKENS):
+        return True
+
+    left, top, right, bottom = bounds
+    node_width = right - left
+    node_height = bottom - top
+    if node_width < int(screen_width * 0.72) or node_height < 170:
+        return False
+    if len(desc.strip()) < 35:
+        return False
+    if not re.search(r"\d", desc):
+        return False
+    return desc.count(",") >= 2 or " - " in desc or " – " in desc
 
 
 def _find_watch_panel_bounds(
@@ -2337,9 +2791,7 @@ def _banner_title_from_bounds(
             continue
         candidate_text = _node_text(node).strip()
         candidate_low = candidate_text.casefold()
-        if len(candidate_text) >= 18 and any(
-            token in candidate_low for token in SPONSORED_LABEL_TOKENS
-        ):
+        if len(candidate_text) >= 18 and _looks_like_sponsored_text(candidate_text):
             return candidate_text
         if parse_duration_pair(candidate_text) is not None:
             continue
@@ -2421,9 +2873,12 @@ def _find_visit_site_button_banner(
             continue
         if card_height < min_card_height or card_height > max_card_height:
             continue
-        learn_bounds = _exact_label_bounds(node, "learn more")
-        visit_bounds = _exact_label_bounds(node, "visit site", clickable_only=True)
-        if not learn_bounds or not visit_bounds:
+        tap_bounds = _web_cta_bounds_in_bounds(
+            root,
+            card_bounds,
+            screen_width=width,
+        )
+        if tap_bounds is None:
             continue
         blob = _text_within_bounds(root, card_bounds)
         if any(token in blob for token in RESULT_TILE_DESC_TOKENS):
@@ -2431,7 +2886,6 @@ def _find_visit_site_button_banner(
         if _is_play_store_card(root, card_bounds):
             continue
         seen_bounds.add(card_bounds)
-        tap_bounds = sorted(visit_bounds, key=lambda b: (b[1], b[0]))[0]
         candidates.append((top, card_height, card_bounds, tap_bounds))
 
     if not candidates:
@@ -2590,7 +3044,7 @@ def find_top_sponsored_banner(driver) -> _Banner | None:
         text = _node_text(node).casefold()
         if not text:
             continue
-        if not any(token in text for token in SPONSORED_LABEL_TOKENS):
+        if not _looks_like_sponsored_text(text):
             continue
         bounds = parse_bounds(node.attrib.get("bounds"))
         if bounds is None:
@@ -2661,7 +3115,7 @@ def find_top_sponsored_banner(driver) -> _Banner | None:
 
 def collect_video_tiles(driver, serial: str | None = None) -> list[_VideoTile]:
     """Return all tappable video tiles on the current results page (Shorts excluded)."""
-    _, height = get_screen_size(driver)
+    width, height = get_screen_size(driver)
     feed_top = int(height * 0.10)
     feed_bottom = int(height * 0.92)
 
@@ -2673,12 +3127,14 @@ def collect_video_tiles(driver, serial: str | None = None) -> list[_VideoTile]:
             desc = (node.attrib.get("content-desc") or "").casefold()
             if not desc:
                 continue
-            if not any(token in desc for token in RESULT_TILE_DESC_TOKENS):
-                continue
-            if any(token in desc for token in SHORT_TILE_DESC_TOKENS):
-                continue
             bounds = parse_bounds(node.attrib.get("bounds"))
             if bounds is None:
+                continue
+            if not _looks_like_video_tile_desc(
+                node.attrib.get("content-desc") or "",
+                bounds,
+                screen_width=width,
+            ):
                 continue
             left, top, right, bottom = bounds
             if top < feed_top or bottom > feed_bottom:
@@ -2806,11 +3262,10 @@ def collect_short_tiles(driver, serial: str | None = None) -> list[_ShortTile]:
             desc = (node.attrib.get("content-desc") or "").strip()
             if not desc:
                 continue
-            lowered = desc.casefold()
-            if not any(token in lowered for token in SHORT_TILE_DESC_TOKENS):
-                continue
             bounds = parse_bounds(node.attrib.get("bounds"))
             if bounds is None:
+                continue
+            if not _looks_like_short_tile_desc(desc, bounds, screen_width=width):
                 continue
             left, top, right, bottom = bounds
             if bottom <= int(height * 0.18) or top >= int(height * 0.94):
@@ -2911,11 +3366,15 @@ def _shorts_reel_ad_title(value: str) -> str | None:
     if not cleaned:
         return None
     lines = [line.strip() for line in value.splitlines() if line.strip()]
-    if any(line.casefold() == "ad" for line in lines):
-        title = " ".join(line for line in lines if line.casefold() != "ad").strip()
+    ad_badges = {"ad", "annonce", "publicité", "publicite", "реклама", "광고", "広告", "广告"}
+    if any(line.casefold() in ad_badges for line in lines):
+        title = " ".join(line for line in lines if line.casefold() not in ad_badges).strip()
         return title or "Shorts ad"
-    if re.search(r"\bSponsored\b", cleaned, flags=re.IGNORECASE):
-        return re.sub(r"\bSponsored\b", "", cleaned, flags=re.IGNORECASE).strip() or "Shorts ad"
+    if _looks_like_sponsored_text(cleaned):
+        title = cleaned
+        for token in SPONSORED_LABEL_TOKENS:
+            title = re.sub(re.escape(token), "", title, flags=re.IGNORECASE)
+        return title.strip(" -|") or "Shorts ad"
     return None
 
 
@@ -3167,14 +3626,14 @@ async def capture_shorts_results_banner_if_present(
         banner = find_top_sponsored_banner(driver) or banner
 
     banners_dir = run_dir / "banners" / safe_topic_slug(topic)
-    banner_index = len(record.banners)
-    screenshot_path = banners_dir / f"shorts_banner_{banner_index}.png"
+    media_stem = _next_banner_media_stem(record, "shorts_banner")
+    screenshot_path = banners_dir / f"{media_stem}.png"
     screenshot_rel = (
         str(screenshot_path.relative_to(run_dir))
         if adb_screencap(serial, screenshot_path)
         else ""
     )
-    landing_path = banners_dir / f"shorts_banner_{banner_index}_landing.png"
+    landing_path = banners_dir / f"{media_stem}_landing.png"
     landing_url, landing_screenshot_taken = await click_banner_and_capture_landing(
         driver=driver,
         serial=serial,
@@ -3659,6 +4118,7 @@ async def click_banner_and_capture_landing(
         driver=driver,
         serial=serial,
         path=landing_screenshot_path,
+        youtube_pkg=youtube_pkg,
     )
 
     await close_external_surface(serial, youtube_pkg, activity)
@@ -3725,13 +4185,18 @@ async def harvest_banners(
                 seen_banner_keys.add(dedup_key)
 
                 screenshot_rel = ""
-                screenshot_path = banners_dir / f"banner_{round_idx}.png"
+                media_stem = _next_banner_media_stem(
+                    record,
+                    "banner",
+                    round_idx=round_idx,
+                )
+                screenshot_path = banners_dir / f"{media_stem}.png"
                 if adb_screencap(serial, screenshot_path):
                     screenshot_rel = str(screenshot_path.relative_to(run_dir))
 
                 landing_url: str | None = None
                 landing_screenshot_rel: str | None = None
-                landing_path = banners_dir / f"banner_{round_idx}_landing.png"
+                landing_path = banners_dir / f"{media_stem}_landing.png"
                 landing_url, landing_screenshot_taken = (
                     await click_banner_and_capture_landing(
                         driver=driver,
@@ -3877,11 +4342,16 @@ async def harvest_watch_recommendation_banner_step(
         dump_debug_screenshot(serial, debug_dir, f"round_{round_idx:02d}_panel_detected")
 
         screenshot_rel = ""
-        screenshot_path = banners_dir / f"watch_panel_banner_{round_idx}.png"
+        media_stem = _next_banner_media_stem(
+            record,
+            "watch_panel_banner",
+            round_idx=round_idx,
+        )
+        screenshot_path = banners_dir / f"{media_stem}.png"
         if adb_screencap(serial, screenshot_path):
             screenshot_rel = str(screenshot_path.relative_to(run_dir))
 
-        landing_path = banners_dir / f"watch_panel_banner_{round_idx}_landing.png"
+        landing_path = banners_dir / f"{media_stem}_landing.png"
         landing_url, landing_screenshot_taken = await click_banner_and_capture_landing(
             driver=driver,
             serial=serial,
@@ -4019,11 +4489,12 @@ async def harvest_watch_recommendation_banner_step(
         return
 
     screenshot_rel = ""
-    screenshot_path = banners_dir / f"watch_banner_{round_idx}.png"
+    media_stem = _next_banner_media_stem(record, "watch_banner", round_idx=round_idx)
+    screenshot_path = banners_dir / f"{media_stem}.png"
     if adb_screencap(serial, screenshot_path):
         screenshot_rel = str(screenshot_path.relative_to(run_dir))
 
-    landing_path = banners_dir / f"watch_banner_{round_idx}_landing.png"
+    landing_path = banners_dir / f"{media_stem}_landing.png"
     landing_url, landing_screenshot_taken = await click_banner_and_capture_landing(
         driver=driver,
         serial=serial,
@@ -4344,6 +4815,7 @@ async def click_cta_and_capture(
         driver=driver,
         serial=serial,
         path=landing_screenshot_path,
+        youtube_pkg=youtube_pkg,
     )
 
     await close_external_surface(serial, youtube_pkg, activity)
@@ -4549,6 +5021,9 @@ async def watch_video_loop(
             cta_pre_state = read_ad_playback_state(driver)
             dump_xml_snapshot(driver, debug_dir, f"{tag}_cta_pre")
             dump_debug_screenshot(serial, debug_dir, f"{tag}_cta_pre")
+            pre_click_path = ads_dir / f"{tag}_youtube_pre_click.png"
+            if adb_screencap(serial, pre_click_path):
+                ad_record.screenshot = str(pre_click_path.relative_to(run_dir))
             landing_path = ads_dir / f"ad_{ad_index}_landing.png"
             outcome = await click_cta_and_capture(
                 driver=driver,
