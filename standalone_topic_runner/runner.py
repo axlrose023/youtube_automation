@@ -1685,7 +1685,7 @@ async def capture_settled_landing_screenshot(
             break
         await asyncio.sleep(1.0)
     try:
-        if path.exists() and path.stat().st_size < min_bytes:
+        if path.exists():
             path.unlink()
     except OSError:
         pass
@@ -1845,15 +1845,43 @@ SYSTEM_ANR_TITLE_TOKENS = (
     "isn't responding",
     "is not responding",
     "isn’t responding",
+    "ne répond pas",
+    "ne repond pas",
+    "no responde",
+    "não está respondendo",
+    "nao esta respondendo",
+    "reagiert nicht",
+    "non risponde",
+    "nie odpowiada",
     "не отвечает",
+    "не відповідає",
 )
 SYSTEM_ANR_WAIT_TOKENS = (
     "wait",
+    "attendre",
+    "esperar",
+    "aguardar",
+    "warten",
+    "attendi",
+    "czekaj",
     "ожидать",
     "зачекати",
 )
 SYSTEM_ANR_CLOSE_TOKENS = (
     "close app",
+    "close application",
+    "fermer l'application",
+    "fermer l’application",
+    "fermer l'app",
+    "cerrar aplicación",
+    "cerrar aplicacion",
+    "fechar app",
+    "fechar aplicativo",
+    "app schließen",
+    "app schliessen",
+    "chiudi app",
+    "zamknij aplikację",
+    "zamknij aplikacje",
     "закрыть приложение",
     "закрити додаток",
 )
@@ -1861,6 +1889,11 @@ SYSTEM_ANR_CLOSE_TITLE_TOKENS = (
     "chrome",
     "pixel launcher",
     "launcher",
+    "lanceur",
+    "lanceur d'applications",
+    "lanceur d’applications",
+    "lanzador",
+    "launcher pixel",
     "system ui",
 )
 BROWSER_PERMISSION_TITLE_TOKENS = (
@@ -4697,6 +4730,27 @@ async def recover_youtube_surface_after_banner_click(
         f"[topic-runner] recover_surface:start id={call_id} expected={expected_surface!r} timeout={timeout}",
         flush=True,
     )
+
+    async def _wait_for_expected_surface(after: str, wait_timeout: float = 8.0) -> bool:
+        if expected_surface == SURFACE_RESULTS:
+            if await wait_for_results(driver, timeout=wait_timeout, serial=serial):
+                print(
+                    f"[topic-runner] recover_surface:done id={call_id} reason={after}_results",
+                    flush=True,
+                )
+                return True
+            return False
+        verify_started = time.monotonic()
+        while time.monotonic() - verify_started < wait_timeout:
+            if detect_surface(driver) == expected_surface:
+                print(
+                    f"[topic-runner] recover_surface:done id={call_id} reason={after}_{expected_surface}",
+                    flush=True,
+                )
+                return True
+            await asyncio.sleep(0.5)
+        return False
+
     while time.monotonic() - started < timeout:
         fg = current_foreground_package(serial)
         driver_source = safe_page_source(driver)
@@ -4704,7 +4758,8 @@ async def recover_youtube_surface_after_banner_click(
         driver_top_package = _source_top_package(driver_root) if driver_root is not None else ""
         if handle_system_anr_dialog_if_present(driver, serial):
             await close_external_surface(serial, youtube_pkg, activity)
-            await asyncio.sleep(0.5)
+            if await _wait_for_expected_surface("after_anr"):
+                return True
             iter_idx += 1
             continue
         print(
@@ -4714,7 +4769,8 @@ async def recover_youtube_surface_after_banner_click(
         )
         if (fg and fg != youtube_pkg) or _is_external_package(driver_top_package):
             await close_external_surface(serial, youtube_pkg, activity)
-            await asyncio.sleep(0.5)
+            if await _wait_for_expected_surface("after_external"):
+                return True
             iter_idx += 1
             continue
 
@@ -4738,7 +4794,8 @@ async def recover_youtube_surface_after_banner_click(
             )
             if _is_external_package(adb_top_package):
                 await close_external_surface(serial, youtube_pkg, activity)
-                await asyncio.sleep(0.5)
+                if await _wait_for_expected_surface("after_adb_external"):
+                    return True
                 iter_idx += 1
                 continue
             if adb_surface == SURFACE_RESULTS:

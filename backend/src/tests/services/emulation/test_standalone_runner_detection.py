@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from standalone_topic_runner import runner
 
 
@@ -45,3 +46,52 @@ def test_french_results_detect_video_short_and_sponsored_banner() -> None:
     assert banner is not None
     assert "Calculateur Boursier" in banner.title
     assert banner.tap_bounds == (0, 2197, 1320, 2592)
+
+
+def test_french_pixel_launcher_anr_closes_app() -> None:
+    page_source = """<hierarchy>
+      <node package="android" text="Lanceur d'applications Pixel ne répond pas." bounds="[85,1300][1235,1400]" />
+      <node package="android" text="Fermer l'application" bounds="[280,1500][780,1600]" />
+      <node package="android" text="Attendre" bounds="[280,1650][560,1750]" />
+    </hierarchy>"""
+
+    action = runner._system_anr_action(page_source)
+
+    assert action is not None
+    assert action[0] == "close_app"
+    assert action[1] == (280, 1500, 780, 1600)
+
+
+@pytest.mark.asyncio
+async def test_rejected_large_landing_screenshot_is_removed(tmp_path, monkeypatch) -> None:
+    page_source = """<hierarchy>
+      <node package="com.android.chrome" text="Traduire la page ?" bounds="[80,200][860,340]" />
+      <node package="com.android.chrome" text="Traduire" bounds="[710,240][850,315]" />
+    </hierarchy>"""
+    driver = _Driver(page_source)
+    screenshot_path = tmp_path / "ad_landing.png"
+
+    async def _no_dialog(*args, **kwargs) -> bool:
+        return False
+
+    def _write_large_screenshot(serial, path) -> bool:
+        path.write_bytes(b"\x89PNG\r\n\x1a\n" + (b"0" * 130_000))
+        return True
+
+    monkeypatch.setattr(runner, "dismiss_browser_permission_prompt_if_present", _no_dialog)
+    monkeypatch.setattr(runner, "dismiss_browser_interstitial_if_present", _no_dialog)
+    monkeypatch.setattr(runner, "accept_landing_cookie_banner_if_present", _no_dialog)
+    monkeypatch.setattr(runner, "read_landing_url", lambda serial, youtube_pkg: "https://example.test")
+    monkeypatch.setattr(runner, "adb_screencap", _write_large_screenshot)
+
+    taken = await runner.capture_settled_landing_screenshot(
+        driver=driver,
+        serial="emulator-5554",
+        path=screenshot_path,
+        youtube_pkg="com.google.android.youtube",
+        timeout=0,
+        min_bytes=120_000,
+    )
+
+    assert taken is False
+    assert not screenshot_path.exists()
