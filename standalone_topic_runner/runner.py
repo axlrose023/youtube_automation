@@ -1964,6 +1964,30 @@ LANDING_ERROR_TEXT_TOKENS = (
     "nie mozna uzyskac dostepu",
     "не удается получить доступ",
     "не вдається отримати доступ",
+    "verify you are human",
+    "checking if the site connection is secure",
+    "checking your browser",
+    "security verification in progress",
+    "this site uses a security service",
+    "human verification",
+    "vérification de sécurité en cours",
+    "verification de securite en cours",
+    "vérifiez que vous êtes humain",
+    "verifiez que vous etes humain",
+    "ce site utilise un service de sécurité",
+    "ce site utilise un service de securite",
+    "verificación de seguridad en curso",
+    "verificacion de seguridad en curso",
+    "verifica que eres humano",
+    "verifique se você é humano",
+    "verifique se voce e humano",
+    "sicherheitsüberprüfung läuft",
+    "sicherheitsueberpruefung laeuft",
+    "überprüfen sie, ob sie ein mensch sind",
+    "ueberpruefen sie, ob sie ein mensch sind",
+    "verifica di essere umano",
+    "weryfikacja bezpieczeństwa",
+    "weryfikacja bezpieczenstwa",
 )
 LANDING_COOKIE_TEXT_TOKENS = (
     "cookie",
@@ -5857,13 +5881,13 @@ async def run_standalone_session(options: StandaloneRunOptions) -> StandaloneRun
         config = config.model_copy(update=config_updates)
     avd_name = options.avd_name or config.default_avd_name
 
-    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = (
         Path(options.run_dir)
         if options.run_dir is not None
-        else Path(__file__).resolve().parent / "results" / f"run_{run_ts}"
+        else Path(__file__).resolve().parent / "results" / f"run_{run_ts}_{os.getpid()}"
     )
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=options.run_dir is not None)
     print(f"[topic-runner] run_dir={run_dir}", flush=True)
 
     emulator_proxy_url, proxy_bridge, proxy_bridge_handle = await _prepare_emulator_proxy(

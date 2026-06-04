@@ -62,6 +62,17 @@ def test_french_pixel_launcher_anr_closes_app() -> None:
     assert action[1] == (280, 1500, 780, 1600)
 
 
+def test_french_cloudflare_landing_is_rejected() -> None:
+    page_source = """<hierarchy>
+      <node package="com.android.chrome" text="financeactus.com" />
+      <node package="com.android.chrome" text="Vérification de sécurité en cours" />
+      <node package="com.android.chrome" text="Ce site utilise un service de sécurité pour se protéger contre les bots malveillants." />
+      <node package="com.android.chrome" text="Vérifiez que vous êtes humain." />
+    </hierarchy>"""
+
+    assert runner._landing_source_has_error(page_source) is True
+
+
 @pytest.mark.asyncio
 async def test_rejected_large_landing_screenshot_is_removed(tmp_path, monkeypatch) -> None:
     page_source = """<hierarchy>
