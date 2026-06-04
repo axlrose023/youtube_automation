@@ -8,6 +8,7 @@ from app.api.modules.emulation.service import (
     EmulationHistoryService,
     EmulationSessionService,
 )
+from app.api.modules.proxies.service import ProxyService
 from app.api.modules.users.service import AuthService, UserService
 from app.api.modules.users.services.jwt import JwtService
 from app.clients.providers import HttpClientsProvider
@@ -81,9 +82,13 @@ class ServicesProvider(Provider):
 
     @provide(scope=Scope.REQUEST)
     async def get_emulation_history_service(
-        self, uow: UnitOfWork
+        self, uow: UnitOfWork, session_store: EmulationSessionStore
     ) -> EmulationHistoryService:
-        return EmulationHistoryService(uow)
+        return EmulationHistoryService(uow, session_store)
+
+    @provide(scope=Scope.REQUEST)
+    async def get_proxy_service(self, uow: UnitOfWork) -> ProxyService:
+        return ProxyService(uow)
 
     @provide(scope=Scope.REQUEST)
     async def get_emulation_session_service(
@@ -175,7 +180,7 @@ if _GEMINI_AVAILABLE:
             return AdAnalysisService(
                 gemini,
                 uow,
-                config.storage.ad_captures_path,
+                config.storage.base_path,
                 storage,
                 video_sampler,
             )

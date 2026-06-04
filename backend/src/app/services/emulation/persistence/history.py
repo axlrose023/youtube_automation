@@ -57,6 +57,9 @@ class HistoryPersistenceService:
             requested_duration_minutes=duration_minutes,
             requested_topics=topics,
             queued_at=to_utc_datetime(live_payload.get("created_at")) or _utcnow(),
+            android_account_id=_uuid_or_none(live_payload.get("android_account_id")),
+            android_google_email=_as_str_or_none(live_payload.get("android_google_email")),
+            android_avd_name=_as_str_or_none(live_payload.get("android_avd_name")),
         )
         await self._uow.emulation_history.update_session(
             session_id,
@@ -80,6 +83,9 @@ class HistoryPersistenceService:
             watched_ads_analytics=ads_analytics,
             total_duration_seconds=final_total_duration,
             error=error,
+            android_account_id=_uuid_or_none(live_payload.get("android_account_id")),
+            android_google_email=_as_str_or_none(live_payload.get("android_google_email")),
+            android_avd_name=_as_str_or_none(live_payload.get("android_avd_name")),
         )
         await self._uow.commit()
 
@@ -164,6 +170,28 @@ def _as_int(value: object) -> int:
     if isinstance(value, (int, float)):
         return int(value)
     return 0
+
+
+def _as_str_or_none(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _uuid_or_none(value: object):
+    if value is None:
+        return None
+    import uuid
+
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            return None
+    return None
 
 
 def _utcnow() -> datetime:

@@ -27,6 +27,13 @@ emulation = [
     "fake-useragent>=2.2.0",
     "google-generativeai>=0.8.0",
 ]
+android = [
+    "Appium-Python-Client>=4.5.0",
+    "google-generativeai>=0.8.0",
+    "pproxy>=2.7.9",
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0.0",
+]
 
 [project.scripts]
 app = "app:main"

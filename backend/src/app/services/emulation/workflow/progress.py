@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from app.api.modules.emulation.models import PostProcessingStatus
 from app.database.engine import SessionFactory
 from app.database.uow import UnitOfWork
 from app.services.emulation.persistence import EmulationPersistenceService
 from app.services.emulation.session.store import EmulationSessionStore
-from app.tiq import ANALYSIS_QUEUE_NAME, broker
+from app.tiq import analysis_dispatch_broker
 
 logger = logging.getLogger(__name__)
+_STALE_ANALYSIS_QUEUE_SECONDS = 60.0
 
 
 async def persist_safely(
@@ -33,8 +35,24 @@ async def queue_ad_analysis(
     total_hint: int | None = None,
 ) -> None:
     live_payload = await session_store.get(session_id) or {}
-    if live_payload.get("post_processing_status") in {PostProcessingStatus.QUEUED, PostProcessingStatus.RUNNING}:
-        return
+    current_status = live_payload.get("post_processing_status")
+    if current_status in {PostProcessingStatus.QUEUED, PostProcessingStatus.RUNNING}:
+        if await session_store.is_analysis_lock_active(session_id):
+            return
+
+        queued_at = live_payload.get("post_processing_enqueued_at")
+        if (
+            current_status == PostProcessingStatus.QUEUED
+            and isinstance(queued_at, int | float)
+            and time.time() - float(queued_at) < _STALE_ANALYSIS_QUEUE_SECONDS
+        ):
+            return
+
+        logger.warning(
+            "Session %s: re-queueing stale ad analysis state status=%s",
+            session_id,
+            current_status,
+        )
 
     if not ad_analysis_service_available:
         logger.warning("Session %s: ad analysis service unavailable", session_id)
@@ -43,6 +61,9 @@ async def queue_ad_analysis(
             post_processing_status=None,
             post_processing_done=0,
             post_processing_total=0,
+            post_processing_enqueued_at=None,
+            post_processing_started_at=None,
+            post_processing_retry_count=0,
         )
         return
 
@@ -63,15 +84,18 @@ async def queue_ad_analysis(
         post_processing_status=PostProcessingStatus.QUEUED,
         post_processing_done=0,
         post_processing_total=analysis_total,
+        post_processing_enqueued_at=time.time(),
+        post_processing_started_at=None,
+        post_processing_retry_count=0,
     )
 
     try:
         from taskiq.kicker import AsyncKicker
 
         await AsyncKicker(
-            broker=broker,
+            broker=analysis_dispatch_broker,
             task_name="ad_analysis_task",
-            labels={"queue_name": ANALYSIS_QUEUE_NAME},
+            labels={},
         ).kiq(session_id)
     except Exception:
         logger.exception("Session %s: failed to queue ad analysis task", session_id)
@@ -80,6 +104,8 @@ async def queue_ad_analysis(
             post_processing_status=PostProcessingStatus.FAILED,
             post_processing_done=0,
             post_processing_total=analysis_total,
+            post_processing_enqueued_at=None,
+            post_processing_started_at=None,
         )
 
 

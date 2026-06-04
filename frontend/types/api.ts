@@ -27,6 +27,10 @@ export interface StartEmulationRequest {
   duration_minutes: number;
   topics: string[];
   profile_id?: string | null;
+  runner?: "desktop" | "android";
+  proxy_id?: string | null;
+  android_account_id?: string | null;
+  headless?: boolean | null;
 }
 
 export interface StartEmulationResponse {
@@ -68,7 +72,7 @@ export interface EmulationAdCapture {
   video_status: string;
   analysis_status?: string | null;
   analysis_summary?: Record<string, unknown> | null;
-  screenshot_paths: Array<{ offset_ms: number; file_path: string }>;
+  screenshot_paths: Array<{ offset_ms: number; file_path: string; kind?: string | null }>;
 }
 
 export interface EmulationLiveAdCapture {
@@ -80,13 +84,15 @@ export interface EmulationLiveAdCapture {
   landing_dir?: string | null;
   analysis_status?: string | null;
   analysis_summary?: Record<string, unknown> | null;
-  screenshot_paths: Array<{ offset_ms: number; file_path: string }>;
+  screenshot_paths: Array<{ offset_ms: number; file_path: string; kind?: string | null }>;
 }
 
 export interface EmulationWatchedVideo {
   position: number;
   action: string;
   title: string;
+  video_title?: string | null;
+  channel_name?: string | null;
   url: string;
   watched_seconds: number;
   target_seconds: number;
@@ -95,6 +101,15 @@ export interface EmulationWatchedVideo {
   search_keyword?: string | null;
   matched_topics: string[];
   keywords: string[];
+  like_planned?: boolean;
+  liked?: boolean;
+  liked_video_title?: string | null;
+  liked_at?: string | null;
+  subscribe_planned?: boolean;
+  subscribed?: boolean;
+  subscribed_channel_name?: string | null;
+  subscribed_at?: string | null;
+  social_actions?: string[];
   recorded_at: number;
 }
 
@@ -156,6 +171,10 @@ export interface EmulationHistoryItem {
   watched_ads?: EmulationWatchedAd[] | null;
   watched_ads_analytics?: EmulationAnalyticsAd[] | null;
   error?: string | null;
+  proxy_country_code?: string | null;
+  android_account_id?: string | null;
+  android_google_email?: string | null;
+  android_avd_name?: string | null;
   captures: CaptureSummary;
   ad_captures?: EmulationAdCapture[] | null;
 }
@@ -168,6 +187,9 @@ export interface EmulationSessionStatus {
   post_processing_status?: string | null;
   post_processing_progress?: PostProcessingProgress | null;
   profile_id?: string | null;
+  android_account_id?: string | null;
+  android_google_email?: string | null;
+  android_avd_name?: string | null;
   elapsed_minutes?: number | null;
   orchestration_enabled: boolean;
   orchestration_phase?: string | null;
@@ -204,9 +226,69 @@ export interface EmulationStatusBatchResponse {
   statuses: Record<string, EmulationSessionStatus>;
 }
 
+export interface AndroidAccountProfile {
+  id: string;
+  label: string;
+  google_email: string;
+  avd_name: string;
+  snapshot_name?: string | null;
+  appium_port?: number | null;
+  uiautomator2_system_port?: number | null;
+  mjpeg_server_port?: number | null;
+  emulator_port?: number | null;
+  emulator_memory_mb?: number | null;
+  status: string;
+  is_active: boolean;
+  notes?: string | null;
+  last_used_at?: string | null;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AndroidAccountProfileListResponse {
+  items: AndroidAccountProfile[];
+  total: number;
+}
+
 export interface DashboardSummaryItem {
   label: string;
   value: number;
+}
+
+export interface Proxy {
+  id: string;
+  label: string;
+  scheme: string;
+  host: string;
+  port: number;
+  username?: string | null;
+  password?: string | null;
+  country_code?: string | null;
+  city?: string | null;
+  notes?: string | null;
+  is_active: boolean;
+  url: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProxyListResponse {
+  items: Proxy[];
+  total: number;
+}
+
+export interface ProxyCreate {
+  label: string;
+  scheme?: string;
+  host: string;
+  port: number;
+  username?: string | null;
+  password?: string | null;
+  country_code?: string | null;
+  city?: string | null;
+  notes?: string | null;
+  is_active?: boolean;
 }
 
 export interface EmulationDashboardSummary {

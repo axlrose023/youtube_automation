@@ -13,6 +13,7 @@ from ..models import EmulationSessionHistory, PostProcessingStatus, SessionStatu
 from ..schema import EmulationSessionStatus
 from ..utils import (
     calculate_session_elapsed_minutes,
+    normalize_media_reference,
     normalized_ads_count,
     normalized_videos_count,
     normalize_screenshot_paths,
@@ -40,6 +41,8 @@ def _normalize_live_ad_capture(value: object) -> dict[str, object] | None:
         return None
 
     normalized = dict(value)
+    normalized["video_file"] = normalize_media_reference(value.get("video_file"))
+    normalized["landing_dir"] = normalize_media_reference(value.get("landing_dir"))
     normalized["screenshot_paths"] = normalize_screenshot_paths(
         value.get("screenshot_paths"),
     )
@@ -103,6 +106,17 @@ def build_status_response(
         ),
         post_processing_progress=progress,
         profile_id=normalize_profile_id(data.get("profile_id")),
+        android_account_id=data.get("android_account_id"),
+        android_google_email=(
+            str(data["android_google_email"])
+            if isinstance(data.get("android_google_email"), str)
+            else None
+        ),
+        android_avd_name=(
+            str(data["android_avd_name"])
+            if isinstance(data.get("android_avd_name"), str)
+            else None
+        ),
         elapsed_minutes=calculate_session_elapsed_minutes(data),
         orchestration_enabled=bool(orchestration.get("enabled")),
         orchestration_phase=(

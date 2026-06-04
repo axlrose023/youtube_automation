@@ -4,17 +4,35 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.common.schema import Pagination, PaginationParams
+
 from .models import PostProcessingStatus, SessionStatus
 
 
 class StartEmulationRequest(BaseModel):
-    duration_minutes: int = Field(ge=1, le=480, description="Session duration in minutes")
+    duration_minutes: int = Field(ge=1, le=1440, description="Session duration in minutes")
     topics: list[str] = Field(min_length=1, max_length=20, description="Search topics")
     profile_id: str | None = Field(
         default=None,
         min_length=1,
         max_length=128,
-        description="AdsPower profile id for this emulation session",
+        description="AdsPower profile id (desktop runner only)",
+    )
+    runner: str = Field(
+        default="android",
+        pattern=r"^(desktop|android)$",
+        description="Runner backend. Desktop is deprecated and currently mapped to android.",
+    )
+    proxy_id: UUID | None = Field(
+        default=None,
+        description="Optional proxy id from /proxies table for android runner",
+    )
+    android_account_id: UUID | None = Field(
+        default=None,
+        description="Optional Android Google account profile id. Resolves to a fixed AVD.",
+    )
+    headless: bool = Field(
+        default=False,
+        description="Run android emulator without a visible window",
     )
 
 
@@ -32,18 +50,29 @@ class EmulationStatusBatchRequest(BaseModel):
 
 
 class EmulationWatchedVideo(BaseModel):
-    position: int
-    action: str
-    title: str
-    url: str
-    watched_seconds: float
-    target_seconds: float
+    position: int = 0
+    action: str = "watch"
+    title: str = ""
+    video_title: str | None = None
+    channel_name: str | None = None
+    url: str = ""
+    watched_seconds: float = 0
+    target_seconds: float = 0
     watch_ratio: float | None = None
-    completed: bool
+    completed: bool = False
     search_keyword: str | None = None
     matched_topics: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
-    recorded_at: float
+    like_planned: bool = False
+    liked: bool = False
+    liked_video_title: str | None = None
+    liked_at: str | None = None
+    subscribe_planned: bool = False
+    subscribed: bool = False
+    subscribed_channel_name: str | None = None
+    subscribed_at: str | None = None
+    social_actions: list[str] = Field(default_factory=list)
+    recorded_at: float = 0
 
 
 class EmulationAdTextSample(BaseModel):
@@ -56,12 +85,14 @@ class EmulationAdTextSample(BaseModel):
 class EmulationAdCaptureScreenshotPath(BaseModel):
     offset_ms: int
     file_path: str
+    kind: str | None = None
 
 
 class EmulationLiveAdCapture(BaseModel):
     video_src_url: str | None = None
     video_status: str | None = None
     video_file: str | None = None
+    recorded_video_duration_seconds: float | None = None
     landing_url: str | None = None
     landing_status: str | None = None
     landing_dir: str | None = None
@@ -71,13 +102,13 @@ class EmulationLiveAdCapture(BaseModel):
 
 
 class EmulationWatchedAd(BaseModel):
-    position: int
-    started_at: float
-    ended_at: float
-    watched_seconds: float
-    completed: bool
-    skip_clicked: bool
-    skip_visible: bool
+    position: int = 0
+    started_at: float = 0
+    ended_at: float = 0
+    watched_seconds: float = 0
+    completed: bool = False
+    skip_clicked: bool = False
+    skip_visible: bool = False
     skip_text: str | None = None
     cta_text: str | None = None
     cta_candidates: list[str] = Field(default_factory=list)
@@ -103,7 +134,7 @@ class EmulationWatchedAd(BaseModel):
     text_samples: list[EmulationAdTextSample] = Field(default_factory=list)
     end_reason: str | None = None
     capture: EmulationLiveAdCapture | None = None
-    recorded_at: float
+    recorded_at: float = 0
 
 
 class EmulationAnalyticsAd(BaseModel):
@@ -152,6 +183,9 @@ class EmulationSessionStatus(BaseModel):
     post_processing_status: PostProcessingStatus | None = None
     post_processing_progress: EmulationPostProcessingProgress | None = None
     profile_id: str | None = None
+    android_account_id: UUID | None = None
+    android_google_email: str | None = None
+    android_avd_name: str | None = None
     requested_topics: list[str] = Field(default_factory=list)
     elapsed_minutes: float | None = None
     orchestration_enabled: bool = False
@@ -221,6 +255,10 @@ class EmulationHistoryItem(BaseModel):
     watched_ads: list[EmulationWatchedAd] | None = None
     watched_ads_analytics: list[EmulationAnalyticsAd] | None = None
     error: str | None = None
+    proxy_country_code: str | None = None
+    android_account_id: UUID | None = None
+    android_google_email: str | None = None
+    android_avd_name: str | None = None
     captures: EmulationCaptureSummary = Field(default_factory=EmulationCaptureSummary)
     ad_captures: list[EmulationAdCaptureHistory] | None = None
 
@@ -271,6 +309,58 @@ class EmulationCapturesResponse(BaseModel):
     session_id: UUID
     total: int
     captures: list[EmulationAdCaptureHistory] = Field(default_factory=list)
+
+
+class AndroidAccountProfileBase(BaseModel):
+    label: str = Field(min_length=1, max_length=128)
+    google_email: str = Field(min_length=3, max_length=255)
+    avd_name: str = Field(min_length=1, max_length=128)
+    snapshot_name: str | None = Field(default=None, max_length=128)
+    appium_port: int | None = Field(default=None, ge=1, le=65535)
+    uiautomator2_system_port: int | None = Field(default=None, ge=1, le=65535)
+    mjpeg_server_port: int | None = Field(default=None, ge=1, le=65535)
+    emulator_port: int | None = Field(default=None, ge=5554, le=5682)
+    emulator_memory_mb: int | None = Field(default=None, ge=1024, le=8192)
+    status: str = Field(default="ready", pattern=r"^(ready|disabled|broken|configuring)$")
+    is_active: bool = True
+    notes: str | None = None
+
+
+class AndroidAccountProfileCreate(AndroidAccountProfileBase):
+    pass
+
+
+class AndroidAccountProfileUpdate(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=128)
+    google_email: str | None = Field(default=None, min_length=3, max_length=255)
+    avd_name: str | None = Field(default=None, min_length=1, max_length=128)
+    snapshot_name: str | None = Field(default=None, max_length=128)
+    appium_port: int | None = Field(default=None, ge=1, le=65535)
+    uiautomator2_system_port: int | None = Field(default=None, ge=1, le=65535)
+    mjpeg_server_port: int | None = Field(default=None, ge=1, le=65535)
+    emulator_port: int | None = Field(default=None, ge=5554, le=5682)
+    emulator_memory_mb: int | None = Field(default=None, ge=1024, le=8192)
+    status: str | None = Field(
+        default=None,
+        pattern=r"^(ready|disabled|broken|configuring)$",
+    )
+    is_active: bool | None = None
+    notes: str | None = None
+
+
+class AndroidAccountProfileRead(AndroidAccountProfileBase):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    last_used_at: datetime.datetime | None = None
+    last_error: str | None = None
+    created_at: datetime.datetime
+    updated_at: datetime.datetime
+
+
+class AndroidAccountProfileListResponse(BaseModel):
+    items: list[AndroidAccountProfileRead]
+    total: int
 
 
 class EmulationHistoryParams(PaginationParams):
